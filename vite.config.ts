@@ -148,15 +148,14 @@ function agentctlControlPlane(): Plugin {
         if (request.method === "POST" && url.pathname === "/api/agentctl/sessions") {
           const body = await readJson(request);
           const title = typeof body.title === "string" ? body.title.trim() : "";
-          const instruction = typeof body.instruction === "string" ? body.instruction.trim() : "";
-          if (title.length === 0 || instruction.length === 0) {
-            sendJson(response, 400, { ok: false, error: "title and instruction are required" });
+          if (title.length === 0) {
+            sendJson(response, 400, { ok: false, error: "title is required" });
             return;
           }
           const sessions = await agentctlSessions(true);
           const id = sessionId(title, new Set(sessions.map((session) => session.id)));
           const result = await runAgentctl([
-            "new", id, "--title", title, "--prompt", instruction, "--no-enter",
+            "new", id, "--title", title, "--no-enter",
           ]);
           sessionCache = null;
           sendJson(response, result.ok ? 201 : 400, result);

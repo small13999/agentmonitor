@@ -39,10 +39,10 @@ export async function listManagedSessions() {
   return data.sessions;
 }
 
-export function createManagedSession(title: string, instruction: string) {
+export function createManagedSession(title: string) {
   return request<ManagedSession>("/api/agentctl/sessions", {
     method: "POST",
-    body: JSON.stringify({ title, instruction }),
+    body: JSON.stringify({ title }),
   });
 }
 

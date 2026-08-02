@@ -20,7 +20,6 @@ function errorMessage(error: unknown) {
 
 export function ManagedSessions({ sessions, onChanged, onClose, onOpen }: ManagedSessionsProps) {
   const [title, setTitle] = useState("");
-  const [instruction, setInstruction] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [forceId, setForceId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -31,15 +30,13 @@ export function ManagedSessions({ sessions, onChanged, onClose, onOpen }: Manage
 
   const create = async () => {
     const nextTitle = title.trim();
-    const nextInstruction = instruction.trim();
-    if (nextTitle.length === 0 || nextInstruction.length === 0) return;
+    if (nextTitle.length === 0) return;
     setBusyId("new");
     setError(null);
     try {
-      const session = await createManagedSession(nextTitle, nextInstruction);
+      const session = await createManagedSession(nextTitle);
       await onChanged();
       setTitle("");
-      setInstruction("");
       onOpen(session.id);
       onClose();
     } catch (cause) {
@@ -107,16 +104,7 @@ export function ManagedSessions({ sessions, onChanged, onClose, onOpen }: Manage
                 value={title}
               />
             </label>
-            <label>
-              Instruction
-              <textarea
-                onChange={(event) => setInstruction(event.target.value)}
-                placeholder="Investigate the reconnect issue, implement the fix, verify it, then open a PR."
-                rows={7}
-                value={instruction}
-              />
-            </label>
-            <button disabled={busyId !== null || title.trim() === "" || instruction.trim() === ""} type="submit">
+            <button disabled={busyId !== null || title.trim() === ""} type="submit">
               {busyId === "new" ? "Starting…" : "Start agent"}
             </button>
           </form>

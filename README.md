@@ -32,12 +32,12 @@ Normal workspace agents should only see their own container's cmux session. Elev
 The local implementation now provides:
 
 - Dynamic discovery of durable DraftCoach `agentctl` sessions.
-- A session manager that creates a titled session from an instruction, resumes
-  paused sessions, and keeps paused sessions out of the terminal dashboard.
+- A session manager that creates titled sessions, resumes paused sessions, and
+  keeps paused sessions out of the terminal dashboard.
 - A guarded pause action. `agentctl` refuses an ordinary pause while cmux
   reports a working agent; force-pause is a separate explicit action.
-- One private headless cmux daemon and one automatically launched OMP terminal
-  per running agentctl container.
+- One private headless cmux daemon and one interactive Bash terminal that starts
+  OMP automatically per running agentctl container.
 - Durable worktrees, branches, OMP history, cmux layouts, service-port
   assignments, and monitor credentials across pause/resume and host reboots.
 - A monitor view, all-terminal workspace view, and focused interactive terminal
