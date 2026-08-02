@@ -85,6 +85,15 @@ Agent Monitor consumes cmux's resource tree and attach streams rather than inven
 
 Changing monitor/workspace views hides terminal cards instead of disconnecting their cmux clients. This preserves terminal state and scrollback and avoids reconnect storms. Hidden terminals do not participate in browser-driven PTY sizing.
 
+### Presentation and focus modes
+
+Clicking a terminal opens presentation mode for quick interaction; unmodified
+Escape closes that view. `Alt+Shift+Enter` toggles focus mode, where overlapping
+terminal and OMP shortcuts—including Escape—pass through without changing the
+Agent Monitor view. The terminal header shows the active mode and provides
+explicit mode and close controls. Each visible workspace terminal also keeps
+the session's Port 1 and Port 2 links available.
+
 ### The browser owns terminal sizing
 
 The active browser calls cmux's exclusive client-sizing operation after reporting dimensions. Initial `vt-state` data initializes xterm and normal `output` events update it. Subsequent cmux `resized` snapshots are intentionally not replayed into xterm: they acknowledge a size this exclusive client already applied, and resetting from that replay causes a visible blank frame.

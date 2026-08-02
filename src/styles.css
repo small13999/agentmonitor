@@ -548,6 +548,15 @@ button:disabled {
   box-shadow: 0 28px 90px rgba(0, 0, 0, 0.7);
 }
 
+.terminal-card--focus-mode {
+  border-color: #4e78b4;
+  box-shadow: 0 0 0 1px rgba(78, 120, 180, 0.4), 0 28px 90px rgba(0, 0, 0, 0.7);
+}
+
+.terminal-card--focus-mode .terminal-card__header {
+  background: #121c2a;
+}
+
 .terminal-card:focus-within {
   border-color: #4e78b4;
   box-shadow: 0 0 0 1px rgba(78, 120, 180, 0.35), 0 16px 42px rgba(0, 0, 0, 0.24);
@@ -604,6 +613,25 @@ button:disabled {
 .terminal-card__hint {
   color: #778293;
   font-size: 10px;
+}
+
+.terminal-mode {
+  flex: none;
+  padding: 4px 7px;
+  border: 1px solid #4d5664;
+  border-radius: 999px;
+  color: #aab4c2;
+  background: #202630;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.terminal-mode--focus {
+  border-color: #4e78b4;
+  color: #b9d5ff;
+  background: #1b3150;
 }
 
 .terminal-status {

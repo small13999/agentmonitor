@@ -194,10 +194,17 @@ function ServiceLinks({ sessionId, compact = false }: { sessionId: string; compa
   );
 }
 
+type TerminalInputMode = "presentation" | "focus";
+
+interface FocusedTerminal {
+  key: string;
+  mode: TerminalInputMode;
+}
+
 interface TerminalCardProps {
   client: CmuxClient | null;
   clientId: TerminalView["surface"] | null;
-  focused: boolean;
+  focusedMode: TerminalInputMode | null;
   terminal: TerminalView;
   title: string;
   sizingVisible: boolean;
@@ -206,13 +213,14 @@ interface TerminalCardProps {
   serviceSessionId?: string;
   hidden?: boolean;
   onClose(): void;
-  onFocus(): void;
+  onFocus(mode: TerminalInputMode): void;
+  onToggleMode(): void;
 }
 
 function TerminalCard({
   client,
   clientId,
-  focused,
+  focusedMode,
   terminal,
   title,
   sizingVisible,
@@ -222,18 +230,32 @@ function TerminalCard({
   hidden = false,
   onClose,
   onFocus,
+  onToggleMode,
 }: TerminalCardProps) {
   const [status, setStatus] = useState("connecting");
   const [error, setError] = useState<string | null>(null);
+  const focused = focusedMode !== null;
 
   return (
     <article
-      className={`terminal-card${hidden ? " terminal-card--hidden" : ""}${focused ? " terminal-card--focused" : ""}`}
+      className={`terminal-card${hidden ? " terminal-card--hidden" : ""}${focused ? " terminal-card--focused" : ""}${focusedMode === "focus" ? " terminal-card--focus-mode" : ""}`}
       onClick={() => {
-        if (!focused) onFocus();
+        if (!focused) onFocus("presentation");
       }}
       onKeyDown={(event) => {
-        if (!focused && (event.key === "Enter" || event.key === " ")) onFocus();
+        const toggleFocus = event.altKey
+          && event.shiftKey
+          && !event.ctrlKey
+          && !event.metaKey
+          && event.key === "Enter";
+        if (toggleFocus) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (focused) onToggleMode();
+          else onFocus("focus");
+          return;
+        }
+        if (!focused && (event.key === "Enter" || event.key === " ")) onFocus("presentation");
       }}
       tabIndex={0}
     >
@@ -254,11 +276,27 @@ function TerminalCard({
             </button>
           )}
           {focused ? (
-            <button onClick={(event) => { event.stopPropagation(); onClose(); }} type="button">Close terminal</button>
+            <>
+              <span
+                className={`terminal-mode terminal-mode--${focusedMode}`}
+                title={focusedMode === "focus" ? "Terminal keys pass through" : "Escape closes this view"}
+              >
+                {focusedMode === "focus" ? "Focus mode" : "Presentation"}
+              </span>
+              <button
+                className="secondary"
+                onClick={(event) => { event.stopPropagation(); onToggleMode(); }}
+                title="Alt+Shift+Enter"
+                type="button"
+              >
+                {focusedMode === "focus" ? "Presentation mode" : "Focus mode"}
+              </button>
+              <button onClick={(event) => { event.stopPropagation(); onClose(); }} type="button">Close</button>
+            </>
           ) : action ? (
             <button onClick={(event) => { event.stopPropagation(); action.run(); }} type="button">{action.label}</button>
           ) : (
-            <span className="terminal-card__hint">Click to expand</span>
+            <span className="terminal-card__hint">Click to open</span>
           )}
           <span className={`terminal-status terminal-status--${status}`}>{status}</span>
         </div>
@@ -283,22 +321,24 @@ type SessionRuntimeMode = "monitor" | "workspace" | "hidden";
 interface SessionRuntimeProps {
   session: SessionProfile;
   mode: SessionRuntimeMode;
-  focusedTerminalKey: string | null;
+  focusedTerminal: FocusedTerminal | null;
   onBack(): void;
-  onFocusTerminal(key: string): void;
+  onFocusTerminal(key: string, mode: TerminalInputMode): void;
   onOpen(): void;
   onCloseTerminal(): void;
+  onToggleTerminalMode(): void;
   onPause?(): void;
 }
 
 function SessionRuntime({
   session,
   mode,
-  focusedTerminalKey,
+  focusedTerminal,
   onBack,
   onFocusTerminal,
   onOpen,
   onCloseTerminal,
+  onToggleTerminalMode,
   onPause,
 }: SessionRuntimeProps) {
   const connection = useSessionConnection(session);
@@ -366,18 +406,19 @@ function SessionRuntime({
           <TerminalCard
             client={connection.client}
             clientId={connection.clientId}
-            focused={focusedTerminalKey === terminalKey}
+            focusedMode={focusedTerminal?.key === terminalKey ? focusedTerminal.mode : null}
             action={mode === "monitor" && isMain
               ? { label: `Open workspace · ${view.terminals.length} terminal${view.terminals.length === 1 ? "" : "s"}`, run: onOpen }
               : undefined}
             secondaryAction={mode === "monitor" && isMain && onPause
               ? { label: "Pause", run: onPause }
               : undefined}
-            sizingVisible={visible && (focusedTerminalKey === null || focusedTerminalKey === terminalKey)}
+            sizingVisible={visible && (focusedTerminal === null || focusedTerminal.key === terminalKey)}
             hidden={!visible}
-            serviceSessionId={mode === "monitor" && isMain ? session.id : undefined}
+            serviceSessionId={visible ? session.id : undefined}
             onClose={onCloseTerminal}
-            onFocus={() => onFocusTerminal(terminalKey)}
+            onFocus={(inputMode) => onFocusTerminal(terminalKey, inputMode)}
+            onToggleMode={onToggleTerminalMode}
             terminal={terminal}
             title={mode === "monitor"
               ? session.name
@@ -399,7 +440,7 @@ export default function App() {
   const [sessionManagerOpen, setSessionManagerOpen] = useState(false);
   const [managedError, setManagedError] = useState<string | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
-  const [focusedTerminalKey, setFocusedTerminalKey] = useState<string | null>(null);
+  const [focusedTerminal, setFocusedTerminal] = useState<FocusedTerminal | null>(null);
 
   const refreshManagedSessions = useCallback(async () => {
     const sessions = await listManagedSessions();
@@ -414,13 +455,44 @@ export default function App() {
   }, [refreshManagedSessions]);
 
   useEffect(() => {
-    if (focusedTerminalKey === null) return;
-    const closeFocusedTerminal = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setFocusedTerminalKey(null);
+    if (focusedTerminal === null) return;
+    const handleFocusedTerminalKey = (event: KeyboardEvent) => {
+      const toggleFocus = event.altKey
+        && event.shiftKey
+        && !event.ctrlKey
+        && !event.metaKey
+        && event.key === "Enter";
+      if (toggleFocus) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!event.repeat) {
+          setFocusedTerminal((current) => current === null
+            ? null
+            : { ...current, mode: current.mode === "focus" ? "presentation" : "focus" });
+        }
+        return;
+      }
+      const closePresentation = focusedTerminal.mode === "presentation"
+        && !event.altKey
+        && !event.ctrlKey
+        && !event.metaKey
+        && !event.shiftKey
+        && event.key === "Escape";
+      if (closePresentation) {
+        event.preventDefault();
+        event.stopPropagation();
+        setFocusedTerminal(null);
+      }
     };
-    window.addEventListener("keydown", closeFocusedTerminal, true);
-    return () => window.removeEventListener("keydown", closeFocusedTerminal, true);
-  }, [focusedTerminalKey]);
+    window.addEventListener("keydown", handleFocusedTerminalKey, true);
+    return () => window.removeEventListener("keydown", handleFocusedTerminalKey, true);
+  }, [focusedTerminal]);
+
+  const toggleFocusedTerminalMode = useCallback(() => {
+    setFocusedTerminal((current) => current === null
+      ? null
+      : { ...current, mode: current.mode === "focus" ? "presentation" : "focus" });
+  }, []);
 
   const displayMachines = useMemo(() => machines.map((machine) => machine.id === "local-agentctl"
     ? {
@@ -440,7 +512,7 @@ export default function App() {
   useEffect(() => {
     if (activeSessionId !== null && activeSession === null) {
       setActiveSessionId(null);
-      setFocusedTerminalKey(null);
+      setFocusedTerminal(null);
     }
   }, [activeSession, activeSessionId]);
 
@@ -449,19 +521,19 @@ export default function App() {
     saveMachines(nextMachines);
     setActiveMachineId(nextActiveId);
     setActiveSessionId(null);
-    setFocusedTerminalKey(null);
+    setFocusedTerminal(null);
   };
 
   const selectMachine = (id: string) => {
     setActiveMachineId(id);
     setActiveSessionId(null);
-    setFocusedTerminalKey(null);
+    setFocusedTerminal(null);
     setMachineManagerOpen(false);
   };
 
   const openManagedSession = (id: string) => {
     setActiveMachineId("local-agentctl");
-    setFocusedTerminalKey(null);
+    setFocusedTerminal(null);
     setActiveSessionId(id);
   };
 
@@ -519,11 +591,11 @@ export default function App() {
         </>
       )}
 
-      {focusedTerminalKey !== null && (
+      {focusedTerminal !== null && (
         <button
-          aria-label="Close focused terminal"
+          aria-label="Close terminal presentation"
           className="terminal-focus-backdrop"
-          onClick={() => setFocusedTerminalKey(null)}
+          onClick={() => setFocusedTerminal(null)}
           type="button"
         />
       )}
@@ -544,15 +616,16 @@ export default function App() {
             <SessionRuntime
               key={session.id}
               mode={activeSessionId === null ? "monitor" : activeSessionId === session.id ? "workspace" : "hidden"}
-              focusedTerminalKey={focusedTerminalKey}
+              focusedTerminal={focusedTerminal}
               onBack={() => {
-                setFocusedTerminalKey(null);
+                setFocusedTerminal(null);
                 setActiveSessionId(null);
               }}
-              onCloseTerminal={() => setFocusedTerminalKey(null)}
-              onFocusTerminal={setFocusedTerminalKey}
+              onCloseTerminal={() => setFocusedTerminal(null)}
+              onFocusTerminal={(key, inputMode) => setFocusedTerminal({ key, mode: inputMode })}
+              onToggleTerminalMode={toggleFocusedTerminalMode}
               onOpen={() => {
-                setFocusedTerminalKey(null);
+                setFocusedTerminal(null);
                 setActiveSessionId(session.id);
               }}
               onPause={isLocalAgentctl ? () => void pauseFromDashboard(session.id) : undefined}
