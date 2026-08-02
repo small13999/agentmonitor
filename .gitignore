@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.tsbuildinfo
+prototype/state/
+prototype/workspace/
+prototype/runtime/
+prototype/sessions/

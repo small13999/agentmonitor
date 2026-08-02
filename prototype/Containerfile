@@ -1,0 +1,21 @@
+FROM docker.io/library/node:22-bookworm-slim
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes ca-certificates git openssh-client \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install --global cmux@0.9.9 \
+    && mkdir -p /state /workspace \
+    && chown -R node:node /state /workspace
+
+COPY --chown=node:node start-cmux.sh /usr/local/bin/start-cmux
+COPY --chown=node:node service-relay.mjs /usr/local/bin/service-relay.mjs
+COPY --chown=node:node omp-main.sh /usr/local/bin/omp-main
+COPY --chown=node:node runtime/omp /usr/local/bin/omp
+RUN chmod 0755 /usr/local/bin/start-cmux /usr/local/bin/omp /usr/local/bin/omp-main
+
+USER node
+WORKDIR /workspace
+ENV HOME=/home/node
+EXPOSE 7681 3000 3001
+
+ENTRYPOINT ["/usr/local/bin/start-cmux"]
