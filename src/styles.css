@@ -361,13 +361,16 @@ button:disabled {
 }
 
 .managed-session-manager {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   width: min(1040px, 100%);
+  height: min(780px, calc(100vh - 40px));
 }
 
 .managed-session-manager__body {
   display: grid;
   grid-template-columns: minmax(320px, 0.8fr) minmax(420px, 1.2fr);
-  min-height: 480px;
+  min-height: 0;
   overflow: hidden;
 }
 
