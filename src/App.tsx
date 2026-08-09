@@ -1,9 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { CmuxClient } from "cmux/browser";
-import { listManagedSessions, managedSessionProfile, pauseManagedSession } from "./agentctl";
-import type { ManagedSession } from "./agentctl";
+import {
+  getSystemResources,
+  listManagedSessions,
+  managedSessionProfile,
+  pauseManagedSession,
+  type ManagedSession,
+  type SystemResources,
+} from "./agentctl";
 import { LiveTerminal } from "./LiveTerminal";
 import { ManagedSessions } from "./ManagedSessions";
+import { ResourceStatus } from "./ResourceStatus";
 import {
   DEFAULT_MACHINE,
   SERVICE_SLOTS,
@@ -439,6 +446,8 @@ export default function App() {
   const [machineManagerOpen, setMachineManagerOpen] = useState(false);
   const [sessionManagerOpen, setSessionManagerOpen] = useState(false);
   const [managedError, setManagedError] = useState<string | null>(null);
+  const [resources, setResources] = useState<SystemResources | null>(null);
+  const [resourceError, setResourceError] = useState<string | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [focusedTerminal, setFocusedTerminal] = useState<FocusedTerminal | null>(null);
 
@@ -453,6 +462,29 @@ export default function App() {
       setManagedError(cause instanceof Error ? cause.message : String(cause));
     });
   }, [refreshManagedSessions]);
+
+  useEffect(() => {
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const refreshResources = async () => {
+      try {
+        const next = await getSystemResources();
+        if (!disposed) {
+          setResources(next);
+          setResourceError(null);
+        }
+      } catch (cause) {
+        if (!disposed) setResourceError(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        if (!disposed) timer = setTimeout(() => void refreshResources(), 5_000);
+      }
+    };
+    void refreshResources();
+    return () => {
+      disposed = true;
+      if (timer !== undefined) clearTimeout(timer);
+    };
+  }, []);
 
   useEffect(() => {
     if (focusedTerminal === null) return;
@@ -591,6 +623,10 @@ export default function App() {
         </>
       )}
 
+      {isLocalAgentctl && (
+        <ResourceStatus error={resourceError} resources={resources} sessions={managedSessions} />
+      )}
+
       {focusedTerminal !== null && (
         <button
           aria-label="Close terminal presentation"
@@ -647,6 +683,7 @@ export default function App() {
       {sessionManagerOpen && (
         <ManagedSessions
           sessions={managedSessions}
+          resources={resources}
           onChanged={refreshManagedSessions}
           onClose={() => setSessionManagerOpen(false)}
           onOpen={openManagedSession}

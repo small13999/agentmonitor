@@ -40,6 +40,10 @@ The local implementation now provides:
   OMP automatically per running agentctl container.
 - Durable worktrees, branches, OMP history, cmux layouts, service-port
   assignments, and monitor credentials across pause/resume and host reboots.
+- A 3 GiB memory ceiling with container swap disabled for every ordinary
+  workspace, configurable through host `AGENTCTL_MEMORY_LIMIT_MIB`.
+- Live WSL memory, swap, and per-session memory visibility, with warning and
+  critical pressure states in the browser.
 - A monitor view, all-terminal workspace view, and focused interactive terminal
   view.
 - Exactly two hosted-service links per workspace:
@@ -93,6 +97,15 @@ terminal and OMP shortcuts—including Escape—pass through without changing th
 Agent Monitor view. The terminal header shows the active mode and provides
 explicit mode and close controls. Each visible workspace terminal also keeps
 the session's Port 1 and Port 2 links available.
+
+### Resource containment and pressure visibility
+
+`agentctl` applies the same configured memory value to the container's memory
+and total memory-plus-swap ceilings, leaving no container swap allowance.
+Agent Monitor samples WSL `/proc/meminfo` and rootless Podman stats every five
+seconds. Host memory warns at 80% and becomes critical at 90%; swap warns at 50%
+and becomes critical at 80%; an individual session warns at 80% of its limit
+and becomes critical at 90%.
 
 ### The browser owns terminal sizing
 

@@ -8,6 +8,28 @@ export interface ManagedSession {
   cmux_token: string;
   web_url: string;
   app_url: string;
+  memory_limit_bytes: number;
+  compose_project: string;
+}
+
+export interface SessionResources {
+  id: string;
+  runtimeState: string;
+  memoryUsageBytes: number | null;
+  memoryLimitBytes: number;
+}
+
+export interface SystemResources {
+  collectedAtEpochMs: number;
+  host: {
+    memoryTotalBytes: number;
+    memoryAvailableBytes: number;
+    memoryUsedBytes: number;
+    swapTotalBytes: number;
+    swapUsedBytes: number;
+  };
+  sessions: SessionResources[];
+  collectionError?: string;
 }
 
 interface AgentctlEnvelope<T> {
@@ -37,6 +59,10 @@ async function request<T>(path: string, init?: RequestInit) {
 export async function listManagedSessions() {
   const data = await request<{ sessions: ManagedSession[] }>("/api/agentctl/sessions");
   return data.sessions;
+}
+
+export function getSystemResources() {
+  return request<SystemResources>("/api/system/resources");
 }
 
 export function createManagedSession(title: string) {

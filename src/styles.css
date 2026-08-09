@@ -469,6 +469,138 @@ button:disabled {
   color: #dce2eb;
 }
 
+.managed-session-memory {
+  color: #778393;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 10px;
+}
+
+.managed-session-memory--running {
+  color: #9eabbc;
+}
+
+.resource-panel {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 12px;
+  border: 1px solid #29313d;
+  border-radius: 9px;
+  background: rgba(10, 14, 20, 0.92);
+}
+
+.resource-panel--warning {
+  border-color: rgba(224, 167, 69, 0.62);
+  background: rgba(68, 48, 13, 0.28);
+}
+
+.resource-panel--critical {
+  border-color: rgba(240, 100, 100, 0.68);
+  background: rgba(91, 24, 29, 0.32);
+}
+
+.resource-panel--loading {
+  grid-template-columns: auto 1fr;
+  color: #7f8998;
+}
+
+.resource-panel > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.resource-panel > header > span {
+  color: #6f7a8a;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 10px;
+}
+
+.resource-panel__host {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.resource-meter {
+  display: grid;
+  gap: 7px;
+}
+
+.resource-meter > div:first-child {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: #8995a5;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+}
+
+.resource-meter > div:first-child strong {
+  color: #cbd3df;
+}
+
+.resource-meter__track {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #222a35;
+}
+
+.resource-meter__track > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #5b91dc;
+}
+
+.resource-meter--warning .resource-meter__track > span {
+  background: #dfa745;
+}
+
+.resource-meter--critical .resource-meter__track > span {
+  background: #ed666d;
+}
+
+.resource-panel__sessions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.session-memory {
+  display: inline-flex;
+  gap: 7px;
+  padding: 5px 8px;
+  border: 1px solid #28313d;
+  border-radius: 999px;
+  color: #8894a5;
+  background: #0d1219;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 10px;
+}
+
+.session-memory strong {
+  color: #c6cfdb;
+}
+
+.session-memory--warning {
+  border-color: rgba(224, 167, 69, 0.58);
+  color: #e5b961;
+}
+
+.session-memory--critical {
+  border-color: rgba(240, 100, 100, 0.62);
+  color: #ff9da2;
+}
+
+.resource-panel__error {
+  margin: 0;
+  color: #e5b961;
+  font-size: 11px;
+}
+
 .connection-dot {
   width: 8px;
   height: 8px;
@@ -796,6 +928,16 @@ button:disabled {
   .status-strip {
     align-items: flex-start;
     flex-wrap: wrap;
+  }
+
+  .resource-panel__host {
+    grid-template-columns: 1fr;
+  }
+
+  .resource-panel > header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 5px;
   }
 
   .terminal-card--focused {

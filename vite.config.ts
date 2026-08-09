@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
@@ -12,8 +13,16 @@ type ServiceTarget = string | { host: string; protocol: "http:"; socketPath: str
 
 interface AgentctlSession {
   id: string;
+  compose_project: string;
+  runtime_state: string;
+  memory_limit_bytes: number;
   web_host_port: number;
   app_host_port: number;
+}
+
+interface PodmanStats {
+  name: string;
+  mem_usage: string;
 }
 
 interface AgentctlEnvelope {
@@ -59,16 +68,109 @@ async function runAgentctl(args: string[]) {
 }
 
 let sessionCache: { expiresAt: number; sessions: AgentctlSession[] } | null = null;
+let sessionRefresh: Promise<AgentctlSession[]> | null = null;
 
 async function agentctlSessions(refresh = false) {
   if (!refresh && sessionCache !== null && sessionCache.expiresAt > Date.now()) {
     return sessionCache.sessions;
   }
-  const result = await runAgentctl(["list"]);
-  if (!result.ok) throw new Error(result.error ?? "agentctl list failed");
-  const sessions = result.data?.sessions ?? [];
-  sessionCache = { expiresAt: Date.now() + 2_000, sessions };
-  return sessions;
+  if (sessionRefresh !== null) return sessionRefresh;
+  sessionRefresh = (async () => {
+    const result = await runAgentctl(["list"]);
+    if (!result.ok) throw new Error(result.error ?? "agentctl list failed");
+    const sessions = result.data?.sessions ?? [];
+    sessionCache = { expiresAt: Date.now() + 30_000, sessions };
+    return sessions;
+  })();
+  try {
+    return await sessionRefresh;
+  } finally {
+    sessionRefresh = null;
+  }
+}
+
+function parseMeminfo(content: string) {
+  const values = new Map<string, number>();
+  for (const line of content.split("\n")) {
+    const match = /^(\w+):\s+(\d+)\s+kB$/.exec(line);
+    if (match !== null) values.set(match[1], Number(match[2]) * 1_024);
+  }
+  const memoryTotalBytes = values.get("MemTotal") ?? 0;
+  const memoryAvailableBytes = values.get("MemAvailable") ?? 0;
+  const swapTotalBytes = values.get("SwapTotal") ?? 0;
+  const swapFreeBytes = values.get("SwapFree") ?? 0;
+  return {
+    memoryTotalBytes,
+    memoryAvailableBytes,
+    memoryUsedBytes: Math.max(0, memoryTotalBytes - memoryAvailableBytes),
+    swapTotalBytes,
+    swapUsedBytes: Math.max(0, swapTotalBytes - swapFreeBytes),
+  };
+}
+
+function parseDataSize(value: string) {
+  const match = /^([\d.]+)\s*([kmgt]?i?b)$/i.exec(value.trim());
+  if (match === null) return null;
+  const powers: Record<string, number> = {
+    b: 0,
+    kb: 1,
+    kib: 1,
+    mb: 2,
+    mib: 2,
+    gb: 3,
+    gib: 3,
+    tb: 4,
+    tib: 4,
+  };
+  const power = powers[match[2].toLowerCase()];
+  if (power === undefined) return null;
+  const bytes = Number(match[1]) * 1_024 ** power;
+  return Number.isFinite(bytes) ? Math.round(bytes) : null;
+}
+
+async function podmanMemoryByContainer(containers: string[]) {
+  if (containers.length === 0) return new Map<string, number>();
+  const { stdout } = await execFileAsync(
+    "podman",
+    ["stats", "--no-stream", "--format", "json", ...containers],
+    { maxBuffer: 4 * 1024 * 1024, timeout: 10_000 },
+  );
+  const rows = JSON.parse(stdout) as PodmanStats[];
+  return new Map(rows.map((row) => [
+    row.name,
+    parseDataSize(row.mem_usage.split("/", 1)[0]) ?? 0,
+  ]));
+}
+
+async function systemResources() {
+  const host = parseMeminfo(await readFile("/proc/meminfo", "utf8"));
+  let sessions: AgentctlSession[] = [];
+  let collectionError: string | undefined;
+  try {
+    sessions = await agentctlSessions();
+  } catch (cause) {
+    collectionError = cause instanceof Error ? cause.message : String(cause);
+  }
+  const running = sessions.filter((session) => session.runtime_state === "running");
+  let memoryByContainer = new Map<string, number>();
+  try {
+    memoryByContainer = await podmanMemoryByContainer(
+      running.map((session) => `${session.compose_project}_workspace_1`),
+    );
+  } catch (cause) {
+    collectionError = `container metrics unavailable: ${cause instanceof Error ? cause.message : String(cause)}`;
+  }
+  return {
+    collectedAtEpochMs: Date.now(),
+    host,
+    sessions: sessions.map((session) => ({
+      id: session.id,
+      runtimeState: session.runtime_state,
+      memoryUsageBytes: memoryByContainer.get(`${session.compose_project}_workspace_1`) ?? null,
+      memoryLimitBytes: session.memory_limit_bytes,
+    })),
+    ...(collectionError === undefined ? {} : { collectionError }),
+  };
 }
 
 function serviceAddress(host: string | undefined) {
@@ -132,8 +234,19 @@ function agentctlControlPlane(): Plugin {
   const attach = (server: ViteDevServer | PreviewServer) => {
     server.middlewares.use(async (request, response, next) => {
       const url = new URL(request.url ?? "/", "http://localhost");
-      if (!url.pathname.startsWith("/api/agentctl/")) {
+      if (url.pathname !== "/api/system/resources" && !url.pathname.startsWith("/api/agentctl/")) {
         next();
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/api/system/resources") {
+        try {
+          sendJson(response, 200, { ok: true, data: await systemResources() });
+        } catch (cause) {
+          sendJson(response, 500, {
+            ok: false,
+            error: cause instanceof Error ? cause.message : String(cause),
+          });
+        }
         return;
       }
       if (request.method !== "GET" && !validMutationOrigin(request)) {
@@ -142,7 +255,10 @@ function agentctlControlPlane(): Plugin {
       }
       try {
         if (request.method === "GET" && url.pathname === "/api/agentctl/sessions") {
-          sendJson(response, 200, await runAgentctl(["list"]));
+          sendJson(response, 200, {
+            ok: true,
+            data: { sessions: await agentctlSessions() },
+          });
           return;
         }
         if (request.method === "POST" && url.pathname === "/api/agentctl/sessions") {

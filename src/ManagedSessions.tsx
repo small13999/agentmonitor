@@ -1,14 +1,17 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   createManagedSession,
   pauseManagedSession,
   requiresForce,
   resumeManagedSession,
   type ManagedSession,
+  type SystemResources,
 } from "./agentctl";
+import { sessionMemoryLabel } from "./ResourceStatus";
 
 interface ManagedSessionsProps {
   sessions: ManagedSession[];
+  resources: SystemResources | null;
   onChanged(): Promise<void>;
   onClose(): void;
   onOpen(id: string): void;
@@ -18,11 +21,15 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function ManagedSessions({ sessions, onChanged, onClose, onOpen }: ManagedSessionsProps) {
+export function ManagedSessions({ sessions, resources, onChanged, onClose, onOpen }: ManagedSessionsProps) {
   const [title, setTitle] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [forceId, setForceId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const resourcesBySession = useMemo(
+    () => new Map(resources?.sessions.map((session) => [session.id, session]) ?? []),
+    [resources],
+  );
 
   useEffect(() => {
     void onChanged().catch((cause) => setError(errorMessage(cause)));
@@ -121,6 +128,9 @@ export function ManagedSessions({ sessions, onChanged, onClose, onOpen }: Manage
                   <div>
                     <strong>{session.title || session.id}</strong>
                     <span>{session.id}</span>
+                    <small className={`managed-session-memory managed-session-memory--${running ? "running" : "paused"}`}>
+                      {sessionMemoryLabel(resourcesBySession.get(session.id))}
+                    </small>
                   </div>
                   <span className={`session-state session-state--${running ? "running" : "paused"}`}>
                     {running ? "running" : "paused"}
