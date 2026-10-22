@@ -6,24 +6,29 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
-    "preview": "vite preview --host 127.0.0.1"
+    "preview": "vite preview --host 127.0.0.1",
+    "gateway:build": "tsc -p tsconfig.server.json",
+    "gateway:start": "node dist-server/server/index.js",
+    "test": "node --test --test-timeout=30000 \"tests/**/*.test.ts\"",
+    "spec:check": "node scripts/spec-check.ts",
+    "spec:lock": "node scripts/spec-check.ts --update"
   },
   "dependencies": {
-    "@xterm/addon-fit": "^0.11.0",
-    "@xterm/addon-webgl": "^0.19.0",
-    "@xterm/xterm": "^6.0.0",
-    "cmux": "^0.4.0",
     "http-proxy": "^1.18.1",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react-dom": "^19.2.8",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/http-proxy": "^1.17.17",
     "@types/node": "^26.1.2",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
+    "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^6.0.5",
+    "playwright": "^1.64.1",
     "typescript": "^7.0.2",
-    "vite": "^8.2.0"
+    "vite": "^8.2.0",
+    "ws": "^8.21.3"
   }
 }

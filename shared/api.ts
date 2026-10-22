@@ -1,0 +1,132 @@
+// The store API's wire types, shared by the gateway and the web app. Types only: this file
+// must not import anything that does not run in a browser.
+
+export interface Project {
+  id: string;
+  name: string;
+  /** The project's main checkout on the gateway's machine; session worktrees are worktrees of it. */
+  repoPath: string | null;
+  createdAt: number;
+}
+
+export interface Topic {
+  id: string;
+  projectId: string;
+  name: string;
+  createdAt: number;
+  status: string;
+  statusRevision: number;
+}
+
+/** TASK-1: what a task's state can be; done and cancelled tasks are finished. */
+export type TaskState = "open" | "in_progress" | "in_review" | "done" | "cancelled";
+
+/**
+ * Requested work. Its sessions all work on its `branch` (TASK-4), which it gets when its
+ * first session starts; its status and notes outlive them.
+ */
+export interface Task {
+  id: string;
+  projectId: string;
+  title: string;
+  description: string;
+  state: TaskState;
+  branch: string | null;
+  /** The ref the branch was created from; its merge base with the branch is where the task's work starts. */
+  baseRef: string | null;
+  /** TASK-7: what is done and what is next, kept current by its agents. */
+  status: string;
+  statusRevision: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** A task as the board and the task list show it. */
+export interface TaskSummary {
+  task: Task;
+  topics: Topic[];
+  /** Its running session (TASK-5: at most one). */
+  sessionId: string | null;
+}
+
+export interface TaskDetail {
+  task: Task;
+  topics: Topic[];
+  /** Every session the task has had, newest first. */
+  sessions: Session[];
+}
+
+/**
+ * One agent run on a task: it keeps every chat started in it after it ends; while it runs it
+ * has a workspace, a worktree of the task's branch and a container on `machine`.
+ */
+export interface Session {
+  id: string;
+  projectId: string;
+  taskId: string;
+  /** The task's title when the session started. */
+  name: string;
+  branch: string | null;
+  /** The ref the branch was created from; its merge base with the branch is where the task's work starts. */
+  baseRef: string | null;
+  machine: string | null;
+  /** omp model of the first chat; null: omp's default. */
+  model: string | null;
+  startedAt: number;
+  endedAt: number | null;
+}
+
+export interface TopicLink {
+  taskId: string;
+  topicId: string;
+  linkedAt: number;
+}
+
+/** TASK-8: the user's notes on a task; agents read and write them too. */
+export interface TaskNotes {
+  /** Markdown; empty until first written. */
+  text: string;
+  /** Counts writes; a write names the revision it edited (as TOPIC-3). */
+  revision: number;
+}
+
+/** blocked: waits for you (red); working: a turn runs (orange); done: turn finished (green); stopped: no live agent. */
+export type TurnLight = "blocked" | "working" | "done" | "stopped";
+
+export interface PullRequest {
+  number: number;
+  title: string;
+  url: string;
+}
+
+export interface Card {
+  session: Session;
+  turn: TurnLight;
+  lastUserMessage: string | null;
+  lastReply: string | null;
+  /** Null when the worktree cannot be read. */
+  git: { uncommitted: string[]; unpushed: number; changedFiles: string[] } | null;
+  /** Open pull requests from the session branch; null when GitHub cannot be asked. */
+  pullRequests: PullRequest[] | null;
+  /** Other running sessions of the project that changed any of the same files. */
+  overlaps: Array<{ sessionId: string; name: string; files: string[] }>;
+  /** The agent's Cloudflare access; null when the project has no Cloudflare tokens. */
+  cloudflare: {
+    /** False: the project has only a read token. */
+    canWrite: boolean;
+    /** Until when the user allowed the session's writes (ms since epoch); null: writes are off. */
+    writesUntil: number | null;
+  } | null;
+}
+
+/** TASK-9: the commits finishing a task deletes; the 409 that refuses an unconfirmed finish carries them. */
+export interface UnpushedWork {
+  /** Commits on the task branch that no remote has, as "<short sha> <subject>". */
+  unpushed: string[];
+}
+
+/** SESSION-9: an ended session and the uncommitted files kept as its task's snapshot. */
+export interface EndedSession {
+  session: Session;
+  kept: string[];
+}

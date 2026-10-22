@@ -1,0 +1,390 @@
+import { randomBytes } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { createServer, type Server } from "node:http";
+import { basename, join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
+import { z } from "zod";
+import type { Card, EndedSession, UnpushedWork } from "../../shared/api.ts";
+import { projectCards } from "../cards.ts";
+import { CLOUDFLARE_API_PREFIX, CloudflareBroker } from "../cloudflare.ts";
+import type { GatewayConfig } from "../config.ts";
+import {
+  addWorktree,
+  branchExists,
+  defaultBaseRef,
+  deleteBranch,
+  fetchOrigin,
+  removeWorktree,
+  restoreSnapshot,
+  saveSnapshot,
+  snapshotRef,
+  unpushedCommits,
+  type RestoredSnapshot,
+} from "../git.ts";
+import { PodmanRuntime, type WorkspaceDirs } from "../runtime/podman.ts";
+import { newestTranscript } from "../transcript.ts";
+import { handleStoreApi, type SessionInput, type StoreContext } from "./http.ts";
+import { Store, StoreError, type Principal, type Session, type Task } from "./store.ts";
+
+type ServiceConfig = Pick<
+  GatewayConfig,
+  "workspaceRuntime" | "workspaceMemoryMib" | "machineName" | "ompAgentDir" | "credentialsHome" | "configDir" | "cloudflareApi"
+>;
+
+export interface TernUpstream {
+  address: string;
+  token: string;
+  origin: string;
+}
+
+/** The part of run/launch.json the gateway reads back. */
+const launchFile = z.object({ ternOrigin: z.string() });
+
+/** How long a started container gets until its Tern web client answers. */
+const TERN_START_MS = 60_000;
+
+function failure(cause: unknown): string {
+  return cause instanceof Error && "stderr" in cause ? String(cause.stderr).trim() : String(cause);
+}
+
+/**
+ * The gateway's store: the database, the socket of each running session, and the
+ * sessions' workspaces (worktree and container).
+ *
+ * Agents reach the store through a Unix socket in their session's run directory,
+ * the only gateway endpoint mounted into the container. The socket a request arrives
+ * on is the agent's identity: no token exists to leak, and nothing on the network
+ * listens for agents. The same socket carries the agent's Cloudflare API requests to the
+ * Cloudflare broker.
+ */
+export class StoreService implements StoreContext {
+  readonly store: Store;
+  private readonly servers = new Map<string, Server>();
+  /** Asking podman for a container's port takes a quarter second, so each page load would wait on it. */
+  private readonly ternUpstreams = new Map<string, TernUpstream>();
+  /** Containers being started again; every request for the session waits on the one start. */
+  private readonly restarts = new Map<string, Promise<void>>();
+  private readonly root: string;
+  private readonly runtime: PodmanRuntime | null;
+  private readonly config: ServiceConfig;
+  private readonly cloudflare: CloudflareBroker;
+
+  constructor(stateDir: string, config: ServiceConfig) {
+    this.store = new Store(join(stateDir, "store.sqlite"));
+    this.root = join(stateDir, "sessions");
+    this.runtime = config.workspaceRuntime === "podman"
+      ? new PodmanRuntime({ memoryMib: config.workspaceMemoryMib, stateDir, ompAgentDir: config.ompAgentDir, credentialsHome: config.credentialsHome })
+      : null;
+    this.config = config;
+    this.cloudflare = new CloudflareBroker({ configDir: config.configDir, upstream: config.cloudflareApi });
+  }
+
+  dirs(sessionId: string): WorkspaceDirs {
+    const root = join(this.root, sessionId);
+    return { root, run: join(root, "run"), worktree: join(root, "worktree"), ompHome: join(root, "omp-home") };
+  }
+
+  cards(principal: Principal, projectId: string): Promise<Card[]> {
+    const tokens = this.cloudflare.tokens(this.store.getProject(principal, projectId).name);
+    const cloudflareOf = (sessionId: string): Card["cloudflare"] =>
+      tokens === null ? null : { canWrite: tokens.write !== null, writesUntil: this.cloudflare.writesUntil(sessionId) };
+    return projectCards(this.store, (id) => this.dirs(id), cloudflareOf, principal, projectId);
+  }
+
+  /** The running session whose Cloudflare writes a human allows or revokes; its project must have a write token. */
+  private cloudflareSession(principal: Principal, sessionId: string): Session {
+    if (principal.kind !== "human") throw new StoreError(403, "only a human can allow or revoke Cloudflare writes");
+    const { session } = this.store.getSession(principal, sessionId);
+    if (session.endedAt !== null) throw new StoreError(409, `session ${session.name} has ended`);
+    const project = this.store.getProject(principal, session.projectId);
+    const tokens = this.cloudflare.tokens(project.name);
+    if (tokens === null || tokens.write === null) {
+      throw new StoreError(409, `project ${project.name} has no Cloudflare write token in Agent Monitor`);
+    }
+    return session;
+  }
+
+  allowCloudflareWrites(principal: Principal, sessionId: string): { writesUntil: number } {
+    return { writesUntil: this.cloudflare.allowWrites(this.cloudflareSession(principal, sessionId).id) };
+  }
+
+  revokeCloudflareWrites(principal: Principal, sessionId: string): { writesUntil: null } {
+    this.cloudflare.revokeWrites(this.cloudflareSession(principal, sessionId).id);
+    return { writesUntil: null };
+  }
+
+  /**
+   * Where the session's Tern web client listens, the token it wants on /wire and the origin
+   * it accepts; 404 for unknown sessions, 409 for ended ones. A stopped container starts
+   * again first (SESSION-10). Remembered until forgetTernUpstream, which the proxy calls
+   * when the address stops answering.
+   */
+  async ternUpstream(sessionId: string): Promise<TernUpstream> {
+    const { session } = this.store.getSession({ kind: "human" }, sessionId);
+    if (session.endedAt !== null) throw new StoreError(409, `session ${session.name} has ended`);
+    const known = this.ternUpstreams.get(sessionId);
+    if (known !== undefined) return known;
+    const runtime = this.runtime;
+    if (runtime === null) throw new StoreError(409, "sessions run without containers here");
+    let restart = this.restarts.get(sessionId);
+    if (restart === undefined && !(await runtime.running(sessionId))) {
+      restart = this.restart(runtime, session).finally(() => this.restarts.delete(sessionId));
+      this.restarts.set(sessionId, restart);
+    }
+    await restart;
+    let address: string;
+    try {
+      address = await runtime.ternAddress(sessionId);
+    } catch (cause) {
+      throw new StoreError(409, `the session's container is not running: ${failure(cause)}`);
+    }
+    const { run } = this.dirs(sessionId);
+    const launch = launchFile.parse(JSON.parse(readFileSync(join(run, "launch.json"), "utf8")));
+    const upstream = { address, token: readFileSync(join(run, "tern-token"), "utf8").trim(), origin: launch.ternOrigin };
+    this.ternUpstreams.set(sessionId, upstream);
+    return upstream;
+  }
+
+  forgetTernUpstream(sessionId: string): void {
+    this.ternUpstreams.delete(sessionId);
+  }
+
+  /** A new container on the current image, resuming the session's newest chat, once Tern answers. */
+  private async restart(runtime: PodmanRuntime, session: Session): Promise<void> {
+    const project = this.store.getProject({ kind: "human" }, session.projectId);
+    const dirs = this.dirs(session.id);
+    if (project.repoPath === null || !existsSync(dirs.worktree)) {
+      throw new StoreError(409, `session ${session.name} has no worktree to start a container on`);
+    }
+    // omp names a chat's transcript <time>_<chat id>.jsonl.
+    const newest = newestTranscript(dirs.ompHome);
+    const resume = newest === null ? null : /_([0-9a-f-]{36})\.jsonl$/.exec(basename(newest))?.[1] ?? null;
+    this.forgetTernUpstream(session.id);
+    try {
+      await runtime.launch({
+        sessionId: session.id,
+        repoPath: project.repoPath,
+        dirs,
+        // A resumed chat keeps the model it last ran.
+        model: resume === null ? session.model : null,
+        resume,
+        ternOrigin: `http://tern-${session.id}.localhost`,
+        cloudflare: this.cloudflare.tokens(project.name) !== null,
+        taskContext: this.taskContext(session.taskId, { kind: "none" }),
+      });
+      const address = await runtime.ternAddress(session.id);
+      for (const deadline = Date.now() + TERN_START_MS; ;) {
+        const answered = await fetch(`http://${address}/`).then(() => true, () => false);
+        if (answered) return;
+        if (Date.now() > deadline) throw new Error(`Tern did not answer within ${TERN_START_MS / 1000} s`);
+        await sleep(200);
+      }
+    } catch (cause) {
+      throw new StoreError(500, `could not start session ${session.name} again: ${failure(cause)}`);
+    }
+  }
+
+  private async listen(sessionId: string): Promise<void> {
+    if (this.servers.has(sessionId)) return;
+    const { run } = this.dirs(sessionId);
+    mkdirSync(run, { recursive: true, mode: 0o700 });
+    const agent = createServer((request, response) => {
+      if (new URL(request.url ?? "/", "http://localhost").pathname.startsWith(CLOUDFLARE_API_PREFIX)) {
+        let project: string;
+        try {
+          project = this.store.getProject({ kind: "human" }, this.store.getSession({ kind: "human" }, sessionId).session.projectId).name;
+        } catch {
+          response.writeHead(403).end();
+          return;
+        }
+        this.cloudflare.handle(request, response, sessionId, project);
+        return;
+      }
+      void handleStoreApi(request, response, this, { kind: "agent", sessionId });
+    });
+    this.servers.set(sessionId, agent);
+    const path = join(run, "am.sock");
+    rmSync(path, { force: true });
+    const { promise, resolve, reject } = Promise.withResolvers<void>();
+    agent.once("error", reject);
+    agent.listen(path, () => resolve());
+    await promise;
+    // The container user is the host user (rootless keep-id); nobody else needs access.
+    chmodSync(path, 0o600);
+  }
+
+  private unlisten(sessionId: string): void {
+    this.servers.get(sessionId)?.close();
+    this.servers.delete(sessionId);
+    this.ternUpstreams.delete(sessionId);
+    this.cloudflare.revokeWrites(sessionId);
+  }
+
+  /**
+   * TASK-6: what the container adds to the agent's workflow context: the task as it is now,
+   * and what happened to the work an earlier session left uncommitted (SESSION-9).
+   */
+  private taskContext(taskId: string, restored: RestoredSnapshot): string {
+    const human: Principal = { kind: "human" };
+    const { task, topics } = this.store.getTask(human, taskId);
+    const notes = this.store.getNotes(human, taskId);
+    const sections = [
+      "# Your task",
+      `You work on the task "${task.title}" (id ${task.id}, state ${task.state})${task.branch === null ? "" : ` on its branch \`${task.branch}\``}. ` +
+        "Every session of this task works on this branch; only what is committed and pushed to it is certain to reach the next session.",
+      `Topics: ${topics.length === 0 ? "none" : topics.map((topic) => topic.name).join(", ")}`,
+      "## Description",
+      task.description.trim() === "" ? "(none)" : task.description.trim(),
+      `## Status (revision ${task.statusRevision})`,
+      task.status.trim() === "" ? "(none yet)" : task.status.trim(),
+      `## Notes from the user (revision ${notes.revision})`,
+      notes.text.trim() === "" ? "(none)" : notes.text.trim(),
+    ];
+    if (restored.kind === "restored") {
+      sections.push("## Restored work", "The task's previous session ended with uncommitted changes. They are back in the worktree, still uncommitted: commit what belongs to the task.");
+    } else if (restored.kind === "conflicts") {
+      sections.push(
+        "## Restored work",
+        "The task's previous session ended with uncommitted changes that did not apply cleanly to the branch as it is now. " +
+          `Conflicts are marked in the files where git could merge; the whole snapshot is kept at \`${restored.kept}\` (\`git diff ${restored.kept}^ ${restored.kept}\`).`,
+      );
+    }
+    return `${sections.join("\n\n")}\n`;
+  }
+
+  /**
+   * Starts a session on the task (TASK-3, TASK-5): a worktree of the task's branch, which its
+   * first session creates (TASK-4), with the previous session's uncommitted work restored
+   * (SESSION-9), and a container. Undone if the launch fails.
+   */
+  async startSession(principal: Principal, taskId: string, input: SessionInput): Promise<Session> {
+    const { task } = this.store.getTask(principal, taskId);
+    const project = this.store.getProject(principal, task.projectId);
+    const runtime = this.runtime;
+    if (runtime !== null && project.repoPath === null) {
+      throw new StoreError(400, `project ${project.name} has no repository to create a worktree from`);
+    }
+    const repo = runtime === null ? null : project.repoPath;
+    const created = this.store.createSession(principal, taskId, { model: input.model, machine: this.config.machineName });
+    const dirs = this.dirs(created.id);
+    let worktreeAdded = false;
+    try {
+      await this.listen(created.id);
+      if (runtime === null || repo === null) return created;
+      // Fetching also brings in a task branch that only origin has.
+      const hasOrigin = await fetchOrigin(repo);
+      const slug = task.title.toLowerCase().replace(/[^a-z0-9.]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "task";
+      const branch = task.branch ?? `am/${slug}-${randomBytes(2).toString("hex")}`;
+      const baseRef = task.baseRef ?? await defaultBaseRef(repo, hasOrigin);
+      await addWorktree(repo, branch, dirs.worktree, baseRef);
+      worktreeAdded = true;
+      if (task.branch === null) this.store.setTaskBranch(task.id, branch, baseRef);
+      this.store.setSessionBranch(created.id, branch, baseRef);
+      const restored = await restoreSnapshot(repo, dirs.worktree, snapshotRef(task.id));
+      await runtime.launch({
+        sessionId: created.id,
+        repoPath: repo,
+        dirs,
+        model: input.model ?? null,
+        resume: null,
+        ternOrigin: `http://tern-${created.id}.localhost`,
+        cloudflare: this.cloudflare.tokens(project.name) !== null,
+        taskContext: this.taskContext(task.id, restored),
+      });
+      return { ...created, branch, baseRef };
+    } catch (cause) {
+      this.unlisten(created.id);
+      let workspaceGone = true;
+      if (runtime !== null && repo !== null) {
+        await runtime.removeContainer(created.id).catch(() => undefined);
+        // A restored snapshot is back in this worktree only; it goes back to the task first.
+        workspaceGone = !worktreeAdded || await saveSnapshot(repo, dirs.worktree, snapshotRef(task.id))
+          .then(() => removeWorktree(repo, dirs.worktree))
+          .then(() => true, () => false);
+      }
+      if (workspaceGone) rmSync(dirs.root, { recursive: true, force: true });
+      this.store.discardSession(created.id);
+      if (task.state === "open") this.store.updateTask(principal, task.id, { state: "open" });
+      throw new StoreError(500, `could not launch session: ${failure(cause)}`);
+    }
+  }
+
+  /**
+   * SESSION-8/SESSION-9: removes the session's workspace and keeps its chats (omp-home) and the
+   * task's branch. Uncommitted work becomes the task's snapshot first, so ending never loses
+   * it; `kept` lists those files.
+   */
+  async endSession(principal: Principal, sessionId: string): Promise<EndedSession> {
+    const { session, task } = this.store.getSession(principal, sessionId);
+    if (principal.kind !== "human") throw new StoreError(403, "only a human can do this");
+    if (session.endedAt !== null) throw new StoreError(409, `session ${session.name} has already ended`);
+    const project = this.store.getProject(principal, session.projectId);
+    const dirs = this.dirs(sessionId);
+    const repo = this.runtime === null ? null : project.repoPath;
+    let kept: string[] = [];
+    if (this.runtime !== null) {
+      try {
+        // Stopped first, so the snapshot holds the agent's last writes.
+        await this.runtime.removeContainer(sessionId);
+        if (repo !== null && existsSync(dirs.worktree)) kept = await saveSnapshot(repo, dirs.worktree, snapshotRef(task.id));
+      } catch (cause) {
+        throw new StoreError(500, `could not keep the uncommitted work of ${session.name}, so it has not ended: ${failure(cause)}`);
+      }
+    }
+    const ended = this.store.endSession(principal, sessionId);
+    this.unlisten(sessionId);
+    if (repo !== null) {
+      try {
+        await removeWorktree(repo, dirs.worktree);
+      } catch (cause) {
+        throw new StoreError(500, `${session.name} has ended, but its worktree could not be removed: ${failure(cause)}`);
+      }
+    }
+    rmSync(dirs.run, { recursive: true, force: true });
+    return { session: ended, kept };
+  }
+
+  /**
+   * TASK-9: ends the task's running session and deletes its branch from this machine.
+   * Commits no remote has are lost with the branch, so they need `confirm`.
+   */
+  async finishTask(principal: Principal, taskId: string, state: "done" | "cancelled", confirm: boolean): Promise<Task> {
+    if (principal.kind !== "human") throw new StoreError(403, "only a human can do this");
+    const { task } = this.store.getTask(principal, taskId);
+    const repo = this.runtime === null ? null : this.store.getProject(principal, task.projectId).repoPath;
+    const branch = repo !== null && task.branch !== null && (await branchExists(repo, task.branch)) ? task.branch : null;
+    if (repo !== null && branch !== null && task.baseRef !== null && !confirm) {
+      let unpushed: string[];
+      try {
+        unpushed = await unpushedCommits(repo, branch, task.baseRef);
+      } catch (cause) {
+        throw new StoreError(500, `could not read the commits of ${branch}: ${failure(cause)}`);
+      }
+      if (unpushed.length > 0) {
+        const work: UnpushedWork = { unpushed };
+        throw new StoreError(409, `${branch} has ${unpushed.length} commit(s) no remote has, which finishing the task deletes`, { ...work });
+      }
+    }
+    const running = this.store.listTasks(principal, task.projectId).find((summary) => summary.task.id === taskId)?.sessionId ?? null;
+    if (running !== null) await this.endSession(principal, running);
+    if (repo !== null && branch !== null) {
+      try {
+        await deleteBranch(repo, branch);
+      } catch (cause) {
+        throw new StoreError(500, `could not delete ${branch}: ${failure(cause)}`);
+      }
+    }
+    return this.store.finishTask(principal, taskId, state);
+  }
+
+  /** Re-open every running session's socket after a gateway restart. */
+  async start(): Promise<void> {
+    await Promise.all(this.store.runningSessionIds().map((id) => this.listen(id)));
+  }
+
+  /** Closes the agent sockets and the database; for a dev server that reloads its config. */
+  close(): void {
+    for (const id of [...this.servers.keys()]) this.unlisten(id);
+    this.store.close();
+  }
+}

@@ -1,0 +1,120 @@
+import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import { promisify } from "node:util";
+import { z } from "zod";
+import { git, uncommittedFiles, unpushedCommits } from "./git.ts";
+import { ompRequest } from "./omp-channel.ts";
+import type { WorkspaceDirs } from "./runtime/podman.ts";
+import type { Card, PullRequest, TurnLight } from "../shared/api.ts";
+import type { Principal, Store } from "./store/store.ts";
+import { newestTranscript, readTranscript } from "./transcript.ts";
+
+const run = promisify(execFile);
+
+const SORT: Record<TurnLight, number> = { blocked: 0, done: 1, working: 2, stopped: 3 };
+
+// omp's messages as its transcript stores them; only what a card shows is checked.
+const blocks = z.array(z.object({ type: z.string(), text: z.string().optional() }));
+const userMessage = z.object({ role: z.literal("user"), content: z.union([z.string(), blocks]) });
+const assistantMessage = z.object({ role: z.literal("assistant"), content: blocks });
+
+function textOf(content: string | z.infer<typeof blocks>): string {
+  return typeof content === "string" ? content : content.map((block) => (block.type === "text" ? block.text ?? "" : "")).join("");
+}
+
+/** The live session's turn state; no answer means no live agent. */
+async function turnOf(runDir: string): Promise<TurnLight> {
+  const reply = await ompRequest(runDir, "state");
+  const turn = reply?.ok === true ? reply.turn : undefined;
+  return turn === "blocked" || turn === "working" || turn === "done" ? turn : "stopped";
+}
+
+/** Last user message and last assistant text; the transcript's last 1 MiB is plenty. */
+function lastMessages(path: string): { user: string | null; reply: string | null } {
+  let user: string | null = null;
+  let reply: string | null = null;
+  for (const message of readTranscript(path, 1024 * 1024)) {
+    const asUser = userMessage.safeParse(message);
+    if (asUser.success) user = textOf(asUser.data.content);
+    const asAssistant = assistantMessage.safeParse(message);
+    const text = asAssistant.success ? textOf(asAssistant.data.content) : "";
+    if (text.trim() !== "") reply = text;
+  }
+  return { user, reply };
+}
+
+async function gitState(worktree: string, baseRef: string): Promise<Card["git"]> {
+  if (!existsSync(worktree)) return null;
+  try {
+    const uncommitted = await uncommittedFiles(worktree);
+    const mergeBase = await git(worktree, ["merge-base", "HEAD", baseRef]);
+    const unpushed = (await unpushedCommits(worktree, "HEAD", baseRef)).length;
+    const changed = (await git(worktree, ["diff", "--name-only", mergeBase])).split("\n").filter(Boolean);
+    return { uncommitted, unpushed, changedFiles: [...new Set([...changed, ...uncommitted])].sort() };
+  } catch {
+    return null;
+  }
+}
+
+/** GitHub answers are slow and rate limited; one lookup per branch per half minute. */
+const prCache = new Map<string, { at: number; prs: PullRequest[] | null }>();
+
+async function pullRequests(worktree: string, branch: string): Promise<PullRequest[] | null> {
+  const cached = prCache.get(worktree);
+  if (cached !== undefined && Date.now() - cached.at < 30_000) return cached.prs;
+  let prs: PullRequest[] | null = null;
+  try {
+    const { stdout } = await run(
+      process.env.AGENTMONITOR_GH ?? "gh",
+      ["pr", "list", "--head", branch, "--state", "open", "--json", "number,title,url"],
+      { cwd: worktree, encoding: "utf8", timeout: 10_000 },
+    );
+    prs = JSON.parse(stdout) as PullRequest[];
+  } catch {
+    prs = null;
+  }
+  prCache.set(worktree, { at: Date.now(), prs });
+  return prs;
+}
+
+/** CARD-1..5: one card per running session of the project, waiting-on-you first. */
+export async function projectCards(
+  store: Store,
+  dirsOf: (sessionId: string) => WorkspaceDirs,
+  cloudflareOf: (sessionId: string) => Card["cloudflare"],
+  principal: Principal,
+  projectId: string,
+): Promise<Card[]> {
+  const cards = await Promise.all(store.listSessions(principal, projectId).map(async (session) => {
+    const dirs = dirsOf(session.id);
+    // SESSION-7: the newest chat is the one the session runs now.
+    const transcript = newestTranscript(dirs.ompHome);
+    const messages = transcript === null ? { user: null, reply: null } : lastMessages(transcript);
+    const hasWorktree = session.branch !== null && session.baseRef !== null && existsSync(dirs.worktree);
+    const [turn, gitInfo, prs] = await Promise.all([
+      turnOf(dirs.run),
+      hasWorktree ? gitState(dirs.worktree, session.baseRef ?? "") : null,
+      hasWorktree ? pullRequests(dirs.worktree, session.branch ?? "") : null,
+    ]);
+    const card: Card = {
+      session,
+      turn,
+      lastUserMessage: messages.user,
+      lastReply: messages.reply,
+      git: gitInfo,
+      pullRequests: prs,
+      overlaps: [],
+      cloudflare: cloudflareOf(session.id),
+    };
+    return card;
+  }));
+  for (const card of cards) {
+    const mine = new Set(card.git?.changedFiles ?? []);
+    for (const other of cards) {
+      if (other === card) continue;
+      const files = (other.git?.changedFiles ?? []).filter((file) => mine.has(file));
+      if (files.length > 0) card.overlaps.push({ sessionId: other.session.id, name: other.session.name, files });
+    }
+  }
+  return cards.sort((a, b) => SORT[a.turn] - SORT[b.turn] || a.session.startedAt - b.session.startedAt);
+}

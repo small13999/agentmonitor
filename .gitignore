@@ -1,7 +1,4 @@
 node_modules/
 dist/
+dist-server/
 *.tsbuildinfo
-prototype/state/
-prototype/workspace/
-prototype/runtime/
-prototype/sessions/
