@@ -6,6 +6,8 @@ export interface Project {
   name: string;
   /** The project's main checkout on the gateway's machine; session worktrees are worktrees of it. */
   repoPath: string | null;
+  /** HOST-1: whether sessions of this project may run on the host instead of in a container. */
+  hostSessions: boolean;
   createdAt: number;
 }
 
@@ -57,8 +59,15 @@ export interface TaskDetail {
 }
 
 /**
+ * HOST-1: where a session's agent runs: in a container, or on the host as the user with
+ * full access to the machine.
+ */
+export type SessionRuntime = "container" | "host";
+
+/**
  * One agent run on a task: it keeps every chat started in it after it ends; while it runs it
- * has a workspace, a worktree of the task's branch and a container on `machine`.
+ * has a workspace, a worktree of the task's branch and its agent's processes (a container,
+ * or the host) on `machine`.
  */
 export interface Session {
   id: string;
@@ -70,6 +79,7 @@ export interface Session {
   /** The ref the branch was created from; its merge base with the branch is where the task's work starts. */
   baseRef: string | null;
   machine: string | null;
+  runtime: SessionRuntime;
   /** omp model of the first chat; null: omp's default. */
   model: string | null;
   startedAt: number;

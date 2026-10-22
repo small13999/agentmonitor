@@ -2,9 +2,9 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { Project, Session, Task, TaskDetail, TaskNotes, TaskState, TaskSummary, Topic, TopicLink } from "../../shared/api.ts";
+import type { Project, Session, SessionRuntime, Task, TaskDetail, TaskNotes, TaskState, TaskSummary, Topic, TopicLink } from "../../shared/api.ts";
 
-export type { Project, Session, Task, TaskDetail, TaskNotes, TaskState, TaskSummary, Topic, TopicLink };
+export type { Project, Session, SessionRuntime, Task, TaskDetail, TaskNotes, TaskState, TaskSummary, Topic, TopicLink };
 
 /** TOPIC-2 and TASK-7: a status is a short current-state note, not a document. */
 export const STATUS_MAX_LINES = 50;
@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS projects (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,
   repo_path TEXT,
+  host_sessions INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS topics (
@@ -75,6 +76,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   branch TEXT,
   base_ref TEXT,
   machine TEXT,
+  runtime TEXT NOT NULL DEFAULT 'container',
   model TEXT,
   started_at INTEGER NOT NULL,
   ended_at INTEGER
@@ -88,6 +90,7 @@ function project(row: Row): Project {
     id: String(row.id),
     name: String(row.name),
     repoPath: row.repo_path === null ? null : String(row.repo_path),
+    hostSessions: Number(row.host_sessions) === 1,
     createdAt: Number(row.created_at),
   };
 }
@@ -129,6 +132,7 @@ function session(row: Row): Session {
     branch: row.branch === null ? null : String(row.branch),
     baseRef: row.base_ref === null ? null : String(row.base_ref),
     machine: row.machine === null ? null : String(row.machine),
+    runtime: row.runtime === "host" ? "host" : "container",
     model: row.model === null ? null : String(row.model),
     startedAt: Number(row.started_at),
     endedAt: row.ended_at === null ? null : Number(row.ended_at),
@@ -157,6 +161,14 @@ export class Store {
     this.db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
     this.db.exec(SCHEMA);
     this.migrateSessionsToTasks();
+    // HOST-1: stores from before host sessions.
+    this.addColumn("projects", "host_sessions", "INTEGER NOT NULL DEFAULT 0");
+    this.addColumn("sessions", "runtime", "TEXT NOT NULL DEFAULT 'container'");
+  }
+
+  private addColumn(table: string, column: string, definition: string): void {
+    const columns = this.db.prepare(`SELECT name FROM pragma_table_info('${table}')`).all().map((row) => String(row.name));
+    if (!columns.includes(column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 
   close(): void {
@@ -301,15 +313,29 @@ export class Store {
     return { session: found, task: this.visibleTask(principal, found.taskId) };
   }
 
-  createProject(principal: Principal, input: { name: string; repoPath?: string }): Project {
+  createProject(principal: Principal, input: { name: string; repoPath?: string; hostSessions?: boolean }): Project {
     this.requireHuman(principal);
     if (this.db.prepare("SELECT 1 FROM projects WHERE name = ?").get(input.name) !== undefined) {
       throw new StoreError(409, `project "${input.name}" already exists`);
     }
-    const created: Project = { id: randomUUID(), name: input.name, repoPath: input.repoPath ?? null, createdAt: Date.now() };
-    this.db.prepare("INSERT INTO projects (id, name, repo_path, created_at) VALUES (?, ?, ?, ?)")
-      .run(created.id, created.name, created.repoPath, created.createdAt);
+    const created: Project = {
+      id: randomUUID(),
+      name: input.name,
+      repoPath: input.repoPath ?? null,
+      hostSessions: input.hostSessions ?? false,
+      createdAt: Date.now(),
+    };
+    this.db.prepare("INSERT INTO projects (id, name, repo_path, host_sessions, created_at) VALUES (?, ?, ?, ?, ?)")
+      .run(created.id, created.name, created.repoPath, created.hostSessions ? 1 : 0, created.createdAt);
     return created;
+  }
+
+  /** HOST-1: only a human allows or stops host sessions in a project. */
+  updateProject(principal: Principal, projectId: string, input: { hostSessions: boolean }): Project {
+    this.requireHuman(principal);
+    this.visibleProject(principal, projectId);
+    this.db.prepare("UPDATE projects SET host_sessions = ? WHERE id = ?").run(input.hostSessions ? 1 : 0, projectId);
+    return this.visibleProject(principal, projectId);
   }
 
   listTopics(principal: Principal, projectId: string): Topic[] {
@@ -487,7 +513,7 @@ export class Store {
    * Records a running session of the task (TASK-5: refused while it has one) and moves an
    * open task in progress. Its worktree and container are the caller's job.
    */
-  createSession(principal: Principal, taskId: string, input: { machine?: string; model?: string }): Session {
+  createSession(principal: Principal, taskId: string, input: { machine?: string; model?: string; runtime: SessionRuntime }): Session {
     this.requireHuman(principal);
     return this.transaction(() => {
       const owner = this.visibleTask(principal, taskId);
@@ -496,6 +522,9 @@ export class Store {
       }
       const running = this.runningSessionOf(taskId);
       if (running !== null) throw new StoreError(409, `task "${owner.title}" already has a running session`, { sessionId: running.id });
+      if (input.runtime === "host" && !this.visibleProject(principal, owner.projectId).hostSessions) {
+        throw new StoreError(403, "this project does not allow host sessions");
+      }
       const created: Session = {
         id: randomUUID(),
         projectId: owner.projectId,
@@ -504,13 +533,14 @@ export class Store {
         branch: owner.branch,
         baseRef: owner.baseRef,
         machine: input.machine ?? null,
+        runtime: input.runtime,
         model: input.model ?? null,
         startedAt: Date.now(),
         endedAt: null,
       };
       this.db.prepare(
-        "INSERT INTO sessions (id, project_id, task_id, name, branch, base_ref, machine, model, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      ).run(created.id, created.projectId, taskId, created.name, created.branch, created.baseRef, created.machine, created.model, created.startedAt);
+        "INSERT INTO sessions (id, project_id, task_id, name, branch, base_ref, machine, runtime, model, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run(created.id, created.projectId, taskId, created.name, created.branch, created.baseRef, created.machine, created.runtime, created.model, created.startedAt);
       if (owner.state === "open") {
         this.db.prepare("UPDATE tasks SET state = 'in_progress', updated_at = ? WHERE id = ?").run(created.startedAt, taskId);
       }

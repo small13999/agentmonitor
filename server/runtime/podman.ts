@@ -1,41 +1,14 @@
 import { execFile } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { git } from "../git.ts";
+import { writeLaunchFiles, type LaunchInput, type Runtime } from "./runtime.ts";
 
 const run = promisify(execFile);
 
 /** Built by scripts/build-image.ts. */
 export const WORKSPACE_IMAGE = "localhost/agentmonitor-workspace:dev";
-
-/**
- * Where a session keeps its host-side state. `omp-home` holds its chats and outlives the
- * session; the rest is its workspace. `run` is mounted at /run/agentmonitor.
- */
-export interface WorkspaceDirs {
-  root: string;
-  run: string;
-  worktree: string;
-  ompHome: string;
-}
-
-export interface LaunchInput {
-  sessionId: string;
-  repoPath: string;
-  dirs: WorkspaceDirs;
-  /** omp model for the chat; null: omp's default. */
-  model: string | null;
-  /** omp chat (omp session id) to resume; null: a new chat. */
-  resume: string | null;
-  /** Origin the container's Tern web socket accepts; the gateway's Tern proxy presents it. */
-  ternOrigin: string;
-  /** Point Wrangler at the gateway's Cloudflare broker (the project has Cloudflare tokens). */
-  cloudflare: boolean;
-  /** TASK-6: markdown the container adds to the agent's workflow context: the task as it is at launch. */
-  taskContext: string;
-}
 
 /** The user's git credentials a session container gets: host path under the credentials home → mount point. */
 const CREDENTIALS: Array<[string, string]> = [
@@ -51,7 +24,7 @@ const CREDENTIALS: Array<[string, string]> = [
  * configured omp agent directory for credentials, and the user's ssh keys, git config and
  * gh login (read-only; the entrypoint copies them). Never podman.
  */
-export class PodmanRuntime {
+export class PodmanRuntime implements Runtime {
   private readonly options: { memoryMib: number; stateDir: string; ompAgentDir: string; credentialsHome: string };
 
   constructor(options: { memoryMib: number; stateDir: string; ompAgentDir: string; credentialsHome: string }) {
@@ -66,16 +39,7 @@ export class PodmanRuntime {
   async launch(input: LaunchInput): Promise<void> {
     const repoName = basename(resolve(input.repoPath));
     const commonDir = resolve(input.repoPath, await git(input.repoPath, ["rev-parse", "--git-common-dir"]));
-    mkdirSync(input.dirs.ompHome, { recursive: true });
-    writeFileSync(join(input.dirs.run, "tern-token"), randomBytes(32).toString("hex"), { mode: 0o600 });
-    writeFileSync(join(input.dirs.run, "task.md"), input.taskContext);
-    writeFileSync(join(input.dirs.run, "launch.json"), JSON.stringify({
-      cwd: `/workspace/${repoName}`,
-      model: input.model,
-      resume: input.resume,
-      ternOrigin: input.ternOrigin,
-      cloudflare: input.cloudflare,
-    }));
+    writeLaunchFiles(input, { cwd: `/workspace/${repoName}`, ternListen: "0.0.0.0:8377" });
     await run("podman", ["rm", "-f", "--ignore", this.containerName(input.sessionId)]);
     await run("podman", [
       "run", "-d", "--init",
@@ -118,7 +82,7 @@ export class PodmanRuntime {
     return address;
   }
 
-  async removeContainer(sessionId: string): Promise<void> {
+  async remove(sessionId: string): Promise<void> {
     await run("podman", ["rm", "-f", "--ignore", "-t", "5", this.containerName(sessionId)]);
   }
 }

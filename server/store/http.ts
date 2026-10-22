@@ -26,7 +26,8 @@ const name = z.string().trim().min(1).max(200);
 const description = z.string().max(64 * 1024);
 // Strict objects: unknown fields are rejected, e.g. a topic `parent` (TOPIC-1).
 const nameBody = z.strictObject({ name });
-const projectBody = z.strictObject({ name, repoPath: z.string().startsWith("/").optional() });
+const projectBody = z.strictObject({ name, repoPath: z.string().startsWith("/").optional(), hostSessions: z.boolean().optional() });
+const projectUpdateBody = z.strictObject({ hostSessions: z.boolean() });
 const taskBody = z.strictObject({ title: name, description: description.optional() });
 // Finishing a task has its own route (TASK-9).
 const taskUpdateBody = z.strictObject({
@@ -35,7 +36,7 @@ const taskUpdateBody = z.strictObject({
   state: z.enum(["open", "in_progress", "in_review"]).optional(),
 });
 const finishBody = z.strictObject({ state: z.enum(["done", "cancelled"]), confirm: z.boolean().optional() });
-const sessionBody = z.strictObject({ model: z.string().min(1).optional() });
+const sessionBody = z.strictObject({ model: z.string().min(1).optional(), runtime: z.enum(["container", "host"]).optional() });
 export type SessionInput = z.infer<typeof sessionBody>;
 const statusBody = z.strictObject({ status: z.string().max(64 * 1024), baseRevision: z.int().min(0) });
 const notesBody = z.strictObject({ text: z.string().max(64 * 1024), baseRevision: z.int().min(0) });
@@ -56,6 +57,11 @@ const routes: Route[] = [
     method: "POST",
     pattern: /^\/projects$/,
     handler: async (c, p, _, body) => c.store.createProject(p, projectBody.parse(await body())),
+  },
+  {
+    method: "PATCH",
+    pattern: new RegExp(`^/projects/${id}$`),
+    handler: async (c, p, [projectId], body) => c.store.updateProject(p, projectId, projectUpdateBody.parse(await body())),
   },
   { method: "GET", pattern: new RegExp(`^/projects/${id}/topics$`), handler: (c, p, [projectId]) => c.store.listTopics(p, projectId) },
   {

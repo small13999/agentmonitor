@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 import { z } from "zod";
 import { git, uncommittedFiles, unpushedCommits } from "./git.ts";
 import { ompRequest } from "./omp-channel.ts";
-import type { WorkspaceDirs } from "./runtime/podman.ts";
+import type { WorkspaceDirs } from "./runtime/runtime.ts";
 import type { Card, PullRequest, TurnLight } from "../shared/api.ts";
 import type { Principal, Store } from "./store/store.ts";
 import { newestTranscript, readTranscript } from "./transcript.ts";
