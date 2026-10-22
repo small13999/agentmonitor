@@ -61,7 +61,8 @@ Unnumbered intent; not testable, so not claims.
 | Task | Requested work with a state, a branch, a status, notes, and the sessions that worked on it |
 | Session | One agent run on a task: a workspace and the agent chats in it |
 | Chat | One omp conversation; a session can start any number of them |
-| Workspace | Where a running session lives: its worktree and container on one machine |
+| Workspace | Where a running session lives: its worktree and its container, or its host processes, on one machine |
+| Host session | A session whose agent runs on the machine itself as the user, without a container |
 | Automation | Trigger (schedule or event) that starts a session |
 | Event | Fact emitted by an agent or the system, with a dedupe key |
 | Lease | Exclusive hold on a named resource |
@@ -99,7 +100,8 @@ Unnumbered intent; not testable, so not claims.
 - **SESSION-4** Every chat starts with both the Agent Monitor workflow context and
   the repository's own `AGENTS.md`.
 - **SESSION-5** A session belongs to one task and runs in one workspace: a
-  worktree of the task's branch and a container on exactly one machine.
+  worktree of the task's branch and a container, or host processes, on exactly
+  one machine.
 - **SESSION-7** A new chat started in a session stays in that session: same
   workspace, worktree, and task, and the session's card shows the new chat.
 - **SESSION-8** Ending a session removes its workspace and keeps its chats; the
@@ -113,6 +115,21 @@ Unnumbered intent; not testable, so not claims.
   keys and GitHub CLI login, so it can push its branch.
 - **SESSION-13** Until a session's chat has loaded, its page says what it waits
   on, including that a stopped container is starting.
+
+## Host sessions
+
+- **HOST-1** A session runs its agent in a container, or on the host when its
+  project allows host sessions; a project allows them only when a human says so.
+- **HOST-2** A host session's agent runs on the gateway's machine as the user,
+  in the session's own worktree, with the user's tools, git identity, ssh keys
+  and GitHub CLI login, and can start processes of its own; ending the session
+  stops all of them.
+- **HOST-3** A host session is marked red on its board card, its task list row,
+  and its task's settings.
+- **HOST-4** A host session's chat, task context, `am`, card, and restart on
+  its last chat work as a container session's do.
+- **HOST-5** A host session never changes the user's omp, Tern, ssh, git, or
+  GitHub CLI configuration.
 
 ## Transcripts
 
@@ -262,6 +279,8 @@ Unnumbered intent; not testable, so not claims.
   or starting a session, and a Notes tab; at the right of its tabs a settings
   button shows the task's state, topic links, status, changes, Cloudflare writes,
   ending its session, and finishing it. Switching tabs keeps the chat loaded.
+- **UI-3** The Tasks page's project menu creates a project from its name, its
+  repository, and whether it allows host sessions.
 
 ## Agent interface
 

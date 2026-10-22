@@ -137,3 +137,29 @@ spec("TASK-8", "a task's notes save as the user types, and its agents read and w
   // The open page, with nothing unsaved, shows the agent's write.
   await notesShow("Ship 26.21 after QA\nAgent: QA passed\n");
 });
+
+spec("UI-3", "the project menu creates a project from its name, repository, and whether it allows host sessions", async () => {
+  await page.goto(`${gateway.url}/#/t`);
+  const menu = page.getByRole("navigation", { name: "Tasks" }).getByRole("combobox", { name: "Project" });
+  await menu.selectOption({ label: "+ Project" });
+  const form = page.getByRole("form", { name: "New project" });
+  await form.getByRole("textbox", { name: "Name" }).fill("agentmonitor");
+  await form.getByRole("textbox", { name: "Repository" }).fill("/home/you/projects/agentmonitor");
+  await form.getByRole("checkbox", { name: /Allow host sessions/ }).check();
+  await form.getByRole("button", { name: "Create project" }).click();
+
+  // The new project is the one shown, and it allows host sessions; the earlier one does not.
+  await page.getByRole("region", { name: "Board" }).waitFor();
+  const projects = await gateway.data<Project[]>("GET", "/projects");
+  const created = projects.find((candidate) => candidate.name === "agentmonitor");
+  assert.deepEqual(created && { repoPath: created.repoPath, hostSessions: created.hostSessions }, { repoPath: "/home/you/projects/agentmonitor", hostSessions: true });
+  assert.equal(projects.find((candidate) => candidate.id === project.id)?.hostSessions, false);
+  await page.goto(`${gateway.url}/#/t`);
+  assert.equal(await menu.inputValue(), created?.id);
+
+  // Cancelling the form keeps the project that was shown.
+  await menu.selectOption({ label: "+ Project" });
+  await form.getByRole("button", { name: "Cancel" }).click();
+  await page.getByRole("navigation", { name: "Tasks" }).waitFor();
+  assert.equal(await menu.inputValue(), created?.id);
+});
