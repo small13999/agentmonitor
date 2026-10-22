@@ -1,6 +1,6 @@
 import { useState, type SubmitEvent } from "react";
 import { api, ApiError, type Card, type EndedSession, type Task, type TaskState, type TaskSummary, type Topic } from "./api.ts";
-import { Light, STATE_LABEL } from "./Board.tsx";
+import { HostMark, Light, STATE_LABEL } from "./Board.tsx";
 import { InlineCreate } from "./InlineCreate.tsx";
 
 const UNFINISHED: TaskState[] = ["open", "in_progress", "in_review"];
@@ -280,6 +280,7 @@ export function WorkspaceSettings({ summary, card, topics, onChanged, onClose }:
       <header className="settings-head">
         {card !== null && <Light turn={card.turn} />}
         <h2>{summary.task.title}</h2>
+        <HostMark card={card} />
         <button type="button" className="ghost close" aria-label="Close settings" onClick={onClose}>×</button>
       </header>
       <TaskPanel task={summary.task} onChanged={onChanged} />

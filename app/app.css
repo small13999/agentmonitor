@@ -47,6 +47,10 @@ button.ghost:hover { color: var(--fg); }
 .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px; display: grid; gap: 8px; }
 .new-project { width: 380px; }
 .new-project label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+.new-project label.check { display: flex; gap: 8px; align-items: flex-start; }
+.new-project .actions, .start-session .actions { display: flex; gap: 8px; }
+/* HOST-3: a session without a container's walls. */
+.host-mark { flex: none; background: var(--red); color: #111; border-radius: 4px; padding: 0 5px; font-size: 11px; font-weight: 700; }
 
 /* UI-1: the app's header over the page of its current menu */
 .shell { display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100vh; }

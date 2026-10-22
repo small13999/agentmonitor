@@ -20,6 +20,12 @@ export function Light({ turn }: { turn: Card["turn"] }) {
   return <span className={`light light-${turn}`} title={LIGHT_LABEL[turn]} aria-label={LIGHT_LABEL[turn]} />;
 }
 
+/** HOST-3: a session whose agent runs on this machine without a container. */
+export function HostMark({ card }: { card: Card | null | undefined }) {
+  if (card?.session.runtime !== "host") return null;
+  return <span className="host-mark" title="Runs on this machine as you, without a container">Host</span>;
+}
+
 function GitLine({ card }: { card: Card }) {
   const parts: string[] = [];
   if (card.git !== null) {
@@ -47,6 +53,7 @@ function TaskCard({ summary, card }: { summary: TaskSummary; card: Card | null }
       <header>
         {card !== null && <Light turn={card.turn} />}
         <strong>{task.title}</strong>
+        <HostMark card={card} />
         <span className="state">{card === null ? (task.state === "cancelled" ? "Cancelled" : "No session") : LIGHT_LABEL[card.turn]}</span>
       </header>
       {summary.topics.length > 0 && (

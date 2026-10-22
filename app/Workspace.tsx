@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, ApiError, usePolled, type Session, type Task, type TaskNotes } from "./api.ts";
+import { api, ApiError, usePolled, type Session, type SessionRuntime, type Task, type TaskNotes } from "./api.ts";
 
 export type WorkspaceTab = "chat" | "notes";
 
@@ -41,11 +41,12 @@ export function WorkspaceTabs({ taskId, tab, settingsOpen, onSettings }: {
 }
 
 /**
- * The Chat tab of a task without a running session (TASK-3): starting one, or reopening a
- * finished task first.
+ * The Chat tab of a task without a running session (TASK-3): starting one, in a container or,
+ * where the project allows it, on the host (HOST-1); or reopening a finished task first.
  */
-export function StartSession({ task, onStarted }: { task: Task; onStarted: () => void }) {
+export function StartSession({ task, hostSessions, onStarted }: { task: Task; hostSessions: boolean; onStarted: () => void }) {
   const [busy, setBusy] = useState(false);
+  const [starting, setStarting] = useState<SessionRuntime | null>(null);
   const [error, setError] = useState<string | null>(null);
   const run = (call: () => Promise<unknown>) => {
     setBusy(true);
@@ -54,6 +55,10 @@ export function StartSession({ task, onStarted }: { task: Task; onStarted: () =>
       () => { setBusy(false); onStarted(); },
       (cause: Error) => { setBusy(false); setError(cause.message); },
     );
+  };
+  const start = (runtime: SessionRuntime) => {
+    setStarting(runtime);
+    run(() => api<Session>("POST", `/tasks/${task.id}/sessions`, { runtime }));
   };
   const finished = task.state === "done" || task.state === "cancelled";
   return (
@@ -72,9 +77,22 @@ export function StartSession({ task, onStarted }: { task: Task; onStarted: () =>
           <p className="muted">
             No session is running.{task.branch !== null && <> Work continues on <code>{task.branch}</code>.</>}
           </p>
-          <button type="button" disabled={busy} onClick={() => run(() => api<Session>("POST", `/tasks/${task.id}/sessions`, {}))}>
-            {busy ? "Starting…" : "Start session"}
-          </button>
+          <div className="actions">
+            <button type="button" disabled={busy} onClick={() => start("container")}>
+              {busy && starting === "container" ? "Starting…" : "Start session"}
+            </button>
+            {hostSessions && (
+              <button
+                type="button"
+                className="danger"
+                disabled={busy}
+                title="The agent runs on this machine as you, without a container"
+                onClick={() => start("host")}
+              >
+                {busy && starting === "host" ? "Starting…" : "Start host session"}
+              </button>
+            )}
+          </div>
         </>
       )}
       {error && <p className="error">{error}</p>}

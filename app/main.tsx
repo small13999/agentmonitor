@@ -31,22 +31,33 @@ function useRoute(): Route {
   return route;
 }
 
-function NewProject({ onCreated }: { onCreated: (project: Project) => void }) {
+/** UI-3: a new project; host sessions only where the user allows them (HOST-1). */
+function NewProject({ onCreated, onCancel }: { onCreated: (project: Project) => void; onCancel: (() => void) | null }) {
   const [error, setError] = useState<string | null>(null);
   const submit = (event: SubmitEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const repoPath = String(form.get("repoPath")).trim();
-    api<Project>("POST", "/projects", { name: String(form.get("name")).trim(), ...(repoPath === "" ? {} : { repoPath }) })
-      .then(onCreated, (cause: Error) => setError(cause.message));
+    api<Project>("POST", "/projects", {
+      name: String(form.get("name")).trim(),
+      ...(repoPath === "" ? {} : { repoPath }),
+      hostSessions: form.get("hostSessions") === "on",
+    }).then(onCreated, (cause: Error) => setError(cause.message));
   };
   return (
-    <form className="panel new-project" onSubmit={submit}>
+    <form className="panel new-project" onSubmit={submit} aria-label="New project">
       <h2>New project</h2>
-      <label>Name<input name="name" required placeholder="draftcoach" /></label>
+      <label>Name<input name="name" required autoFocus placeholder="draftcoach" /></label>
       <label>Repository<input name="repoPath" placeholder="/home/you/projects/draftcoach" /></label>
+      <label className="check">
+        <input type="checkbox" name="hostSessions" />
+        Allow host sessions: agents may run on this machine as you, without a container
+      </label>
       {error && <p className="error">{error}</p>}
-      <button type="submit">Create project</button>
+      <div className="actions">
+        <button type="submit">Create project</button>
+        {onCancel !== null && <button type="button" className="ghost" onClick={onCancel}>Cancel</button>}
+      </div>
     </form>
   );
 }
@@ -92,6 +103,7 @@ function App() {
   const [projectId, setProjectId] = useState<string | null>(() => localStorage.getItem("am.project"));
   const { page, taskId, tab } = useRoute();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [creatingProject, setCreatingProject] = useState(false);
   const project = projects.data?.find((candidate) => candidate.id === projectId) ?? projects.data?.[0] ?? null;
   const tasks = usePolled<TaskSummary[]>(project === null ? null : `/projects/${project.id}/tasks`, 3_000);
   const cards = usePolled<Card[]>(project === null ? null : `/projects/${project.id}/cards`, 2_000);
@@ -107,15 +119,19 @@ function App() {
   const choose = (id: string) => {
     localStorage.setItem("am.project", id);
     setProjectId(id);
+    setCreatingProject(false);
     window.location.hash = "#/";
   };
 
   if (projects.error === "authentication required") return <main className="empty"><Login onLoggedIn={projects.refresh} /></main>;
   if (projects.data === null) return <main className="empty">{projects.error ?? "Loading…"}</main>;
-  if (project === null) {
+  if (project === null || creatingProject) {
     return (
       <main className="empty">
-        <NewProject onCreated={(created) => { projects.refresh(); choose(created.id); }} />
+        <NewProject
+          onCreated={(created) => { projects.refresh(); choose(created.id); }}
+          onCancel={project === null ? null : () => setCreatingProject(false)}
+        />
       </main>
     );
   }
@@ -148,6 +164,7 @@ function App() {
           projects={projects.data}
           project={project}
           onProject={choose}
+          onNewProject={() => setCreatingProject(true)}
           tasks={tasks.data ?? []}
           cards={cardsBySession}
           selected={taskId}
@@ -167,7 +184,9 @@ function App() {
                 settingsOpen={settingsOpen}
                 onSettings={() => setSettingsOpen((open) => !open)}
               />
-              {current.sessionId === null && tab === "chat" && <StartSession task={current.task} onStarted={refresh} />}
+              {current.sessionId === null && tab === "chat" && (
+                <StartSession task={current.task} hostSessions={project.hostSessions} onStarted={refresh} />
+              )}
               <Notes key={current.task.id} taskId={current.task.id} hidden={tab !== "notes"} />
               {settingsOpen && (
                 <WorkspaceSettings
