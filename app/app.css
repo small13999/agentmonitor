@@ -1,0 +1,145 @@
+:root {
+  --bg: #0f1115;
+  --surface: #171a21;
+  --surface-2: #1e222b;
+  --border: #2a2f3a;
+  --fg: #e6e8ec;
+  --muted: #8b93a3;
+  --accent: #7aa2f7;
+  --red: #f7768e;
+  --orange: #ff9e64;
+  --green: #9ece6a;
+  --grey: #565f73;
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; }
+a { color: var(--accent); text-decoration: none; }
+code, pre { font: 12px/1.4 ui-monospace, "SF Mono", Menlo, monospace; }
+pre { white-space: pre-wrap; margin: 0; }
+h2, h3, h4 { margin: 0; font-weight: 600; }
+h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+h4 { font-size: 13px; }
+
+button, select, input, textarea {
+  font: inherit;
+  color: var(--fg);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 10px;
+}
+button { cursor: pointer; }
+button:disabled, textarea:disabled { opacity: 0.5; cursor: default; }
+button.ghost { background: transparent; border-color: transparent; color: var(--muted); padding: 4px 6px; text-align: left; }
+button.ghost:hover { color: var(--fg); }
+
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+.error { color: var(--red); }
+.banner { grid-area: banner; margin: 0 0 8px; }
+.empty { display: grid; place-items: center; min-height: 100vh; }
+
+.panel { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px; display: grid; gap: 8px; }
+.new-project { width: 380px; }
+.new-project label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+
+/* UI-1: the app's header over the page of its current menu */
+.shell { display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100vh; }
+.app-header { display: flex; align-items: center; gap: 20px; height: 44px; padding: 0 14px; background: var(--surface); border-bottom: 1px solid var(--border); }
+.brand { color: var(--fg); font-weight: 700; }
+.menus { display: flex; gap: 4px; }
+.menu { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 6px; color: var(--muted); }
+.menu:hover, .menu[aria-current="page"] { color: var(--fg); background: var(--surface-2); }
+.badge { background: var(--red); color: #111; border-radius: 10px; padding: 0 7px; font-size: 12px; font-weight: 700; }
+
+/* Tasks: the task list beside the task's workspace; kept, hidden, while the board shows */
+.tasks-page { display: grid; grid-template-columns: 172px minmax(0, 1fr); min-height: 0; }
+.tasks-page[hidden] { display: none; }
+.task-list { background: var(--surface); border-right: 1px solid var(--border); padding: 10px 8px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+.task-list select { width: 100%; margin-bottom: 4px; }
+.task-list .muted { padding: 0 4px; }
+.task-link { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px; color: var(--fg); min-width: 0; }
+.task-link .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-link:hover { background: var(--surface-2); }
+.task-link[aria-current="page"] { background: var(--surface-2); outline: 1px solid var(--border); }
+.inline-create { display: flex; flex-wrap: wrap; gap: 4px; }
+.inline-create input { flex: 1; min-width: 0; }
+.inline-create .error { flex-basis: 100%; margin: 0; font-size: 12px; }
+
+/* Turn lights: red waits on you, orange works, green finished, grey has no live agent. */
+.light { width: 9px; height: 9px; border-radius: 50%; flex: none; display: inline-block; background: var(--grey); }
+.light-blocked { background: var(--red); box-shadow: 0 0 6px var(--red); }
+.light-working { background: var(--orange); animation: pulse 1.4s ease-in-out infinite; }
+.light-done { background: var(--green); }
+/* A task without a running session. */
+.light-none { background: none; border: 1px solid var(--grey); }
+@keyframes pulse { 50% { opacity: 0.35; } }
+
+/* Board: the project's tasks in columns by state */
+.board-page { min-height: 0; overflow: auto; padding: 14px; }
+.board { display: grid; grid-template-columns: repeat(4, minmax(260px, 1fr)); gap: 12px; align-items: start; }
+.column { display: grid; gap: 10px; align-content: start; }
+.column h2 { margin: 0; font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+.new-task input, .new-task textarea { width: 100%; }
+.new-task .actions, .edit-task .actions { display: flex; gap: 8px; }
+.edit-task { display: grid; gap: 6px; }
+.description { margin: 0; white-space: pre-wrap; }
+.start-session { display: grid; gap: 10px; align-content: start; justify-items: start; max-width: 640px; }
+.start-session h2 { margin: 0; }
+.card { display: grid; gap: 8px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; color: var(--fg); }
+.card:hover { border-color: var(--grey); }
+.card-blocked { border-color: color-mix(in srgb, var(--red) 55%, var(--border)); }
+.card header { display: flex; align-items: center; gap: 8px; }
+.card header .state { margin-left: auto; color: var(--muted); font-size: 12px; }
+.meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; color: var(--muted); }
+.chip { display: inline-flex; align-items: center; gap: 4px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: 0 8px; font-size: 12px; }
+.chip-x { border: none; background: none; padding: 0 2px; color: var(--muted); }
+.said { margin: 0; display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap; }
+.said b { color: var(--muted); font-weight: 600; margin-right: 6px; }
+.said.you { -webkit-line-clamp: 2; }
+.said.agent { -webkit-line-clamp: 4; }
+.git-line { display: flex; gap: 10px; font-size: 12px; }
+.unsaved { color: var(--orange); }
+.overlap { margin: 0; font-size: 12px; color: var(--orange); }
+
+/*
+ * UI-2: the workspace, a small browser. The tabs' contents share one grid cell: the chat
+ * frames, the notes over them, and the settings over the right of both.
+ */
+.workspace { display: grid; grid-template-rows: auto auto minmax(0, 1fr); grid-template-areas: "banner" "tabs" "body"; min-width: 0; min-height: 0; padding: 0 12px 12px; }
+.workspace-page { grid-area: body; overflow-y: auto; margin: 0; padding-top: 14px; }
+.workspace-tabs { grid-area: tabs; display: flex; align-items: flex-end; gap: 2px; margin-bottom: 8px; border-bottom: 1px solid var(--border); }
+.workspace-tabs [role="tablist"] { display: flex; gap: 2px; padding-top: 8px; }
+.tab { padding: 6px 16px; margin-bottom: -1px; color: var(--muted); border: 1px solid transparent; border-radius: 8px 8px 0 0; }
+.tab:hover { color: var(--fg); }
+.tab[aria-selected="true"] { color: var(--fg); background: var(--surface); border-color: var(--border); border-bottom-color: var(--surface); }
+.icon-button { margin: 0 0 4px auto; display: grid; place-items: center; padding: 5px; background: transparent; border-color: transparent; color: var(--muted); }
+.icon-button:hover, .icon-button[aria-expanded="true"] { color: var(--fg); background: var(--surface-2); }
+
+.notes { grid-area: body; z-index: 1; display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 6px; min-height: 0; }
+.notes textarea { width: 100%; height: 100%; resize: none; padding: 12px 14px; border-radius: 10px; background: var(--surface); font: 13px/1.55 ui-monospace, "SF Mono", Menlo, monospace; }
+.notes-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; min-height: 24px; }
+.conflict { color: var(--orange); }
+
+.workspace-settings { grid-area: body; z-index: 2; justify-self: end; width: 340px; max-width: 100%; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; box-shadow: -10px 0 28px rgb(0 0 0 / 0.4); }
+.settings-head { display: flex; align-items: center; gap: 8px; }
+.settings-head .close { margin-left: auto; font-size: 18px; line-height: 1; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.status { display: grid; gap: 4px; border-top: 1px solid var(--border); padding-top: 8px; }
+.files { margin: 0; padding-left: 18px; }
+button.danger { border-color: color-mix(in srgb, var(--red) 55%, var(--border)); color: var(--red); }
+button.ghost.danger { border-color: transparent; }
+.end-session p { margin: 0; }
+.end-session .actions { display: flex; gap: 8px; }
+
+.session-frames { grid-area: body; position: relative; min-height: 0; }
+/* Hidden frames keep their size, so showing one again needs no new layout in Tern. */
+.session-frame { position: absolute; inset: 0; width: 100%; height: 100%; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); visibility: hidden; }
+.session-frame.current { visibility: visible; }
+.session-frames.covered .session-frame { visibility: hidden; }
+.session-frame-status { position: absolute; inset: 0; z-index: 1; margin: 0; display: grid; place-items: center; color: var(--muted); pointer-events: none; }
