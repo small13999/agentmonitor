@@ -2,7 +2,8 @@
 
 A browser control surface for coding agents. Work is organized as tasks: each
 task has a branch, a status, notes, and the sessions that worked on it; a session
-is a worktree and a container running omp, whose chat shows in Tern's web client.
+is a worktree and a container (or, where the project allows it, host processes)
+running omp, whose chat shows in Tern's web client.
 The monitor tracks every task's state, its topics, changes and pull requests.
 `SPEC.md` holds the contract and goals.
 
@@ -56,7 +57,8 @@ A task is requested work: a title, a description, a state (`open`,
 lines, revisioned, kept by its agents), notes (revisioned), and topic links. A
 session is one agent run on a task, with every omp chat started in it (Tern's
 `/new` starts another in the same session); a task has at most one running
-session. While a session runs it has a workspace: a worktree and a container. The
+session. While a session runs it has a workspace: a worktree and a container, or
+host processes for a host session (below). The
 gateway owns one SQLite store (`<state dir>/store.sqlite`) with projects, topics,
 tasks, task↔topic links, and sessions. A store from before tasks is migrated on
 start: each session becomes a task with its name, branch, topic links, and notes.
@@ -103,6 +105,27 @@ session's omp home, and the omp agent directory's credentials and providers
 When Tern's host is asked for a session whose container is not running (it
 stopped, or the machine restarted), the gateway starts a new container on the
 current image, resuming the session's newest chat, and waits until Tern answers.
+
+### Host sessions
+
+A project created with "Allow host sessions" (the project menu's "+ Project", or
+`PATCH /api/store/projects/:id {hostSessions}`, humans only) can start a session
+with `{runtime: "host"}`: the agent runs on the gateway's machine as the user, in
+its own worktree, with the user's tools and credentials, and no container. It is
+marked with a red "Host" badge. Agent Monitor is developed this way: containers
+have no podman. `server/runtime/host.ts` writes the same run directory as the
+container runtime and spawns `container/host-entry.ts`, which shares the session
+start with the container entrypoint (`container/launch.ts`) but keeps everything
+it writes in the session's directories: omp's agent dir is
+`omp-home/agent` (`PI_CODING_AGENT_DIR`), Tern's settings `run/tern-config`
+(`TERN_CONFIG_DIR`), and `am` is `run/bin/am`. The user's `~/.omp`,
+`~/.config/tern`, `~/.ssh`, `~/.gitconfig` and gh login are never written. Tern's
+web client listens on a free loopback port (`run/host.json`), its assets are
+stored once per tern version in `<state dir>/tern-web/`, and the log is
+`run/host.log`. The session's processes run without the gateway's
+`AGENTMONITOR_*` and `npm_*` variables and carry `AGENTMONITOR_SESSION=<id>`;
+ending or restarting the session SIGTERMs every process with it, then SIGKILLs
+what remains after 5 s, including servers the agent started.
 
 `POST /api/store/sessions/:id/end` ends a session: it stops the container, keeps
 the worktree's uncommitted changes (untracked files included, ignored ones not)
