@@ -1,183 +1,10 @@
 # Agent Monitor
 
-A browser-first control surface for agent terminals, isolated workspaces, and the services they host.
-
-## Product contract
-
-Terminals are the primary interface. Agent Monitor should make every active agent session visible and reachable from one page without making the user manage terminal windows, SSH tabs, container ports, or harness-specific UIs.
-
-The design priorities are:
-
-1. Correct and responsive terminal behavior.
-2. Strong isolation between ordinary agent workspaces and host/operator access.
-3. Existing, high-quality primitives over custom protocols or terminal implementations.
-4. One local browser entry point for local and remote machines.
-5. Low idle resource use and architecture that remains understandable.
-6. Harness independence; OMP is the first integration, not the protocol boundary.
-
-## Intended experience
-
-- Switch between local and remote machines implementing the same machine contract.
-- See one main terminal for every agent workspace in the monitor view.
-- Open a workspace to see every cmux terminal the agent created inside it.
-- Focus any terminal for normal interactive use without reconnecting or losing scrollback.
-- Open exactly two bounded web-service slots per ordinary workspace.
-- Add explicit host, root, and elevated/operator sessions without weakening ordinary workspace isolation.
-- Eventually open an optional browser IDE and search harness-specific session history through pluggable integrations.
-
-Normal workspace agents should only see their own container's cmux session. Elevated sessions may intentionally receive broader capabilities, but that must be an explicit security boundary rather than an accidental shared socket or container privilege.
-
-## Current implementation
-
-The local implementation now provides:
-
-- Dynamic discovery of durable DraftCoach `agentctl` sessions.
-- A session manager that creates titled sessions, resumes paused sessions, and
-  keeps paused sessions out of the terminal dashboard.
-- A guarded pause action. `agentctl` refuses an ordinary pause while cmux
-  reports a working agent; force-pause is a separate explicit action.
-- One private headless cmux daemon and one interactive Bash terminal that starts
-  OMP automatically per running agentctl container.
-- Durable worktrees, branches, OMP history, cmux layouts, service-port
-  assignments, and monitor credentials across pause/resume and host reboots.
-- A 3 GiB memory ceiling with container swap disabled for every ordinary
-  workspace, configurable through host `AGENTCTL_MEMORY_LIMIT_MIB`.
-- Live WSL memory, swap, and per-session memory visibility, with warning and
-  critical pressure states in the browser.
-- A monitor view, all-terminal workspace view, and focused interactive terminal
-  view.
-- Exactly two hosted-service links per workspace:
-  - **Port 1** forwards the session's allocated host port to container `4321`.
-  - **Port 2** forwards the session's allocated host port to container `1420`.
-- HTTP and WebSocket-compatible service routing through session-specific
-  `.localhost` origins.
-- GitHub CLI in the workspace image, authenticated from the host's existing
-  `gh` configuration.
-
-Remote machine discovery, SSH lifecycle management, gateway authentication/TLS,
-elevated sessions, IDE launch, and harness history adapters remain future
-direction.
-
-## Architecture
-
-```text
-Browser
-  └─ local Agent Monitor gateway
-       ├─ agentctl lifecycle API → local agentctl CLI
-       ├─ cmux WebSocket → each running workspace container
-       ├─ port-1.<session>.localhost → allocated host port → container :4321
-       └─ port-2.<session>.localhost → allocated host port → container :1420
-
-agentctl workspace container
-  ├─ private cmux daemon, state, WebSocket, and control socket
-  ├─ OMP main terminal plus agent-created terminals
-  ├─ durable worktree and session-local OMP state
-  └─ exactly two bounded hosted-service ports
-```
-
-The target remote design keeps the browser on one local origin. A local gateway
-owns SSH connections/tunnels to remote machine agents and presents the same
-machine/workspace model to the UI.
-
-## Decisions and invariants
-
-### cmux is the terminal/session primitive
-
-Agent Monitor consumes cmux's resource tree and attach streams rather than inventing a terminal multiplexer or harness protocol. Each ordinary container has a private daemon, so agents can create panes and workspaces without gaining visibility into other containers or the host.
-
-### Session connections remain mounted
-
-Changing monitor/workspace views hides terminal cards instead of disconnecting their cmux clients. This preserves terminal state and scrollback and avoids reconnect storms. Hidden terminals do not participate in browser-driven PTY sizing.
-
-### Presentation and focus modes
-
-Clicking a terminal opens presentation mode for quick interaction; unmodified
-Escape closes that view. `Alt+Shift+Enter` toggles focus mode, where overlapping
-terminal and OMP shortcuts—including Escape—pass through without changing the
-Agent Monitor view. The terminal header shows the active mode and provides
-explicit mode and close controls. Each visible workspace terminal also keeps
-the session's Port 1 and Port 2 links available.
-
-### Resource containment and pressure visibility
-
-`agentctl` applies the same configured memory value to the container's memory
-and total memory-plus-swap ceilings, leaving no container swap allowance.
-Agent Monitor samples WSL `/proc/meminfo` and rootless Podman stats every five
-seconds. Host memory warns at 80% and becomes critical at 90%; swap warns at 50%
-and becomes critical at 80%; an individual session warns at 80% of its limit
-and becomes critical at 90%.
-
-### The browser owns terminal sizing
-
-The active browser calls cmux's exclusive client-sizing operation after reporting dimensions. Initial `vt-state` data initializes xterm and normal `output` events update it. Subsequent cmux `resized` snapshots are intentionally not replayed into xterm: they acknowledge a size this exclusive client already applied, and resetting from that replay causes a visible blank frame.
-
-If sizing becomes multi-owner later, this event handling must be reconsidered rather than silently restoring replay resets.
-
-### Terminal rendering must not regress to DOM resize flicker
-
-The dense Workspace 1 TUI exposed two separate issues:
-
-- At smaller layouts, monitor and workspace cards had the same width; there was no terminal resize bug.
-- At `1920×1080`, the monitor had two wide cards while Workspace 1 had three narrower cards per row. The xterm DOM renderer visibly cleared/repainted while shrinking.
-- A temporary cloned-DOM overlay hid blanks but introduced a delayed font-size jump. It was removed.
-
-The current implementation therefore:
-
-- Uses the official `@xterm/addon-webgl` renderer after `terminal.open()`.
-- Disposes the addon on WebGL context loss, allowing xterm's normal fallback.
-- Uses `FitAddon.proposeDimensions()` and public `Terminal.resize()` directly.
-- Applies focus font options and fits synchronously in React `useLayoutEffect`, before the next paint.
-- Uses `ResizeObserver` plus `requestAnimationFrame` for ordinary container geometry changes.
-- Never uses cloned terminal DOM, CSS-scaled terminal snapshots, arbitrary settling timers, or renderer-private APIs.
-
-Relevant upstream references:
-
-- [xterm WebGL addon](https://github.com/xtermjs/xterm.js/blob/master/addons/addon-webgl/README.md)
-- [xterm FitAddon](https://github.com/xtermjs/xterm.js/blob/master/addons/addon-fit/src/FitAddon.ts)
-
-### Hosted services use isolated hostnames
-
-Arbitrary agent-hosted applications must work without HTML rewriting and may use root-relative assets, redirects, cookies, and WebSockets. Each slot therefore gets its own hostname, for example:
-
-```text
-http://port-1.patch-notes.localhost:5173/
-```
-
-This also prevents an agent-hosted application from sharing the Agent Monitor browser origin or reading its storage. The gateway resolves only session IDs and ports returned by `agentctl list`; it is not an open proxy.
-
-agentctl publishes the two service ports on allocated host-loopback ports. The
-separate cmux WebSocket port is control-plane transport and does not consume a
-hosted-service slot.
-
-### Security boundaries stay explicit
-
-Ordinary agent containers must not receive:
-
-- the Podman socket;
-- production credentials or another workspace's state;
-- another workspace's cmux socket;
-- implicit root/host access beyond the current agentctl container contract.
-
-The current DraftCoach contract deliberately supplies the host's development
-SSH configuration and GitHub CLI credentials so agents can fetch, push, inspect
-issues, and open PRs. That is an explicit capability and should use
-least-privilege credentials.
-
-cmux listens on a host-loopback forwarded port with a random per-session token.
-Remote or shared use additionally requires TLS at the gateway boundary,
-authorization by machine/session capability, and an explicit elevated-session
-policy.
-
-## Terminal regression checklist
-
-Any terminal renderer, sizing, grid, or cmux attach change must be exercised with a dense full-screen TUI, not only a shell prompt:
-
-1. `1440×1000`: monitor → Workspace 1 → monitor, where the card width does not change.
-2. `1920×1080`: monitor → Workspace 1 → monitor, where the main card changes between the two-card and three-card grid widths.
-3. Focus Workspace 1 and close it again at both resolutions.
-4. Confirm the terminal reaches final canvas geometry on the first painted focused/unfocused frame.
-5. Confirm there is no cloned resize cover, delayed font jump, reconnect, lost scrollback, or hidden terminal changing PTY size.
-6. Confirm focused keyboard input still reaches the intended surface.
+A browser control surface for coding agents. Work is organized as tasks: each
+task has a branch, a status, notes, and the sessions that worked on it; a session
+is a worktree and a container running omp, whose chat shows in Tern's web client.
+The monitor tracks every task's state, its topics, changes and pull requests.
+`SPEC.md` holds the contract and goals.
 
 ## Development
 
@@ -185,11 +12,179 @@ Any terminal renderer, sizing, grid, or cmux attach change must be exercised wit
 npm install
 npm run dev
 npm run build
+node scripts/build-image.ts   # workspace image; needed by container tests
+npm test
+npm run spec:check
 ```
 
-Build the current prototype workspace image with:
+`SPEC.md` is the behavioral contract: numbered claims, each covered by a
+`spec("ID", ...)` test. `spec:check` fails on drift between the claims, the
+tests, and `spec.lock.json`; run `npm run spec:lock` after reviewing a change.
 
-```bash
-podman build -t localhost/agentmonitor-prototype:dev \
-  -f prototype/Containerfile prototype
-```
+Tests drive a real gateway process (`tests/harness.ts`). Store claims run with
+`AGENTMONITOR_WORKSPACE_RUNTIME=none` (records only); container claims share one
+gateway and its session containers per test file and rebuild the image first
+(cached by podman).
+UI claims build the app into `dist/` and drive it in headless Chromium through
+Playwright (`npx playwright install chromium-headless-shell` once). Tern's web
+client draws with WebGPU, which Chromium runs on the machine's Vulkan driver
+(Mesa's llvmpipe without a GPU, package `mesa-vulkan-drivers`).
+
+## Web app
+
+`app/` is the web app, served at `/` (`npm run dev`: http://127.0.0.1:5173/). A
+header names Agent Monitor and its menus, Board and Tasks. Board (`#/`) shows the
+project's tasks in columns by state (Open, In progress, In review, Done; Done
+shows the 20 most recently finished), waiting-on-you first, then in creation
+order; "+ New task" creates one without starting work. Tasks (`#/t`) lists the
+open, in-progress, and in-review tasks (172 px wide, in creation order) beside
+the workspace. `#/t/<id>` opens a task's workspace, a small browser with tabs:
+Chat (its running session's chat in Tern, or a Start session button) and Notes
+(`#/t/<id>/notes`, the task's notes, saved as typed; agents use `am notes`). The
+gear at the right of the tabs opens the workspace settings: the task's state,
+title and description, its status, topic links, the session's changes, pull
+requests, overlapping sessions, Cloudflare writes, ending the session, and
+finishing the task. Other tabs hide the chat's frame without unloading it; the
+Tasks page stays mounted (hidden) while the board shows, for the same reason.
+`shared/api.ts` holds the wire types both sides use. Tasks, cards, topics, and
+notes poll.
+
+## Store, tasks, and sessions
+
+A task is requested work: a title, a description, a state (`open`,
+`in_progress`, `in_review`, `done`, `cancelled`), one branch, a status (≤ 50
+lines, revisioned, kept by its agents), notes (revisioned), and topic links. A
+session is one agent run on a task, with every omp chat started in it (Tern's
+`/new` starts another in the same session); a task has at most one running
+session. While a session runs it has a workspace: a worktree and a container. The
+gateway owns one SQLite store (`<state dir>/store.sqlite`) with projects, topics,
+tasks, task↔topic links, and sessions. A store from before tasks is migrated on
+start: each session becomes a task with its name, branch, topic links, and notes.
+`/api/store/*` serves it to the UI: `/projects/:id/tasks` (list, create),
+`/tasks/:id` (detail, `PATCH` title, description, unfinished state),
+`/tasks/:id/{status,notes,topics/:topic,sessions,finish}`. Each running session
+gets a Unix socket (`<state dir>/sessions/<id>/run/am.sock`) serving the same
+routes with the agent's scope (its project only); the socket is the agent's
+identity, so no token is issued. Inside the container, `am` (`container/am.ts`)
+is the agent's client for it; `am check` lists what would not survive the
+session (uncommitted files, unpushed commits, untracked files that look like
+secrets) and fails until it is clean.
+
+Starting a task's first session in a project with a `repoPath` creates the
+task's `am/<title>-<hex>` branch from `origin/HEAD` (or `HEAD` without an
+origin); later sessions add their worktree on the same branch, taken from origin
+when only origin has it. The container `am-<id>` runs
+`localhost/agentmonitor-workspace:dev`
+(`container/Containerfile`, built by `node scripts/build-image.ts [--base
+IMAGE]` from the local `tern` and `omp` binaries). The entrypoint starts Tern's
+daemon with one Tern session, `workspace`, whose block is Tern's chat on omp in the
+worktree (`tern acp am-omp`; `am-omp` is a Tern agent entry for
+`container/acp-filter.ts`, which runs `omp acp --auto-approve`; written to the
+container's Tern settings). Tern 0.9.4 stops drawing a chat at some search
+results (a glob listing one file name in two folders, some greps;
+stencil-hq/tern-sdk#99), so the filter sends globs as full paths and greps as
+plain tools. `run/launch.json`
+carries the model and an omp chat id to resume. Then `tern web serve` runs
+on the container's port 8377, published on a random loopback port, with the
+web client the image build stored from this tern (`container/tern-web-assets.ts`
+downloads the release's wasm and checks it against the page's sha384 pin, so
+browsers load nothing from outside the gateway). Tern's daemon socket is
+`run/tern-daemon.sock`; inside the container `tern` finds it through
+`TERN_DAEMON_SOCKET`. The daemon saves its sessions next to it
+(`tern-daemon.sock.state`); the entrypoint deletes that file on each start, so the
+chat always comes from `launch.json`. The omp extension (`container/omp-extension.ts`) answers
+the gateway's turn and system-prompt queries at `run/omp.sock`. The gateway
+writes the task (title, description, status, notes) to `run/task.md` on every
+container start, and the entrypoint appends it to the workflow context. The
+container gets the worktree, the repository's `.git`, the run directory, the
+session's omp home, and the omp agent directory's credentials and providers
+(`agent.db`, `models.db`, `models.yml`); never podman.
+
+When Tern's host is asked for a session whose container is not running (it
+stopped, or the machine restarted), the gateway starts a new container on the
+current image, resuming the session's newest chat, and waits until Tern answers.
+
+`POST /api/store/sessions/:id/end` ends a session: it stops the container, keeps
+the worktree's uncommitted changes (untracked files included, ignored ones not)
+as a commit at `refs/agentmonitor/snapshots/<task id>` built through a scratch
+index, then deletes the worktree and the run directory. The task's branch stays,
+and so does the omp home (`sessions/<id>/omp-home`: every chat's transcript, the
+newest one being the session's current chat). The snapshot ref is outside
+branches and tags, so pushes leave it on the machine. The task's next session
+applies the snapshot to its fresh worktree as uncommitted changes and drops the
+ref; parts that conflict with a branch that moved since stay as merge markers,
+and the snapshot moves to `…-unapplied-<time>` so nothing is lost. The response
+lists the kept files. `POST /api/store/tasks/:id/finish` (`done` or
+`cancelled`) ends the running session and deletes the task's branch here; with
+commits no remote branch (nor the base branch) has, it answers 409 listing them
+(`unpushed`) unless the body has `"confirm": true`.
+
+`GET /api/store/projects/:id/cards` returns one card per running session,
+blocked-on-you first: the turn light (`blocked` red, `working` orange, `done`
+green, `stopped` when the extension does not answer), the last user message and
+reply from the newest chat, uncommitted files and unpushed commits from the
+worktree, open pull requests from `gh` (cached 30 s), and the other sessions
+that changed the same files.
+
+A task's Chat tab shows its session's chat in Tern's web client, framed from the
+session's own host, `tern-<id>.localhost:<monitor port>`, since the client
+loads everything from root paths. The gateway proxies that host to the
+container's published port (`server/tern-proxy.ts`) and adds what `tern web
+serve` asks for: the token from `run/tern-token` on `/wire` and `/fonts` and
+the origin it accepts, so neither reaches the browser. It opens `/wire` and
+`/fonts` only for pages on that Tern host. `/fonts` serves the image's fallback
+fonts (Noto CJK, Noto core scripts, DejaVu) for characters the client's
+built-in faces lack. `*.localhost` names resolve on the browser's own machine,
+so this needs the monitor in local mode; WebGPU needs Chrome or Edge.
+
+The app keeps the last four sessions' clients loaded and hidden, so going back
+to one is instant. The image names the client's script and wasm by content
+hash and the gateway marks them immutable; Chrome keeps the script but
+refetches the 60 MB wasm (~0.2 s from the gateway) on every load, likely over
+its cache's entry limit. The page seeds Tern's dark theme unless the user picked one. The
+gateway holds a session's new `/wire` until 3 s after its last one closed: Tern
+0.9.2 syncs a client that reconnects sooner (a reload) in ~11 s instead of ~2.
+
+Opening a session whose container stopped says "Starting the session's
+container…" until its chat loads.
+
+Session containers get read-only copies of the user's `~/.ssh`, `~/.gitconfig`
+and `~/.config/gh`, so agents commit as the user and push over ssh; the image
+has `ssh` and `gh`.
+
+A project's agents reach its Cloudflare account through the gateway
+(`server/cloudflare.ts`), which keeps the tokens in
+`~/.config/agentmonitor/cloudflare/<project name>.env`
+(`CLOUDFLARE_READ_TOKEN`, optional `CLOUDFLARE_WRITE_TOKEN`). A container of such
+a project gets `CLOUDFLARE_API_BASE_URL`, a loopback relay to its session
+socket, so Wrangler works unchanged. Reads always pass; writes pass only while
+the user allows them in the task's settings, 10 minutes at a time or until
+revoked. Grants live in the gateway's memory: a restart revokes them. A token
+file added later reaches a session when its container starts again.
+
+`AGENTMONITOR_STATE_DIR` (default `~/.local/state/agentmonitor`),
+`AGENTMONITOR_WORKSPACE_RUNTIME` (`podman` | `none`),
+`AGENTMONITOR_WORKSPACE_MEMORY_MIB` (default 5120),
+`AGENTMONITOR_OMP_AGENT_DIR` (default `~/.omp/agent`), `AGENTMONITOR_GH`
+(default `gh`), `AGENTMONITOR_CREDENTIALS_HOME` (default `~`),
+`AGENTMONITOR_CONFIG_DIR` (default `~/.config/agentmonitor`), and
+`AGENTMONITOR_CLOUDFLARE_API` (default `https://api.cloudflare.com`) configure
+this. Tests point them at a scripted fake model (`tests/fake-model.ts`), a fake
+`gh`, fixture credentials, and a fake Cloudflare API.
+
+## Gateway
+
+`server/` holds the gateway shared by the Vite dev plugin (`npm run dev`, port
+5173) and the standalone production server (`npm run build`, `npm run
+gateway:build`, then `npm run gateway:start`; port `AGENTMONITOR_PORT`, default
+4173, serving `dist/`). Besides each session's Tern host, both serve:
+
+- `GET /api/health` (unauthenticated liveness plus `{ machine, auth }` flags).
+- `POST /api/auth/login|logout`, `GET /api/auth/status`: cookie sessions
+  (`__Host-agentmonitor`, Secure/HttpOnly/SameSite=Strict) in `remote-cookie`
+  mode, where the app asks for the login secret first. Local mode needs no login.
+- `/api/store/*`, the store API above.
+
+Remote mode (`AGENTMONITOR_AUTH_MODE=remote-cookie`) also requires
+`AGENTMONITOR_PUBLIC_ORIGIN` (exact https origin) and a 0600
+`AGENTMONITOR_LOGIN_SECRET_FILE`; only that host reaches the API and the app.
