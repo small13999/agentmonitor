@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type SubmitEvent } from "react";
 import { api, ApiError, usePolled, type Session, type SessionRuntime, type Task, type TaskNotes } from "./api.ts";
 
 export type WorkspaceTab = "chat" | "notes";
@@ -42,11 +42,12 @@ export function WorkspaceTabs({ taskId, tab, settingsOpen, onSettings }: {
 
 /**
  * The Chat tab of a task without a running session (TASK-3): starting one, in a container or,
- * where the project allows it, on the host (HOST-1); or reopening a finished task first.
+ * where the project allows it, on the host (HOST-1), also in the main checkout and going on
+ * with one of the user's omp chats (HOST-6, HOST-7); or reopening a finished task first.
  */
 export function StartSession({ task, hostSessions, onStarted }: { task: Task; hostSessions: boolean; onStarted: () => void }) {
   const [busy, setBusy] = useState(false);
-  const [starting, setStarting] = useState<SessionRuntime | null>(null);
+  const [starting, setStarting] = useState<SessionRuntime | "checkout" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const run = (call: () => Promise<unknown>) => {
     setBusy(true);
@@ -56,9 +57,14 @@ export function StartSession({ task, hostSessions, onStarted }: { task: Task; ho
       (cause: Error) => { setBusy(false); setError(cause.message); },
     );
   };
-  const start = (runtime: SessionRuntime) => {
-    setStarting(runtime);
-    run(() => api<Session>("POST", `/tasks/${task.id}/sessions`, { runtime }));
+  const start = (kind: SessionRuntime | "checkout", body: Record<string, unknown>) => {
+    setStarting(kind);
+    run(() => api<Session>("POST", `/tasks/${task.id}/sessions`, body));
+  };
+  const startInCheckout = (event: SubmitEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const resume = String(new FormData(event.currentTarget).get("resume")).trim();
+    start("checkout", { runtime: "host", checkout: true, ...(resume === "" ? {} : { resume }) });
   };
   const finished = task.state === "done" || task.state === "cancelled";
   return (
@@ -78,7 +84,7 @@ export function StartSession({ task, hostSessions, onStarted }: { task: Task; ho
             No session is running.{task.branch !== null && <> Work continues on <code>{task.branch}</code>.</>}
           </p>
           <div className="actions">
-            <button type="button" disabled={busy} onClick={() => start("container")}>
+            <button type="button" disabled={busy} onClick={() => start("container", { runtime: "container" })}>
               {busy && starting === "container" ? "Starting…" : "Start session"}
             </button>
             {hostSessions && (
@@ -87,12 +93,25 @@ export function StartSession({ task, hostSessions, onStarted }: { task: Task; ho
                 className="danger"
                 disabled={busy}
                 title="The agent runs on this machine as you, without a container"
-                onClick={() => start("host")}
+                onClick={() => start("host", { runtime: "host" })}
               >
                 {busy && starting === "host" ? "Starting…" : "Start host session"}
               </button>
             )}
           </div>
+          {hostSessions && (
+            <form className="actions" aria-label="Main checkout" onSubmit={startInCheckout}>
+              <input name="resume" placeholder="omp chat id to go on with (optional)" aria-label="omp chat to resume" disabled={busy} />
+              <button
+                type="submit"
+                className="danger"
+                disabled={busy}
+                title="A host session in the project's main checkout, the live code, instead of a worktree; one per project"
+              >
+                {busy && starting === "checkout" ? "Starting…" : "Start in main checkout"}
+              </button>
+            </form>
+          )}
         </>
       )}
       {error && <p className="error">{error}</p>}

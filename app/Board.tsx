@@ -20,9 +20,10 @@ export function Light({ turn }: { turn: Card["turn"] }) {
   return <span className={`light light-${turn}`} title={LIGHT_LABEL[turn]} aria-label={LIGHT_LABEL[turn]} />;
 }
 
-/** HOST-3: a session whose agent runs on this machine without a container. */
+/** HOST-3: a session whose agent runs on this machine without a container; HOST-6: in the main checkout. */
 export function HostMark({ card }: { card: Card | null | undefined }) {
   if (card?.session.runtime !== "host") return null;
+  if (card.session.checkout) return <span className="host-mark" title="Runs on this machine as you, in the main checkout: the live code">Host · main</span>;
   return <span className="host-mark" title="Runs on this machine as you, without a container">Host</span>;
 }
 
