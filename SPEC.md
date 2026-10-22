@@ -130,6 +130,13 @@ Unnumbered intent; not testable, so not claims.
   its last chat work as a container session's do.
 - **HOST-5** A host session never changes the user's omp, Tern, ssh, git, or
   GitHub CLI configuration.
+- **HOST-6** A host session can work in its project's main checkout instead of a
+  worktree, at most one per project, and is marked as such. Ending it stops its
+  processes and leaves the checkout, its branch, and its uncommitted work as they
+  are.
+- **HOST-7** A session in the main checkout can start by going on with one of the
+  user's own omp chats; it goes on with a copy, and the user's chat stays
+  unchanged.
 
 ## Transcripts
 

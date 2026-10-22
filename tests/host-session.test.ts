@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { get, request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { after, afterEach, before } from "node:test";
 import { chromium, type Browser, type Page } from "playwright";
 import { FakeModel } from "./fake-model.ts";
@@ -27,6 +28,8 @@ const USER_CONFIG = [".ssh", ".gitconfig", ".config/gh", ".config/tern", ".omp/a
 let scratch: string;
 let repo: string;
 let home: string;
+/** The user's omp agent directory, AGENTMONITOR_OMP_AGENT_DIR: credentials, providers, and chats. */
+let agentDir: string;
 let fake: FakeModel;
 let gateway: Gateway;
 let project: Project;
@@ -58,7 +61,7 @@ before(async () => {
     execFileSync("git", args, { cwd: repo });
   }
   fake = await FakeModel.start();
-  const agentDir = join(scratch, "omp-agent");
+  agentDir = join(scratch, "omp-agent");
   mkdirSync(agentDir);
   // A host session reaches the model the way the gateway does.
   fake.writeAgentDir(agentDir, "127.0.0.1");
@@ -259,6 +262,53 @@ spec("HOST-2", "a host session's agent works as the user in its own worktree, an
   await gateway.data("POST", `/sessions/${host.id}/end`, {});
   assert.deepEqual(sessionProcesses(host), []);
   assert.equal(existsSync(dirs(host).worktree), false);
+});
+
+let main: Session;
+let mainTask: Task;
+
+spec("HOST-7", "a session in the main checkout goes on with a copy of one of the user's omp chats", async () => {
+  // The user's chat, as omp in a terminal in the checkout leaves it; the fake model answers in this
+  // process, and omp -p reads stdin until it closes.
+  const userChat = promisify(execFile)("omp", ["-p", "--model", "fake/scripted", "say:origin-7c1"], { cwd: repo, env: { ...process.env, HOME: home, PI_CODING_AGENT_DIR: agentDir } });
+  userChat.child.stdin?.end();
+  await userChat;
+  const sessions = join(agentDir, "sessions");
+  const [chat] = readdirSync(sessions, { recursive: true, encoding: "utf8" }).filter((path) => path.endsWith(".jsonl") && path.split("/").length === 2);
+  const chatId = /_([0-9a-f-]{36})\.jsonl$/.exec(chat)?.[1] ?? "";
+  const original = readFileSync(join(sessions, chat));
+
+  mainTask = await gateway.data<Task>("POST", `/projects/${project.id}/tasks`, { title: "Integration" });
+  const inWorktree = await gateway.api("POST", `/tasks/${mainTask.id}/sessions`, { runtime: "host", resume: chatId.slice(0, 8) });
+  assert.equal(inWorktree.status, 400);
+  main = await gateway.data<Session>("POST", `/tasks/${mainTask.id}/sessions`, { runtime: "host", checkout: true, resume: chatId.slice(0, 8) });
+  channel = await gateway.omp(main.id);
+  assert.equal((await card(main)).lastUserMessage, "say:origin-7c1");
+  const shown = await prompt(main, "say:goes-on");
+  assert.deepEqual([shown.lastUserMessage, shown.lastReply], ["say:goes-on", "goes-on"]);
+  assert.deepEqual(readFileSync(join(sessions, chat)), original, "the user's chat is unchanged");
+});
+
+spec("HOST-6", "a host session works in the main checkout, one per project, and ending it leaves the checkout as it is", async () => {
+  const worktrees = execFileSync("git", ["-C", repo, "worktree", "list"], { encoding: "utf8" });
+  const shown = await prompt(main, "bash:pwd && echo live > live.txt");
+  assert.equal(shown.lastReply, `answered: ${repo}`);
+  assert.equal(readFileSync(join(repo, "live.txt"), "utf8"), "live\n");
+  assert.equal(execFileSync("git", ["-C", repo, "worktree", "list"], { encoding: "utf8" }), worktrees, "no worktree");
+  const opened = await openPage("#/");
+  await opened.getByRole("region", { name: "Board" }).locator(`[data-task="${mainTask.title}"] .host-mark`, { hasText: "Host · main" }).waitFor();
+
+  const other = await gateway.data<Task>("POST", `/projects/${project.id}/tasks`, { title: "Second integrator" });
+  assert.equal((await gateway.api("POST", `/tasks/${other.id}/sessions`, { runtime: "host", checkout: true })).status, 409);
+
+  channel.close();
+  const ended = await gateway.data<{ kept: string[] }>("POST", `/sessions/${main.id}/end`, {});
+  assert.deepEqual(ended.kept, []);
+  assert.deepEqual(sessionProcesses(main), []);
+  assert.equal(readFileSync(join(repo, "live.txt"), "utf8"), "live\n");
+  assert.equal(execFileSync("git", ["-C", repo, "branch", "--show-current"], { encoding: "utf8" }).trim(), "main");
+  assert.equal(execFileSync("git", ["-C", repo, "for-each-ref", `refs/agentmonitor/snapshots/${mainTask.id}`], { encoding: "utf8" }), "");
+  assert.equal((await gateway.data<{ task: { branch: string | null } }>("GET", `/tasks/${mainTask.id}`)).task.branch, null);
 });
 
 spec("HOST-5", "a host session never changes the user's omp, Tern, ssh, git, or gh configuration", () => {

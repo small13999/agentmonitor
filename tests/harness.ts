@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { watch } from "node:fs/promises";
 import { connect, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -105,6 +105,16 @@ export class Gateway {
     const listed = spawnSync("podman", ["ps", "-aq", "--filter", `label=agentmonitor.state=${this.stateDir}`], { encoding: "utf8" });
     const containers = (listed.stdout ?? "").split("\n").filter(Boolean);
     if (containers.length > 0) spawnSync("podman", ["rm", "-f", "-t", "0", ...containers]);
+    // Host sessions outlive the gateway; theirs find Tern's daemon in this state directory.
+    for (const entry of readdirSync("/proc").filter((name) => /^\d+$/.test(name))) {
+      try {
+        if (readFileSync(`/proc/${entry}/environ`, "latin1").split("\0").some((line) => line.startsWith(`TERN_DAEMON_SOCKET=${this.stateDir}/`))) {
+          process.kill(Number(entry), "SIGKILL");
+        }
+      } catch {
+        // Gone already, or another user's process.
+      }
+    }
     rmSync(this.stateDir, { recursive: true, force: true });
   }
 
