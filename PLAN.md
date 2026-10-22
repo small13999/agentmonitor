@@ -82,9 +82,9 @@ Still open:
 - Switching host sessions on or off for an existing project in the UI (API only:
   `PATCH /projects/:id`); belongs in the project settings of the redesign.
 - Host sessions of automations, once automations exist.
-- One integrator per project: a host session that works in the main checkout (the
-  live instance) and pulls in branches from other worktrees. Until it exists, the
-  terminal agent plays the integrator.
+- Integrator: a checkout session (HOST-6) works in the main checkout and can go on
+  with a terminal omp chat (HOST-7). Still open: how it pulls in other sessions'
+  branches, and resuming chats in worktree or container sessions.
 - Unix socket paths are limited to 108 bytes; a long state dir breaks every
   session (`<state>/sessions/<uuid>/run/am.sock`, and for host sessions
   `run/tern-daemon.sock`).

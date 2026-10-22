@@ -127,6 +127,16 @@ stored once per tern version in `<state dir>/tern-web/`, and the log is
 ending or restarting the session SIGTERMs every process with it, then SIGKILLs
 what remains after 5 s, including servers the agent started.
 
+"Start in main checkout" (`{runtime: "host", checkout: true}`) starts a host
+session in the project's main checkout instead of a worktree: the code the live
+instance runs, so edits take effect at once. One per project, marked "Host ·
+main". It creates no worktree or branch, and ending it only stops its processes:
+no snapshot, the checkout and its uncommitted work stay. With `resume: <omp chat
+id or prefix>` it goes on with one of your own omp chats from the omp agent
+directory (`sessions/<folder>/<time>_<id>.jsonl`), copied into the session's omp
+home; your chat stays unchanged, so the two diverge from there. The chat should
+come from the same working directory (omp files chats by it).
+
 `POST /api/store/sessions/:id/end` ends a session: it stops the container, keeps
 the worktree's uncommitted changes (untracked files included, ignored ones not)
 as a commit at `refs/agentmonitor/snapshots/<task id>` built through a scratch
