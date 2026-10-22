@@ -16,7 +16,7 @@ RUN apt-get update \
  && mkdir -p /home/agent /workspace \
  && chmod 1777 /home/agent /workspace
 COPY --chmod=755 tern omp /usr/local/bin/
-COPY entrypoint.ts omp-extension.ts am.ts acp-filter.ts tern-web-assets.ts AGENTS.md RULES.md /opt/agentmonitor/
+COPY entrypoint.ts launch.ts omp-extension.ts am.ts acp-filter.ts tern-web-assets.ts AGENTS.md RULES.md /opt/agentmonitor/
 RUN printf '#!/bin/sh\nexec node /opt/agentmonitor/am.ts "$@"\n' > /usr/local/bin/am && chmod 755 /usr/local/bin/am \
  && node /opt/agentmonitor/tern-web-assets.ts
 # The container runs as the host user (--userns=keep-id), which has no passwd home of its own.

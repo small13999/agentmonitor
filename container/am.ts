@@ -1,8 +1,10 @@
-// `am`: the agent's interface to the Agent Monitor store, run inside a session's container.
-// Talks to the session's store socket; the socket identifies the session, so no credentials.
+// `am`: the agent's interface to the Agent Monitor store, run inside a session's container
+// or on the host. Talks to the session's store socket; the socket identifies the session, so
+// no credentials.
 import { execFileSync } from "node:child_process";
 import { request } from "node:http";
 import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 const USAGE = `usage: am [--json] COMMAND
 
@@ -157,7 +159,7 @@ const EXAMPLE_FILE = /\.(example|sample|template)$/i;
 
 /** TASK-11: what ending this session would leave behind on this machine only, or lose. */
 function checkWorktree(me: Me): { uncommitted: string[]; secrets: string[]; unpushed: string[] } {
-  const launch: unknown = JSON.parse(readFileSync("/run/agentmonitor/launch.json", "utf8"));
+  const launch: unknown = JSON.parse(readFileSync(join(dirname(socketPath), "launch.json"), "utf8"));
   const cwd = isRecord(launch) && typeof launch.cwd === "string" ? launch.cwd : process.cwd();
   const git = (args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
   const uncommitted: string[] = [];

@@ -1,5 +1,6 @@
-// Image build step: stores Tern's web client in /opt/agentmonitor/tern-web for
-// `tern web serve --assets`, so a browser loads nothing from outside the gateway.
+// Stores Tern's web client for `tern web serve --assets`, so a browser loads nothing from
+// outside the gateway: at image build in /opt/agentmonitor/tern-web, and for host sessions
+// where the host runtime asks (usage: node tern-web-assets.ts [OUT]).
 // A release tern embeds the page, script, icons and manifest, and points the page at the
 // release's wasm on build.stencil.so, pinned by a sha384 integrity hash. The wasm is
 // downloaded here, checked against that pin, and the page is pointed at the local copy.
@@ -8,18 +9,28 @@
 // page's localStorage, not in the container's settings.json.
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
-const OUT = "/opt/agentmonitor/tern-web";
+const OUT = process.argv[2] ?? "/opt/agentmonitor/tern-web";
 const WASM = "pkg/stencil_tern_web_bg.wasm";
 const SCRIPT = "pkg/stencil_tern_web.js";
 const DEFAULT_SETTINGS = JSON.stringify({ theme: "Dark" });
-const origin = "http://127.0.0.1:8378";
-const tokenFile = "/tmp/tern-web-assets-token";
+// A free loopback port for Tern's own server: host sessions may already use any fixed one.
+const probe = createServer();
+const listening = Promise.withResolvers<void>();
+probe.listen(0, "127.0.0.1", listening.resolve);
+await listening.promise;
+const probeAddress = probe.address();
+if (probeAddress === null || typeof probeAddress === "string") throw new Error("no free loopback port");
+probe.close();
+const origin = `http://127.0.0.1:${probeAddress.port}`;
+const tokenFile = join(mkdtempSync(join(tmpdir(), "tern-web-assets-")), "token");
 writeFileSync(tokenFile, "0".repeat(32), { mode: 0o600 });
-const server = spawn("tern", ["web", "serve", "--listen", "127.0.0.1:8378", "--token", tokenFile], { stdio: "ignore" });
+const server = spawn("tern", ["web", "serve", "--listen", `127.0.0.1:${probeAddress.port}`, "--token", tokenFile], { stdio: "ignore" });
 
 async function fetchOk(url: string): Promise<Response> {
   const response = await fetch(url);
