@@ -1,0 +1,290 @@
+# Agent Monitor Specification
+
+This file is the contract between the humans and the implementation. Each
+numbered claim is an observable behavior. Implementation lives in code; niche
+knowledge lives in short code comments; neither belongs here.
+
+## How this file works
+
+- A claim is a line `- **AREA-N** text`. Continuation lines are indented two
+  spaces.
+- IDs are stable. Never renumber, never reuse. A deleted claim's ID is retired
+  in `spec.lock.json` and cannot come back.
+- Every claim is covered by at least one test that calls
+  `spec("AREA-N", "title", fn)` from `tests/spec.ts`.
+- `npm run spec:check` reports:
+  - errors: malformed or duplicate IDs, tests referencing unknown or retired
+    IDs, and any drift between this file, the tests, and `spec.lock.json`;
+  - warnings: claims with no test (`--strict` turns these into errors).
+- Drift means a claim's text or a covering test changed, appeared, or
+  disappeared since the last `npm run spec:lock`. Review the claim/test pair,
+  then run `spec:lock` to acknowledge it.
+
+## Testing policy
+
+- Claims are use cases. A claim's test exercises it through the real stack:
+  gateway, store, container, omp. Real use cases must be proven to work.
+- Tests that need a container share one test container per run and run in
+  parallel inside it. Make the real stack fast rather than avoiding it.
+- A fake replaces a real component only where it is measurably cheaper and the
+  claim stays proven.
+- No tests for wiring, forwarding, or incidental behavior.
+
+## Goals
+
+Unnumbered intent; not testable, so not claims.
+
+- Make the places where the human is the bottleneck fast: dispatching work,
+  recalling context, reviewing output. Do not chase full autonomy.
+- Context outlives containers. Ending a session never loses knowledge.
+- Work is saved outside the machine as it is done: ending a session leaves no
+  branch or worktree behind, so nobody has to sort through leftovers.
+- Opening the app answers: where did I leave off, what needs me, what work is
+  unsaved, and what could my next task collide with.
+- A non-technical teammate can follow and steer work from tickets alone.
+- Anything the agent sees, the human sees, and the reverse: UI and agents use
+  the same data through the same API.
+- Status comes from mechanical sources (git, omp, tools), not from agents
+  remembering to report it.
+- The orchestrator is an ordinary session invoked on demand, never a gate that
+  all work must pass through.
+- Our web app owns navigation and every cross-session view. Tern owns the full
+  agent harness inside one session.
+
+## Concepts
+
+| Concept | Meaning |
+|---|---|
+| Store | One Agent Monitor server and its SQLite database |
+| Project | Repos, topics, tasks, sessions, automations; lives in one store |
+| Topic | Long-lived area of work (an epic) with a short status and linked history |
+| Task | Requested work with a state, a branch, a status, notes, and the sessions that worked on it |
+| Session | One agent run on a task: a workspace and the agent chats in it |
+| Chat | One omp conversation; a session can start any number of them |
+| Workspace | Where a running session lives: its worktree and container on one machine |
+| Automation | Trigger (schedule or event) that starts a session |
+| Event | Fact emitted by an agent or the system, with a dedupe key |
+| Lease | Exclusive hold on a named resource |
+
+## Spec process
+
+- **SPEC-1** A claim without a covering test is reported as a warning; with
+  `--strict` it fails the check.
+- **SPEC-2** A test referencing an ID that is not a current claim fails the
+  check.
+- **SPEC-3** Changing a claim's text, or adding, changing, or removing a
+  covering test, fails the check until `spec:lock` is run.
+- **SPEC-4** `spec:lock` retires the IDs of deleted claims; reusing a retired ID
+  fails the check.
+- **SPEC-5** Duplicate claim IDs fail the check.
+
+## Stores and projects
+
+- **STORE-1** Every record belongs to exactly one store, the store of its
+  project.
+- **STORE-2** A record can link only to records in the same store.
+- **STORE-3** A client configured with several stores lists the projects of
+  every reachable store and marks unreachable stores as unavailable.
+- **STORE-4** Starting a session in a project whose store is unreachable fails
+  with an error naming the store.
+- **STORE-5** Every action and every piece of data shown in the UI is available
+  to agents as a tool backed by the same store API endpoint.
+
+## Sessions
+
+- **SESSION-1** A session's model is chosen when it starts.
+- **SESSION-2** An ended session's chats are read-only.
+- **SESSION-3** A session's chats reach its project's store within 60 seconds of
+  each completed turn, from any machine.
+- **SESSION-4** Every chat starts with both the Agent Monitor workflow context and
+  the repository's own `AGENTS.md`.
+- **SESSION-5** A session belongs to one task and runs in one workspace: a
+  worktree of the task's branch and a container on exactly one machine.
+- **SESSION-7** A new chat started in a session stays in that session: same
+  workspace, worktree, and task, and the session's card shows the new chat.
+- **SESSION-8** Ending a session removes its workspace and keeps its chats; the
+  task's branch stays.
+- **SESSION-9** Ending a session never loses work: its uncommitted changes are
+  kept as the task's latest snapshot on the store's machine, never pushed to a
+  remote, and the task's next session starts with them restored.
+- **SESSION-10** Opening a session whose container has stopped starts the
+  container again on the session's last chat.
+- **SESSION-12** A session's agent commits as the user and has the user's ssh
+  keys and GitHub CLI login, so it can push its branch.
+- **SESSION-13** Until a session's chat has loaded, its page says what it waits
+  on, including that a stopped container is starting.
+
+## Transcripts
+
+- **TRANSCRIPT-1** Every agent in a project can search and read every chat of
+  every session of that project, including running ones.
+- **TRANSCRIPT-2** An agent cannot read transcripts of other projects.
+- **TRANSCRIPT-3** A search scoped to a topic returns only chats of sessions
+  whose task is linked to that topic.
+
+## Turn diffs
+
+- **TURN-1** Each completed agent turn records a worktree snapshot without
+  changing the branch, index, or working tree.
+- **TURN-2** The diff view offers an overall diff (session base to latest
+  snapshot) and a per-turn diff for every turn.
+- **TURN-3** Each per-turn diff shows that turn's user message and the agent's
+  final response.
+
+## Topics
+
+- **TOPIC-1** A topic belongs to one project and has no parent topic.
+- **TOPIC-2** A topic's status is a markdown document of at most 50 lines; a
+  longer write is rejected.
+- **TOPIC-3** A status write names the revision it was based on; a write based
+  on a stale revision is rejected and returns the current revision.
+- **TOPIC-7** A topic's history lists its linked tasks, sessions, and pull
+  requests in time order.
+- **TOPIC-8** When a linked pull request merges, its merge commit is recorded
+  on the link.
+
+## Session cards
+
+- **CARD-1** Each running session's card shows whether it is waiting on you,
+  working, idle, or stopped.
+- **CARD-2** Each session card shows the last user message and the agent's last
+  reply.
+- **CARD-3** Each session card shows its uncommitted changes, unpushed commits,
+  and open pull requests.
+- **CARD-4** Each session card names the other running sessions in its project
+  that changed any of the same files.
+- **CARD-5** Sessions waiting on you sort first.
+
+## Tasks
+
+- **TASK-1** A task belongs to one project and has a title, a description, and
+  a state: `open`, `in_progress`, `in_review`, `done`, or `cancelled`.
+- **TASK-2** A task links to any number of topics; the UI and any agent tool can
+  add or remove links at any time, and the links outlive its sessions.
+- **TASK-3** A task is created without starting work; starting a session on it
+  is a separate action.
+- **TASK-4** A task has one branch, created when its first session starts;
+  every session of the task works on that branch, which outlives them.
+- **TASK-5** A task has at most one running session.
+- **TASK-6** A session's first chat starts with its task's title, description,
+  status, and notes in context.
+- **TASK-7** A task has a status of at most 50 lines that its agents keep
+  current; a status write based on a stale revision is rejected.
+- **TASK-8** A task has notes. The user writes them in the task's Notes tab,
+  where they save as typed; agents read and write them with `am`; a write based
+  on a stale revision is rejected.
+- **TASK-9** Marking a task done or cancelled ends its running session and
+  deletes its branch from the machine; when the branch has commits no remote
+  has, it requires a confirmation that lists them.
+- **TASK-10** Every session from before tasks existed became a task with the
+  session's name, branch, topic links, and notes.
+- **TASK-11** `am check` lists a session's uncommitted files, unpushed commits,
+  and untracked files that look like secrets, and fails while there are any.
+
+## Board
+
+- **BOARD-1** The board shows the project's tasks in columns by state; each card
+  shows the task's title and topics, and its running session's light, last
+  messages, and changes.
+- **BOARD-2** Tasks waiting on you sort first in their column, and the header
+  counts them.
+
+## Review inbox
+
+- **REVIEW-1** The inbox lists every item awaiting a human: pull requests ready
+  for review, sessions waiting on you, and automation runs requiring review.
+- **REVIEW-2** Each inbox item links to its session, diff, and preview when they
+  exist.
+- **REVIEW-3** Approving or rejecting an item records the decision, the actor,
+  and the time.
+
+## Previews
+
+- **PREVIEW-1** Each running session's service ports are reachable at
+  authenticated URLs from outside the machine running it.
+- **PREVIEW-2** Each preview URL has its own origin, separate from the Agent
+  Monitor UI and other previews.
+- **PREVIEW-3** A preview whose container is stopped shows as stopped with an
+  action to start the session's container again.
+
+## Integration
+
+- **MERGE-1** No session can push to its project's default branch.
+- **MERGE-2** A session can merge its own pull request when checks pass and the
+  project's or topic's policy allows merging without review.
+- **MERGE-3** The pending-work list shows every session branch with commits not
+  on the default branch.
+
+## Automations
+
+- **AUTO-1** An automation is a trigger plus an action; the action starts a
+  session that runs a chosen agent, model, and prompt.
+- **AUTO-2** A schedule trigger fires at most once per scheduled time, including
+  across server restarts.
+- **AUTO-3** An event trigger starts its session with the event payload in the
+  initial prompt.
+- **AUTO-4** An event whose dedupe key was already emitted in the project is
+  dropped.
+- **AUTO-5** Any agent can emit an event through a tool.
+- **AUTO-6** An automation run requires review unless the automation allows
+  merging without review.
+- **AUTO-7** Each automation lists its runs with time, session, and outcome.
+
+## Leases
+
+- **LEASE-1** Acquiring a lease on a held resource fails and names the holding
+  session.
+- **LEASE-2** A lease is released when its session ends or its container stops.
+- **LEASE-3** Every resource is shown as free or held, with the holding
+  session.
+
+## Machines
+
+- **MACHINE-1** Each machine shows CPU, memory, and the sessions running on it.
+- **MACHINE-2** Starting a session that would exceed a machine's memory budget
+  is refused before its container is created.
+
+## Cloudflare
+
+- **CLOUDFLARE-1** A session's agent reads its project's Cloudflare account with
+  Wrangler through the gateway, which keeps the project's Cloudflare tokens out of
+  the container.
+- **CLOUDFLARE-2** A session's agent can change its project's Cloudflare account
+  only while the user allows it in the task's settings, for 10 minutes at a time
+  or until the user revokes it; an agent cannot allow itself.
+
+## Web app
+
+- **UI-1** The app's header names Agent Monitor and its menus, Board and Tasks.
+  The Tasks page lists the project's open and in-progress tasks beside a
+  workspace that shows the chosen task.
+- **UI-2** A task's workspace has a Chat tab, showing its running session's chat
+  or starting a session, and a Notes tab; at the right of its tabs a settings
+  button shows the task's state, topic links, status, changes, Cloudflare writes,
+  ending its session, and finishing it. Switching tabs keeps the chat loaded.
+
+## Agent interface
+
+- **AGENT-1** Every running session opens on its session page as Tern's chat on
+  omp. Only the gateway holds the session's Tern token, and only pages on that
+  session's Tern host can open its socket.
+- **AGENT-2** A session can be driven from the web UI without a terminal: its
+  transcript with streaming replies, a prompt box, context usage, and its
+  subagents.
+- **AGENT-3** Prompts sent from the web UI and typed in Tern land in the same
+  conversation, and each surface shows the other's.
+- **AGENT-4** The web UI shows a reply and the model's thinking as they stream,
+  and each command as running until it ends, before the turn ends; after a
+  reload it shows the same conversation.
+- **AGENT-5** A question the agent asks the user shows in the web UI with its
+  options, while the session waits on the user.
+- **AGENT-6** A tool result that lists files with the same name in different
+  folders shows in the web UI, and so does the rest of the conversation after it.
+- **AGENT-7** Text the agent writes in any script, and symbols and emoji, show in
+  the chat in a font that has them.
+
+## Deferred
+
+Not claims yet: dependency graph between sessions, file-path locks, work
+claims, moving a running session between machines, multi-machine scheduling,
+offline local sessions, lease enforcement through credentials, Kubernetes.
