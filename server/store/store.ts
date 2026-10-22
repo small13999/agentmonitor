@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   base_ref TEXT,
   machine TEXT,
   runtime TEXT NOT NULL DEFAULT 'container',
+  checkout INTEGER NOT NULL DEFAULT 0,
   model TEXT,
   started_at INTEGER NOT NULL,
   ended_at INTEGER
@@ -133,6 +134,7 @@ function session(row: Row): Session {
     baseRef: row.base_ref === null ? null : String(row.base_ref),
     machine: row.machine === null ? null : String(row.machine),
     runtime: row.runtime === "host" ? "host" : "container",
+    checkout: Number(row.checkout) === 1,
     model: row.model === null ? null : String(row.model),
     startedAt: Number(row.started_at),
     endedAt: row.ended_at === null ? null : Number(row.ended_at),
@@ -164,6 +166,7 @@ export class Store {
     // HOST-1: stores from before host sessions.
     this.addColumn("projects", "host_sessions", "INTEGER NOT NULL DEFAULT 0");
     this.addColumn("sessions", "runtime", "TEXT NOT NULL DEFAULT 'container'");
+    this.addColumn("sessions", "checkout", "INTEGER NOT NULL DEFAULT 0");
   }
 
   private addColumn(table: string, column: string, definition: string): void {
@@ -511,9 +514,10 @@ export class Store {
 
   /**
    * Records a running session of the task (TASK-5: refused while it has one) and moves an
-   * open task in progress. Its worktree and container are the caller's job.
+   * open task in progress. Its worktree and container are the caller's job. A checkout
+   * session (HOST-6) is a host session, one per project, and works on no branch of the task.
    */
-  createSession(principal: Principal, taskId: string, input: { machine?: string; model?: string; runtime: SessionRuntime }): Session {
+  createSession(principal: Principal, taskId: string, input: { machine?: string; model?: string; runtime: SessionRuntime; checkout?: boolean }): Session {
     this.requireHuman(principal);
     return this.transaction(() => {
       const owner = this.visibleTask(principal, taskId);
@@ -525,22 +529,29 @@ export class Store {
       if (input.runtime === "host" && !this.visibleProject(principal, owner.projectId).hostSessions) {
         throw new StoreError(403, "this project does not allow host sessions");
       }
+      const checkout = input.checkout === true;
+      if (checkout && input.runtime !== "host") throw new StoreError(400, "only a host session can work in the main checkout");
+      const inCheckout = this.db.prepare("SELECT name FROM sessions WHERE project_id = ? AND checkout = 1 AND ended_at IS NULL").get(owner.projectId);
+      if (checkout && inCheckout !== undefined) {
+        throw new StoreError(409, `session ${String(inCheckout.name)} already works in the main checkout`);
+      }
       const created: Session = {
         id: randomUUID(),
         projectId: owner.projectId,
         taskId,
         name: owner.title,
-        branch: owner.branch,
-        baseRef: owner.baseRef,
+        branch: checkout ? null : owner.branch,
+        baseRef: checkout ? null : owner.baseRef,
         machine: input.machine ?? null,
         runtime: input.runtime,
+        checkout,
         model: input.model ?? null,
         startedAt: Date.now(),
         endedAt: null,
       };
       this.db.prepare(
-        "INSERT INTO sessions (id, project_id, task_id, name, branch, base_ref, machine, runtime, model, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      ).run(created.id, created.projectId, taskId, created.name, created.branch, created.baseRef, created.machine, created.runtime, created.model, created.startedAt);
+        "INSERT INTO sessions (id, project_id, task_id, name, branch, base_ref, machine, runtime, checkout, model, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run(created.id, created.projectId, taskId, created.name, created.branch, created.baseRef, created.machine, created.runtime, checkout ? 1 : 0, created.model, created.startedAt);
       if (owner.state === "open") {
         this.db.prepare("UPDATE tasks SET state = 'in_progress', updated_at = ? WHERE id = ?").run(created.startedAt, taskId);
       }

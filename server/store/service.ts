@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { basename, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -159,7 +159,7 @@ export class StoreService implements StoreContext {
   private async restart(runtime: Runtime, session: Session): Promise<void> {
     const project = this.store.getProject({ kind: "human" }, session.projectId);
     const dirs = this.dirs(session.id);
-    if (project.repoPath === null || !existsSync(dirs.worktree)) {
+    if (project.repoPath === null || !existsSync(session.checkout ? project.repoPath : dirs.worktree)) {
       throw new StoreError(409, `session ${session.name} has no worktree to start again on`);
     }
     // omp names a chat's transcript <time>_<chat id>.jsonl.
@@ -168,6 +168,7 @@ export class StoreService implements StoreContext {
     this.forgetTernUpstream(session.id);
     try {
       await runtime.launch({
+        checkout: session.checkout,
         sessionId: session.id,
         repoPath: project.repoPath,
         dirs,
@@ -176,7 +177,7 @@ export class StoreService implements StoreContext {
         resume,
         ternOrigin: `http://tern-${session.id}.localhost`,
         cloudflare: this.cloudflare.tokens(project.name) !== null,
-        taskContext: this.taskContext(session.taskId, { kind: "none" }),
+        taskContext: this.taskContext(session.taskId, { kind: "none" }, session.checkout ? project.repoPath : null),
       });
       await this.ternAnswers(runtime, session.id);
     } catch (cause) {
@@ -234,16 +235,20 @@ export class StoreService implements StoreContext {
 
   /**
    * TASK-6: what the container adds to the agent's workflow context: the task as it is now,
-   * and what happened to the work an earlier session left uncommitted (SESSION-9).
+   * and what happened to the work an earlier session left uncommitted (SESSION-9). A checkout
+   * session (HOST-6) is told it works in the main checkout, `checkout`, instead.
    */
-  private taskContext(taskId: string, restored: RestoredSnapshot): string {
+  private taskContext(taskId: string, restored: RestoredSnapshot, checkout: string | null): string {
     const human: Principal = { kind: "human" };
     const { task, topics } = this.store.getTask(human, taskId);
     const notes = this.store.getNotes(human, taskId);
     const sections = [
       "# Your task",
-      `You work on the task "${task.title}" (id ${task.id}, state ${task.state})${task.branch === null ? "" : ` on its branch \`${task.branch}\``}. ` +
-        "Every session of this task works on this branch; only what is committed and pushed to it is certain to reach the next session.",
+      checkout === null
+        ? `You work on the task "${task.title}" (id ${task.id}, state ${task.state})${task.branch === null ? "" : ` on its branch \`${task.branch}\``}. ` +
+          "Every session of this task works on this branch; only what is committed and pushed to it is certain to reach the next session."
+        : `You work on the task "${task.title}" (id ${task.id}, state ${task.state}) in the project's main checkout, \`${checkout}\`, ` +
+          "not in a worktree: the live instance runs this code, so every edit takes effect at once, and other sessions' branches are merged here.",
       `Topics: ${topics.length === 0 ? "none" : topics.map((topic) => topic.name).join(", ")}`,
       "## Description",
       task.description.trim() === "" ? "(none)" : task.description.trim(),
@@ -265,9 +270,29 @@ export class StoreService implements StoreContext {
   }
 
   /**
+   * HOST-7: the user's own omp chat whose id starts with `prefix`, in the configured omp agent
+   * directory: sessions/<working directory folder>/<time>_<chat id>.jsonl.
+   */
+  private userChat(prefix: string): { id: string; path: string; folder: string } {
+    const sessions = join(this.config.ompAgentDir, "sessions");
+    const found = existsSync(sessions)
+      ? readdirSync(sessions, { withFileTypes: true }).filter((entry) => entry.isDirectory()).flatMap((folder) =>
+        readdirSync(join(sessions, folder.name)).flatMap((name) => {
+          const id = /_([0-9a-f-]{36})\.jsonl$/.exec(name)?.[1];
+          return id !== undefined && id.startsWith(prefix) ? [{ id, path: join(sessions, folder.name, name), folder: folder.name }] : [];
+        }))
+      : [];
+    if (found.length === 0) throw new StoreError(404, `no omp chat ${prefix} in ${sessions}`);
+    if (found.length > 1) throw new StoreError(409, `${found.length} omp chats start with ${prefix}; give more of the id`);
+    return found[0];
+  }
+
+  /**
    * Starts a session on the task (TASK-3, TASK-5): a worktree of the task's branch, which its
    * first session creates (TASK-4), with the previous session's uncommitted work restored
-   * (SESSION-9), and its agent in a container or on the host (HOST-1). Undone if the launch fails.
+   * (SESSION-9), and its agent in a container or on the host (HOST-1). A checkout session
+   * works in the main checkout instead (HOST-6), and may go on with one of the user's omp
+   * chats (HOST-7). Undone if the launch fails.
    */
   async startSession(principal: Principal, taskId: string, input: SessionInput): Promise<Session> {
     const { task } = this.store.getTask(principal, taskId);
@@ -277,8 +302,17 @@ export class StoreService implements StoreContext {
     if (runtime !== null && project.repoPath === null) {
       throw new StoreError(400, `project ${project.name} has no repository to create a worktree from`);
     }
+    if (input.resume !== undefined && input.checkout !== true) {
+      throw new StoreError(400, "only a session in the main checkout can go on with one of your omp chats");
+    }
+    const chat = input.resume === undefined ? null : this.userChat(input.resume);
     const repo = runtime === null ? null : project.repoPath;
-    const created = this.store.createSession(principal, taskId, { model: input.model, machine: this.config.machineName, runtime: kind });
+    const created = this.store.createSession(principal, taskId, {
+      model: input.model,
+      machine: this.config.machineName,
+      runtime: kind,
+      checkout: input.checkout,
+    });
     const dirs = this.dirs(created.id);
     // The session shows in the task list as soon as it exists; its page waits for this start
     // instead of starting it a second time.
@@ -288,28 +322,42 @@ export class StoreService implements StoreContext {
     try {
       await this.listen(created.id);
       if (runtime === null || repo === null) return created;
-      // Fetching also brings in a task branch that only origin has.
-      const hasOrigin = await fetchOrigin(repo);
-      const slug = task.title.toLowerCase().replace(/[^a-z0-9.]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "task";
-      const branch = task.branch ?? `am/${slug}-${randomBytes(2).toString("hex")}`;
-      const baseRef = task.baseRef ?? await defaultBaseRef(repo, hasOrigin);
-      await addWorktree(repo, branch, dirs.worktree, baseRef);
-      worktreeAdded = true;
-      if (task.branch === null) this.store.setTaskBranch(task.id, branch, baseRef);
-      this.store.setSessionBranch(created.id, branch, baseRef);
-      const restored = await restoreSnapshot(repo, dirs.worktree, snapshotRef(task.id));
+      let started = created;
+      let restored: RestoredSnapshot = { kind: "none" };
+      if (!created.checkout) {
+        // Fetching also brings in a task branch that only origin has.
+        const hasOrigin = await fetchOrigin(repo);
+        const slug = task.title.toLowerCase().replace(/[^a-z0-9.]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "task";
+        const branch = task.branch ?? `am/${slug}-${randomBytes(2).toString("hex")}`;
+        const baseRef = task.baseRef ?? await defaultBaseRef(repo, hasOrigin);
+        await addWorktree(repo, branch, dirs.worktree, baseRef);
+        worktreeAdded = true;
+        if (task.branch === null) this.store.setTaskBranch(task.id, branch, baseRef);
+        this.store.setSessionBranch(created.id, branch, baseRef);
+        restored = await restoreSnapshot(repo, dirs.worktree, snapshotRef(task.id));
+        started = { ...created, branch, baseRef };
+      }
+      // HOST-7: a copy, in the folder omp keeps chats of that working directory in; the
+      // user's own chat stays as it is.
+      if (chat !== null) {
+        const target = join(dirs.ompHome, "agent", "sessions", chat.folder);
+        mkdirSync(target, { recursive: true });
+        copyFileSync(chat.path, join(target, basename(chat.path)));
+      }
       await runtime.launch({
+        checkout: created.checkout,
         sessionId: created.id,
         repoPath: repo,
         dirs,
-        model: input.model ?? null,
-        resume: null,
+        // A resumed chat keeps the model it last ran.
+        model: chat === null ? input.model ?? null : null,
+        resume: chat?.id ?? null,
         ternOrigin: `http://tern-${created.id}.localhost`,
         cloudflare: this.cloudflare.tokens(project.name) !== null,
-        taskContext: this.taskContext(task.id, restored),
+        taskContext: this.taskContext(task.id, restored, created.checkout ? repo : null),
       });
       await this.ternAnswers(runtime, created.id);
-      return { ...created, branch, baseRef };
+      return started;
     } catch (cause) {
       this.unlisten(created.id);
       let workspaceGone = true;
@@ -333,7 +381,8 @@ export class StoreService implements StoreContext {
   /**
    * SESSION-8/SESSION-9: removes the session's workspace and keeps its chats (omp-home) and the
    * task's branch. Uncommitted work becomes the task's snapshot first, so ending never loses
-   * it; `kept` lists those files.
+   * it; `kept` lists those files. A checkout session (HOST-6) only stops: the main checkout
+   * and its uncommitted work stay as they are.
    */
   async endSession(principal: Principal, sessionId: string): Promise<EndedSession> {
     const { session, task } = this.store.getSession(principal, sessionId);
@@ -342,7 +391,7 @@ export class StoreService implements StoreContext {
     const project = this.store.getProject(principal, session.projectId);
     const dirs = this.dirs(sessionId);
     const runtime = this.runtimes?.[session.runtime] ?? null;
-    const repo = runtime === null ? null : project.repoPath;
+    const repo = runtime === null || session.checkout ? null : project.repoPath;
     let kept: string[] = [];
     if (runtime !== null) {
       try {

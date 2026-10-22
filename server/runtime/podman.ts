@@ -37,6 +37,7 @@ export class PodmanRuntime implements Runtime {
 
   /** Starts the session's container, replacing a stopped one of the same name. */
   async launch(input: LaunchInput): Promise<void> {
+    if (input.checkout) throw new Error("a container works in a worktree, never the main checkout");
     const repoName = basename(resolve(input.repoPath));
     const commonDir = resolve(input.repoPath, await git(input.repoPath, ["rev-parse", "--git-common-dir"]));
     writeLaunchFiles(input, { cwd: `/workspace/${repoName}`, ternListen: "0.0.0.0:8377" });

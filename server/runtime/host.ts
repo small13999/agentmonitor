@@ -89,12 +89,13 @@ export class HostRuntime implements Runtime {
     await this.remove(input.sessionId);
     const ternAssets = await this.ternAssets();
     const port = await freePort();
-    writeLaunchFiles(input, { cwd: input.dirs.worktree, ternListen: `127.0.0.1:${port}` });
+    const cwd = input.checkout ? input.repoPath : input.dirs.worktree;
+    writeLaunchFiles(input, { cwd, ternListen: `127.0.0.1:${port}` });
     const log = openSync(join(input.dirs.run, "host.log"), "a");
     try {
       const entry = spawn(process.execPath, [
         join(SOURCE, "host-entry.ts"), input.dirs.run, join(input.dirs.ompHome, "agent"), this.options.ompAgentDir, ternAssets,
-      ], { cwd: input.dirs.worktree, detached: true, stdio: ["ignore", log, log], env: sessionEnv(input.sessionId, input.dirs.run) });
+      ], { cwd, detached: true, stdio: ["ignore", log, log], env: sessionEnv(input.sessionId, input.dirs.run) });
       if (entry.pid === undefined) throw new Error("could not start the host session's entry");
       entry.unref();
       writeFileSync(join(input.dirs.run, "host.json"), JSON.stringify({ pid: entry.pid, port }));

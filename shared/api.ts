@@ -80,6 +80,8 @@ export interface Session {
   baseRef: string | null;
   machine: string | null;
   runtime: SessionRuntime;
+  /** HOST-6: a host session working in the project's main checkout, the live code, instead of a worktree. */
+  checkout: boolean;
   /** omp model of the first chat; null: omp's default. */
   model: string | null;
   startedAt: number;

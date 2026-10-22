@@ -15,6 +15,8 @@ export interface WorkspaceDirs {
 }
 
 export interface LaunchInput {
+  /** HOST-6: the agent works in repoPath itself, the main checkout, instead of dirs.worktree; host sessions only. */
+  checkout: boolean;
   sessionId: string;
   repoPath: string;
   dirs: WorkspaceDirs;
