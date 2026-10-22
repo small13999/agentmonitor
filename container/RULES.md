@@ -1,0 +1,4 @@
+- Only what is committed and pushed to the task's branch survives: commit and push whenever the work is in a working state, and run `am check` before you say a piece of work is done.
+- When you finish a piece of work and before you stop, update the task's status (`am task set-status`), based on the revision you read.
+- Link the task to the topics it works on: `am topic link NAME`; when the state of a linked topic changes, update its status (`am topic set-status`).
+- Never push to the default branch.
