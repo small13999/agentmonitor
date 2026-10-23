@@ -121,6 +121,27 @@ spec("TASK-12", "opening a task from the board, the task list, or a link shows i
   assert.deepEqual(edited.topics.map((topic) => topic.name), ["Ads"]);
 });
 
+spec("TASK-12", "a link to a task of another project opens it and switches the project; a task no project has does not exist", async () => {
+  const other = await gateway.data<Project>("POST", "/projects", { name: "agentmonitor" });
+  const target = await task("Glossary");
+  const picker = page.getByRole("navigation", { name: "Tasks" }).getByRole("combobox", { name: "Project" });
+  // Loaded afresh: the project list is read at load.
+  await page.goto(`${gateway.url}/#/t`);
+  await page.reload();
+  await picker.selectOption({ label: other.name });
+  await page.getByRole("heading", { name: other.name }).waitFor();
+
+  await page.goto(`${gateway.url}/#/t/${target.id}/settings`);
+  await page.getByRole("tab", { name: "Settings", selected: true }).waitFor();
+  assert.equal(await picker.inputValue(), project.id);
+  await page.getByRole("tab", { name: "Page" }).click();
+  assert.equal(await page.getByRole("article", { name: "Task page" }).getByRole("textbox", { name: "Title" }).inputValue(), "Glossary");
+
+  await page.goto(`${gateway.url}/#/t/${crypto.randomUUID()}`);
+  await page.getByText("This task does not exist.").waitFor();
+  assert.equal(await picker.inputValue(), project.id);
+});
+
 spec("TASK-13", "a task's assignee is one person or nobody", async () => {
   const target = await task("Leaderboard filters");
   const mia = await gateway.data<Person>("POST", "/people", { name: "Mia Wong", email: "mia@example.com" });

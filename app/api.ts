@@ -25,9 +25,14 @@ export const LOCAL_STORE = "/api/store";
  */
 let currentStore = LOCAL_STORE;
 
+/** The store API of the gateway's own store (`hub` null) or of the named hub's, which the gateway passes on. */
+export function storeOf(hub: string | null): string {
+  return hub === null ? LOCAL_STORE : `/api/hubs/${encodeURIComponent(hub)}/store`;
+}
+
 /** Chooses the store later calls go to: the gateway's own (`hub` null) or the named hub's. */
 export function chooseStore(hub: string | null): void {
-  currentStore = hub === null ? LOCAL_STORE : `/api/hubs/${encodeURIComponent(hub)}/store`;
+  currentStore = storeOf(hub);
 }
 
 /** A path of the chosen project's store API as a URL, e.g. for a link to a folder's file. */

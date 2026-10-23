@@ -176,6 +176,7 @@
     "tests/spec-check.test.ts::SPEC-4::deleted claim ids are retired and cannot be reused": "6475fcf47204c52d",
     "tests/spec-check.test.ts::SPEC-5::duplicate claim ids fail": "b42717805bbc535c",
     "tests/task-page.test.ts::TASK-12::opening a task from the board, the task list, or a link shows its page, where its fields are edited in place": "a0d56b15dfdef18b",
+    "tests/task-page.test.ts::TASK-12::a link to a task of another project opens it and switches the project; a task no project has does not exist": "2d2295135c5092b5",
     "tests/task-page.test.ts::TASK-13::a task's assignee is one person or nobody": "fe4ecdcaf70dd098",
     "tests/task-page.test.ts::TASK-14::a task's history lists its changes, topic links, sessions with their machine, and comments in time order, with who and when": "2e78abec652dab09",
     "tests/task-page.test.ts::TASK-15::every task's notes became a comment by the store's owner, dated when they were last written": "7d2b99570a1cee1e",
