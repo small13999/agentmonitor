@@ -485,6 +485,55 @@ a.actor:hover { text-decoration: none; color: var(--accent); }
 .files li { padding: 6px 12px; }
 .files li + li { border-top: 2px solid var(--line-soft); }
 .files code { background: none; padding: 0; }
+
+/* CARD-3, DEPLOY-1: the branch's work on the task's page and on a run. */
+.work p { margin: 0; }
+.work-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; }
+.work-head h3 { font-size: 17px; letter-spacing: -0.025em; }
+.branch { font-size: 12px; color: var(--fg-2); }
+.work-state { font-weight: 700; }
+.work-state-nothing { color: var(--muted); font-weight: 600; }
+.work-state-uncommitted, .work-state-unpushed { color: var(--orange); }
+.work-state-pushed { color: var(--green); }
+.commits { margin: 0; padding: 0; list-style: none; display: grid; overflow: hidden; border: 2px solid var(--line); border-radius: 14px; }
+.commit { padding: 6px 12px; }
+.commit + .commit { border-top: 2px solid var(--line-soft); }
+.commit-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.commit-subject { font-weight: 700; color: var(--fg); }
+button.commit-subject { padding: 0 8px; margin-left: -8px; color: var(--fg); font-weight: 700; }
+button.commit-subject::after { content: " ▸"; color: var(--muted); }
+button.commit-subject[aria-expanded="true"]::after { content: " ▾"; }
+.commit-line time { margin-left: auto; }
+.sha { font: 500 12px var(--mono); }
+.unpushed-mark { color: var(--orange); border: 2px solid var(--orange); border-radius: 999px; padding: 0 7px; font-size: 11px; font-weight: 800; line-height: 15px; }
+.commit-body { margin: 6px 0 2px; padding: 8px 10px; border-radius: 10px; background: var(--code-bg); font: 12.5px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg-2); }
+.pull-requests { display: grid; gap: 6px; }
+.pull-request { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.pull-request a { font-weight: 750; }
+.pr-title { color: var(--fg-2); }
+.pr-state, .checks, .work-badge { border: 2px solid var(--line); border-radius: 999px; padding: 0 8px; font-size: 11px; font-weight: 800; line-height: 16px; white-space: nowrap; }
+.pr-open { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+.pr-merged { background: var(--green-soft); color: var(--green); border-color: transparent; }
+.pr-closed { border-style: dashed; border-color: var(--muted); color: var(--muted); }
+.checks-passing { color: var(--green); border-color: var(--green); }
+.checks-failing { color: var(--red); border-color: var(--red); }
+.checks-pending { color: var(--orange); border-color: var(--orange); border-style: dashed; }
+.files-toggle { justify-self: start; }
+.lines-added { color: var(--green); font-family: var(--mono); }
+.lines-deleted { color: var(--red); font-family: var(--mono); }
+.overlaps { display: grid; gap: 6px; }
+.deploy { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding-top: 10px; border-top: 2px dashed var(--line-soft); }
+.deploy-button { background: var(--accent-fill); border-color: var(--accent-line); color: #fff; }
+.deploy-button:hover { background: var(--accent-hover); }
+.deploy-state { padding-top: 10px; border-top: 2px dashed var(--line-soft); font-weight: 650; }
+/* CARD-6: the card's one badge for its work: not pushed warns. */
+.work-badge { margin-left: auto; }
+.work-badge-unpushed { background: var(--needs-soft); color: var(--orange); border-color: var(--orange); }
+.work-badge-open { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+.work-badge-deployed { background: var(--green-soft); color: var(--green); border-color: transparent; }
+.review-item { display: grid; gap: 8px; }
+.review-item .work { background: var(--surface); }
+.run-work td { border-top: none; }
 .end-session p { margin: 0; }
 
 .session-frames { grid-area: body; position: relative; min-height: 0; margin-top: 12px; }

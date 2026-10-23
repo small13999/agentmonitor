@@ -10,7 +10,7 @@ import { WebSocket } from "ws";
 import { buildImage } from "../scripts/build-image.ts";
 import { FakeModel } from "./fake-model.ts";
 import { buildApp, Gateway, rgb, type OmpChannel } from "./harness.ts";
-import type { HistoryEntry, TaskChanges } from "../shared/api.ts";
+import type { HistoryEntry, Work } from "../shared/api.ts";
 import { spec } from "./spec.ts";
 
 // Every claim in this file runs against one gateway and its session containers, in order.
@@ -22,7 +22,6 @@ interface Card {
   lastUserMessage: string | null;
   lastReply: string | null;
   git: { uncommitted: string[]; unpushed: number; changedFiles: string[] } | null;
-  pullRequests: Array<{ number: number; title: string; url: string }> | null;
   overlaps: Array<{ sessionId: string; name: string; files: string[] }>;
   cloudflare: { canWrite: boolean; writesUntil: number | null } | null;
 }
@@ -70,9 +69,9 @@ before(async () => {
   mkdirSync(agentDir);
   fake.writeAgentDir(agentDir);
   const gh = join(scratch, "gh");
-  // Each listing says the pull request was opened now, so it is recorded when GitHub is first asked (TASK-14).
-  const listing = JSON.stringify([{ ...PULL_REQUEST, createdAt: "OPENED" }]);
-  writeFileSync(gh, `#!/bin/sh\necho '${listing}' | sed "s/OPENED/$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)/"\n`);
+  // Each listing says the pull request was opened now, so it is recorded when GitHub is first asked (TASK-14); its head has no Actions runs.
+  const listing = JSON.stringify([{ ...PULL_REQUEST, state: "OPEN", createdAt: "OPENED", headRefOid: "0000000000000000000000000000000000000000" }]);
+  writeFileSync(gh, `#!/bin/sh\nif [ "$1" = run ]; then echo '[]'; exit 0; fi\necho '${listing}' | sed "s/OPENED/$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)/"\n`);
   chmodSync(gh, 0o755);
 
   // The user's git credentials, which the gateway keeps; Cloudflare's API, for the project's tokens.
@@ -326,7 +325,7 @@ spec("COMMENT-3", "comments never reach a running session's chat; its agent read
   assert.ok(asked.includes(TASK_A.comment) && asked.includes(posted), `am comments lists both:\n${asked}`);
 });
 
-spec("CARD-3", "a task's Changes view shows what its branch changed against the default branch, its uncommitted files, and its open pull requests", async () => {
+spec("CARD-3", "a container session's task page shows its branch's work: uncommitted files, commits not pushed, files changed, and its pull request", async () => {
   exec(a, ["sh", "-c", [
     "cd /workspace/fixture",
     "echo note > notes.txt",
@@ -334,20 +333,22 @@ spec("CARD-3", "a task's Changes view shows what its branch changed against the 
     "git -c user.name=a -c user.email=a@a commit -qam 'Translate patch notes'",
     "echo draft > draft.md",
   ].join(" && ")]);
-  const changes = await gateway.data<TaskChanges>("GET", `/tasks/${a.taskId}/changes`);
-  assert.equal(changes.branch, a.branch);
-  assert.match(changes.committed?.commits.join("\n") ?? "", /^[0-9a-f]+ Translate patch notes$/);
-  assert.deepEqual(changes.committed?.files, [{ path: "AGENTS.md", status: "modified" }]);
-  assert.deepEqual(changes.uncommitted?.sort(), ["draft.md", "notes.txt"]);
-  assert.deepEqual(changes.pullRequests, [PULL_REQUEST]);
+  const work = await gateway.data<Work>("GET", `/tasks/${a.taskId}/changes`);
+  assert.equal(work.branch, a.branch);
+  assert.equal(work.state, "uncommitted");
+  assert.deepEqual(work.commits?.map((commit) => [commit.subject, commit.pushed]), [["Translate patch notes", false]]);
+  assert.deepEqual(work.files, [{ path: "AGENTS.md", status: "modified", added: 1, deleted: 0 }]);
+  assert.deepEqual(work.uncommitted?.sort(), ["draft.md", "notes.txt"]);
+  assert.deepEqual(work.pullRequests, [{ ...PULL_REQUEST, state: "open", checks: [] }]);
 
-  // The Settings tab opens on it.
-  const page = await sessionPage(a, "settings");
-  const view = page.getByRole("region", { name: "Settings" }).getByRole("region", { name: "Changes" });
-  await view.locator(".changed-files li", { hasText: "AGENTS.md" }).waitFor();
-  await view.locator(".commits li", { hasText: "Translate patch notes" }).waitFor();
+  // The task's page shows it.
+  const page = await sessionPage(a, "page");
+  const view = page.getByRole("region", { name: "Work" });
+  await view.locator(".commit", { hasText: "Translate patch notes" }).waitFor();
   assert.deepEqual((await view.locator(".uncommitted code").allTextContents()).sort(), ["draft.md", "notes.txt"]);
   await view.getByRole("link", { name: "PR #7" }).waitFor();
+  await view.getByRole("button", { name: /^1 file changed/ }).click();
+  await view.locator(".changed-files li", { hasText: "AGENTS.md" }).waitFor();
 });
 
 spec("TASK-14", "a task's history lists the pull requests of its branch, which no one in the store did", async () => {
@@ -365,7 +366,7 @@ spec("TASK-14", "a task's history lists the pull requests of its branch, which n
 
 let b: Session;
 
-spec("CARD-4", "a task's Changes view and its card name the other running tasks that changed the same files", async () => {
+spec("CARD-4", "a task's Work section and its card name the other running tasks that changed the same files", async () => {
   b = await session("Client fixes");
   const worktreeB = join(gateway.stateDir, "sessions", b.id, "worktree");
   writeFileSync(join(worktreeB, "AGENTS.md"), "# Fixture\n\nrewritten\n");
@@ -375,12 +376,12 @@ spec("CARD-4", "a task's Changes view and its card name the other running tasks 
   const shownB = await card(b);
   assert.deepEqual(shownA.overlaps, [{ sessionId: b.id, name: "Client fixes", files: ["AGENTS.md"] }]);
   assert.deepEqual(shownB.overlaps, [{ sessionId: a.id, name: "Patch Notes JP", files: ["AGENTS.md"] }]);
-  const changesA = await gateway.data<TaskChanges>("GET", `/tasks/${a.taskId}/changes`);
-  const changesB = await gateway.data<TaskChanges>("GET", `/tasks/${b.taskId}/changes`);
-  assert.deepEqual(changesA.overlaps, [{ taskId: b.taskId, title: "Client fixes", files: ["AGENTS.md"] }]);
-  assert.deepEqual(changesB.overlaps, [{ taskId: a.taskId, title: "Patch Notes JP", files: ["AGENTS.md"] }]);
-  const settings = await freshPage(`#/t/${a.taskId}/settings`);
-  const overlap = settings.getByRole("region", { name: "Changes" }).locator(".overlap", { hasText: "Client fixes: AGENTS.md" });
+  const workA = await gateway.data<Work>("GET", `/tasks/${a.taskId}/changes`);
+  const workB = await gateway.data<Work>("GET", `/tasks/${b.taskId}/changes`);
+  assert.deepEqual(workA.overlaps, [{ taskId: b.taskId, title: "Client fixes", files: ["AGENTS.md"] }]);
+  assert.deepEqual(workB.overlaps, [{ taskId: a.taskId, title: "Patch Notes JP", files: ["AGENTS.md"] }]);
+  const page = await freshPage(`#/t/${a.taskId}`);
+  const overlap = page.getByRole("region", { name: "Work" }).locator(".overlap", { hasText: "Client fixes: AGENTS.md" });
   await overlap.waitFor();
   assert.equal(await overlap.getByRole("link", { name: "Client fixes" }).getAttribute("href"), `#/t/${b.taskId}`);
 

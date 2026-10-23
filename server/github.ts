@@ -5,26 +5,20 @@ import type { CheckState, PullRequest } from "../shared/api.ts";
 
 const run = promisify(execFile);
 
-// A check is a GitHub Actions run (CheckRun) or a commit status another service set (StatusContext).
-const check = z.union([
-  z.object({ __typename: z.literal("CheckRun"), name: z.string(), status: z.string(), conclusion: z.string().nullable().optional() }),
-  z.object({ __typename: z.literal("StatusContext"), context: z.string(), state: z.string() }),
-]);
 const listed = z.array(z.object({
   number: z.number(),
   title: z.string(),
   url: z.string(),
   state: z.enum(["OPEN", "MERGED", "CLOSED"]),
   createdAt: z.string(),
+  headRefOid: z.string(),
 }));
-const checked = z.array(z.object({ number: z.number(), statusCheckRollup: z.array(check).nullable().optional() }));
+// GitHub Actions runs as `gh run list` gives them: lowercase status and conclusion, the conclusion empty until completed.
+const actionRuns = z.array(z.object({ name: z.string(), status: z.string(), conclusion: z.string(), url: z.string() }));
 
-function checkState(found: z.infer<typeof check>): CheckState {
-  if (found.__typename === "StatusContext") {
-    return found.state === "SUCCESS" ? "passing" : found.state === "PENDING" || found.state === "EXPECTED" ? "pending" : "failing";
-  }
-  if (found.status !== "COMPLETED") return "pending";
-  return found.conclusion === "SUCCESS" || found.conclusion === "NEUTRAL" || found.conclusion === "SKIPPED" ? "passing" : "failing";
+function checkState(found: z.infer<typeof actionRuns>[number]): CheckState {
+  if (found.status !== "completed") return "pending";
+  return found.conclusion === "success" || found.conclusion === "neutral" || found.conclusion === "skipped" ? "passing" : "failing";
 }
 
 /** A pull request with when it was opened (ms since epoch). */
@@ -32,25 +26,23 @@ export interface OpenedPullRequest extends PullRequest {
   createdAt: number;
 }
 
-/** `gh pr list` of every pull request from `branch`, open, merged, or closed, with `fields`, as GitHub CLI answers from the repository at `cwd`. */
-async function ghPullRequests(cwd: string, branch: string, fields: string): Promise<unknown> {
-  const { stdout } = await run(
-    process.env.AGENTMONITOR_GH ?? "gh",
-    ["pr", "list", "--head", branch, "--state", "all", "--json", fields],
-    { cwd, encoding: "utf8", timeout: 10_000 },
-  );
+/** GitHub CLI's JSON answer to `args`, asked from the repository at `cwd`. */
+async function gh(cwd: string, args: string[]): Promise<unknown> {
+  const { stdout } = await run(process.env.AGENTMONITOR_GH ?? "gh", args, { cwd, encoding: "utf8", timeout: 10_000 });
   return JSON.parse(stdout);
 }
 
-/** The pull requests from `branch`, newest first, without their checks; null when GitHub cannot be asked. */
-async function listPullRequests(cwd: string, branch: string): Promise<Array<Omit<OpenedPullRequest, "checks">> | null> {
+/** The pull requests from `branch`, open, merged, or closed, newest first, with their head commit and without checks; null when GitHub cannot be asked. */
+async function listPullRequests(cwd: string, branch: string): Promise<Array<Omit<OpenedPullRequest, "checks"> & { head: string }> | null> {
   try {
-    return listed.parse(await ghPullRequests(cwd, branch, "number,title,url,state,createdAt")).map((pr) => ({
+    const answer = await gh(cwd, ["pr", "list", "--head", branch, "--state", "all", "--json", "number,title,url,state,createdAt,headRefOid"]);
+    return listed.parse(answer).map((pr) => ({
       number: pr.number,
       title: pr.title,
       url: pr.url,
       state: pr.state === "OPEN" ? "open" : pr.state === "MERGED" ? "merged" : "closed",
       createdAt: Date.parse(pr.createdAt),
+      head: pr.headRefOid,
     }));
   } catch {
     return null;
@@ -58,22 +50,24 @@ async function listPullRequests(cwd: string, branch: string): Promise<Array<Omit
 }
 
 /**
- * The pull requests from `branch` (listPullRequests) with their checks. Checks are asked for
- * apart: a token may read pull requests but not checks (a fine-grained token without the Checks
- * permission fails the whole query), and then the pull requests still show, their checks null.
+ * A commit's checks: its GitHub Actions runs. Read from Actions, not from the pull request's
+ * check rollup: a fine-grained token has no Checks permission at all, while Actions: read
+ * works. Null when they cannot be read; the pull request shows without them.
  */
+async function commitChecks(cwd: string, sha: string): Promise<PullRequest["checks"]> {
+  try {
+    const answer = await gh(cwd, ["run", "list", "--commit", sha, "--json", "name,status,conclusion,url"]);
+    return actionRuns.parse(answer).map((found) => ({ name: found.name, state: checkState(found), url: found.url }));
+  } catch {
+    return null;
+  }
+}
+
+/** The pull requests from `branch` (listPullRequests), each with its head commit's checks (commitChecks). */
 async function pullRequestsWithChecks(cwd: string, branch: string): Promise<OpenedPullRequest[] | null> {
   const prs = await listPullRequests(cwd, branch);
   if (prs === null) return null;
-  if (prs.length === 0) return [];
-  const checks = await ghPullRequests(cwd, branch, "number,statusCheckRollup").then(
-    (answer) => new Map(checked.parse(answer).map((pr) => [pr.number, (pr.statusCheckRollup ?? []).map((found) => ({
-      name: found.__typename === "CheckRun" ? found.name : found.context,
-      state: checkState(found),
-    }))])),
-    () => null,
-  );
-  return prs.map((pr) => ({ ...pr, checks: checks === null ? null : checks.get(pr.number) ?? [] }));
+  return Promise.all(prs.map(async ({ head, ...pr }) => ({ ...pr, checks: await commitChecks(cwd, head) })));
 }
 
 /**

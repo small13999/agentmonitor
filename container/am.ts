@@ -451,12 +451,12 @@ function pullRequestOf(value: unknown): PullRequest {
     || !(value.state === "open" || value.state === "merged" || value.state === "closed")) {
     throw unexpected("a pull request");
   }
-  const checks = value.checks === null ? null : listOf(value.checks, "a list of checks", (check): { name: string; state: CheckState } => {
+  const checks = value.checks === null ? null : listOf(value.checks, "a list of checks", (check): { name: string; state: CheckState; url: string } => {
     const state = isRecord(check) ? check.state : undefined;
-    if (!isRecord(check) || typeof check.name !== "string" || !(state === "passing" || state === "failing" || state === "pending")) {
+    if (!isRecord(check) || typeof check.name !== "string" || typeof check.url !== "string" || !(state === "passing" || state === "failing" || state === "pending")) {
       throw unexpected("a check");
     }
-    return { name: check.name, state };
+    return { name: check.name, state, url: check.url };
   });
   return { number: value.number, title: value.title, url: value.url, state: value.state, checks };
 }

@@ -106,10 +106,8 @@ spec("UI-2", "a task has Page, Chat, and Settings tabs, Settings at the right wi
   await tabs.getByRole("tab", { name: "Settings" }).click();
   await page.waitForURL(new RegExp(`#/t/${target.id}/settings$`));
   const settings = page.getByRole("region", { name: "Settings" });
-  await settings.getByRole("tab", { name: "Changes" }).waitFor();
-  assert.deepEqual(await settings.getByRole("tablist", { name: "Settings" }).getByRole("tab").allTextContents(), ["Changes", "Cloudflare", "End session"]);
-  await settings.getByRole("region", { name: "Changes" }).getByText("The task has no branch yet", { exact: false }).waitFor();
-  await settings.getByRole("tab", { name: "Cloudflare" }).click();
+  await settings.getByRole("tab", { name: "Cloudflare" }).waitFor();
+  assert.deepEqual(await settings.getByRole("tablist", { name: "Settings" }).getByRole("tab").allTextContents(), ["Cloudflare", "End session"]);
   await settings.getByRole("region", { name: "Cloudflare" }).waitFor();
   await settings.getByRole("tab", { name: "End session" }).click();
   await settings.getByRole("region", { name: "End session" }).getByRole("button", { name: "End session" }).waitFor();

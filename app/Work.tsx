@@ -53,14 +53,16 @@ function checksOf(pr: PullRequest): CheckState | null {
   return "passing";
 }
 
+/** CARD-3: a pull request's checks in one pill, linking to the run that decides it (the failing one, else a pending one). */
 function Checks({ pr }: { pr: PullRequest }) {
   if (pr.checks === null) return <span className="muted small">Checks unavailable</span>;
   const state = checksOf(pr);
   if (state === null) return <span className="muted small">No checks</span>;
+  const deciding = pr.checks.find((check) => check.state === state) ?? pr.checks[0];
   return (
-    <span className={`checks checks-${state}`} title={pr.checks.map((check) => `${check.name}: ${check.state}`).join("\n")}>
+    <a className={`checks checks-${state}`} href={deciding.url} target="_blank" rel="noreferrer" title={pr.checks.map((check) => `${check.name}: ${check.state}`).join("\n")}>
       {CHECKS_LABEL[state]}
-    </span>
+    </a>
   );
 }
 

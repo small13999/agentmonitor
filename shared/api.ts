@@ -346,8 +346,8 @@ export interface PullRequest {
   title: string;
   url: string;
   state: "open" | "merged" | "closed";
-  /** Its checks; null when GitHub answers about the pull request but not its checks (a token without the Checks permission). */
-  checks: Array<{ name: string; state: CheckState }> | null;
+  /** Its head commit's GitHub Actions runs, each linking to its page; null when GitHub answers about the pull request but not its runs. */
+  checks: Array<{ name: string; state: CheckState; url: string }> | null;
 }
 
 export interface Card {

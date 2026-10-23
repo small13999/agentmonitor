@@ -286,7 +286,7 @@ spec("FOLDER-3", "a host session's agent finds its task's folder outside its wor
   assert.equal(execFileSync("git", ["-C", dirs(host).worktree, "status", "--porcelain"], { encoding: "utf8" }), "");
 });
 
-spec("STORE-5", "am task changes says what the task's Changes view says", async () => {
+spec("STORE-5", "am task changes says what the task's Work section says", async () => {
   const worktree = dirs(host).worktree;
   writeFileSync(join(worktree, "AGENTS.md"), `# Fixture\n\n${REPO_RULE}\nAnd one more rule.\n`);
   execFileSync("git", ["-C", worktree, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "One more rule"]);
@@ -295,32 +295,23 @@ spec("STORE-5", "am task changes says what the task's Changes view says", async 
     const said = gateway.am(host.id, ["task", "changes"]);
     assert.equal(said.code, 0, said.stderr);
 
-    const opened = await openPage(`#/t/${task.id}/settings`);
-    const view = opened.getByRole("region", { name: "Settings" }).getByRole("region", { name: "Changes" });
-    await view.locator(".changed-files li", { hasText: "AGENTS.md" }).waitFor();
+    const opened = await openPage(`#/t/${task.id}`);
+    const view = opened.getByRole("region", { name: "Work" });
+    await view.locator(".commit", { hasText: "One more rule" }).waitFor();
     await view.locator(".uncommitted code", { hasText: "draft.md" }).waitFor();
-    const [branch, base] = await view.locator("p.small").first().locator("code").allTextContents();
-    const commits = await view.locator(".commits code").allTextContents();
-    const files = await view.locator(".changed-files li").evaluateAll((items) => items.map((item) => `${item.querySelector(".file-status")?.getAttribute("title")}\t${item.querySelector("code")?.textContent}`));
+    const branch = await view.locator(".branch").textContent();
+    const commits = await view.locator(".commit").evaluateAll((items) => items.map((item) => `${item.querySelector(".sha")?.textContent} ${item.querySelector(".commit-subject")?.textContent}`));
     const uncommitted = await view.locator(".uncommitted code").allTextContents();
-    const pullRequests = (await view.locator("h3", { hasText: "Pull requests" }).locator("xpath=following-sibling::p[1]").textContent()) ?? "";
-    assert.equal(said.stdout, [
-      `branch ${branch} against ${base}`,
-      "",
-      "committed on the branch:",
-      ...commits.map((commit) => `  ${commit}`),
-      ...files.map((file) => `  ${file}`),
-      "",
-      "uncommitted:",
-      ...uncommitted.map((file) => `  ${file}`),
-      "",
-      "pull requests:",
-      `  ${pullRequests.replace(/\.$/, "").toLowerCase()}`,
-      "",
-    ].join("\n"));
+    await view.locator(".files-toggle").click();
+    const files = await view.locator(".changed-files li").evaluateAll((items) => items.map((item) => `${item.querySelector(".file-status")?.getAttribute("title")}\t${item.querySelector("code")?.textContent}`));
+    const pullRequests = (await view.locator(".pull-requests").textContent()) ?? "";
+    const lines = said.stdout.split("\n");
+    assert.match(lines[0], new RegExp(`^branch ${branch} from \\S+: uncommitted changes in the running session: ${uncommitted.join(", ")}$`));
+    assert.deepEqual(lines.filter((line) => /^ {2}[0-9a-f]{7} /.test(line)).map((line) => line.trim().split("\t")[0].replace(/ \(not pushed\)$/, "")), commits);
+    assert.deepEqual(lines.filter((line) => /^ {2}(added|modified|deleted|renamed)\t/.test(line)).map((line) => line.trim().split("\t").slice(0, 2).join("\t")), files);
+    assert.equal(lines[lines.indexOf("pull requests:") + 1], `  ${pullRequests.replace(/\.$/, "").toLowerCase()}`);
     assert.equal(branch, host.branch);
-    assert.match(commits.join("\n"), /^[0-9a-f]+ One more rule$/);
-    assert.deepEqual([files, uncommitted], [["modified\tAGENTS.md"], ["draft.md"]]);
+    assert.deepEqual([commits.map((commit) => commit.slice(8)), files, uncommitted], [["One more rule"], ["modified\tAGENTS.md"], ["draft.md"]]);
   } finally {
     rmSync(join(worktree, "draft.md"));
   }
