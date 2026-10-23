@@ -216,8 +216,8 @@ export type RunOutcome = "finished" | "review" | "timed_out" | "failed" | "ended
 export interface Run {
   /** Who started it: a person or an agent ("run now"); null: one of its triggers fired. */
   startedBy: Actor | null;
-  /** What its trigger's guard and check found, which its prompt holds (AUTO-13); empty for "run now". */
-  triggerContext: string;
+  /** What its trigger's firing found, which its prompt holds (AUTO-13); null for "run now". */
+  triggerContext: TriggerContext | null;
   outcome: RunOutcome | null;
   /** PERSON-1: who ended its session; null while it runs, or when it ended on its own. */
   endedBy: Actor | null;
@@ -226,16 +226,16 @@ export interface Run {
 /** What a trigger's guard or check said at a firing (AUTO-8). */
 export interface FiringVerdict {
   passed: boolean;
-  /** The guard's output, or the check's answer and why. */
+  /** The guard's output (with its errors and exit status when it failed), or why the check said yes or no. */
   output: string;
 }
 
 /**
- * AUTO-8: what became of a trigger's scheduled time: a run started, or why not (the
- * automation was off, a run was still going, the guard or the check said no, or the run's
- * start failed).
+ * AUTO-8: what became of a trigger's scheduled time: still being decided (its guard or check
+ * runs), a run started, or why not (the automation was off, a run was still going, the guard
+ * or the check said no, or the firing failed: the run's start, or the gateway stopped during it).
  */
-export type FiringOutcome = "started" | "off" | "running" | "guard" | "check" | "failed";
+export type FiringOutcome = "pending" | "started" | "off" | "running" | "guard" | "check" | "failed";
 
 /** AUTO-2, AUTO-8: one scheduled time of a trigger, fired at most once (unique per trigger and time). */
 export interface Firing {
@@ -245,12 +245,28 @@ export interface Firing {
   triggerId: string;
   scheduledAt: number;
   firedAt: number;
+  /** AUTO-2: the time passed while the gateway was down, and fired once it was back. */
+  caughtUp: boolean;
   /** Null: the trigger has no guard, or did not get to it. */
   guard: FiringVerdict | null;
   check: FiringVerdict | null;
   outcome: FiringOutcome;
   /** The run it started (a session id). */
   sessionId: string | null;
+  /** Why it failed (outcome `failed`); null otherwise. */
+  error: string | null;
+}
+
+/** AUTO-13: the firing a trigger started a run with: its schedule, the time, and what its guard and check said. */
+export interface TriggerContext {
+  firingId: string;
+  triggerId: string;
+  cron: string;
+  timezone: string;
+  scheduledAt: number;
+  caughtUp: boolean;
+  guard: FiringVerdict | null;
+  check: FiringVerdict | null;
 }
 
 /** An automation as its project's list shows it. */

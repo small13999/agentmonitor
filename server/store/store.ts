@@ -4,14 +4,14 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type {
   Actor, Automation, AutomationDetail, AutomationSummary, Comment, EndMode, Firing, FiringOutcome, FiringVerdict, FolderFile, HistoryEntry, HistoryEvent, Person, Project, PullRequest,
-  RunOutcome, Session, SessionRuntime, Task, TaskDetail, TaskState, TaskSummary, Topic, TopicLink, Trigger,
+  RunOutcome, Session, SessionRuntime, Task, TaskDetail, TaskState, TaskSummary, Topic, TopicLink, Trigger, TriggerContext,
 } from "../../shared/api.ts";
 import type { CloudflareTokens } from "../cloudflare.ts";
-import { historyEvent, matchPeople, type ProjectRecords } from "./bundle.ts";
+import { historyEvent, matchPeople, triggerContext as triggerContextSchema, type ProjectRecords } from "./bundle.ts";
 
 export type {
   Actor, Automation, AutomationDetail, AutomationSummary, Comment, EndMode, Firing, FiringOutcome, FiringVerdict, FolderFile, HistoryEntry, HistoryEvent, Person, Project,
-  RunOutcome, Session, SessionRuntime, Task, TaskDetail, TaskState, TaskSummary, Topic, TopicLink, Trigger,
+  RunOutcome, Session, SessionRuntime, Task, TaskDetail, TaskState, TaskSummary, Topic, TopicLink, Trigger, TriggerContext,
 };
 
 /** TOPIC-2 and TASK-7: a status is a short current-state note, not a document. */
@@ -178,10 +178,12 @@ CREATE TABLE IF NOT EXISTS automation_firings (
   trigger_id TEXT NOT NULL,
   scheduled_at INTEGER NOT NULL,
   fired_at INTEGER NOT NULL,
+  caught_up INTEGER NOT NULL DEFAULT 0,
   guard_verdict TEXT,
   check_verdict TEXT,
   outcome TEXT NOT NULL,
   session_id TEXT REFERENCES sessions(id),
+  error TEXT,
   UNIQUE (trigger_id, scheduled_at)
 );
 CREATE INDEX IF NOT EXISTS automation_firings_automation ON automation_firings (automation_id, scheduled_at);
@@ -376,7 +378,7 @@ function session(row: Row): Session {
     endedAt: row.ended_at === null ? null : Number(row.ended_at),
     run: row.automation_id === null ? null : {
       startedBy: actorOfRow(row.run_started_by_kind, row.run_started_by_id),
-      triggerContext: row.run_trigger_context === null ? "" : String(row.run_trigger_context),
+      triggerContext: row.run_trigger_context === null ? null : triggerContextSchema.parse(JSON.parse(String(row.run_trigger_context))),
       outcome: RUN_OUTCOMES.find((outcome) => outcome === row.run_outcome) ?? null,
       endedBy: actorOfRow(row.run_ended_by_kind, row.run_ended_by_id),
     },
@@ -411,7 +413,7 @@ function trigger(row: Row): Trigger {
   };
 }
 
-const FIRING_OUTCOMES: readonly FiringOutcome[] = ["started", "off", "running", "guard", "check", "failed"];
+const FIRING_OUTCOMES: readonly FiringOutcome[] = ["pending", "started", "off", "running", "guard", "check", "failed"];
 
 function verdictOf(value: unknown): FiringVerdict | null {
   if (value === null) return null;
@@ -429,10 +431,12 @@ function firing(row: Row): Firing {
     triggerId: String(row.trigger_id),
     scheduledAt: Number(row.scheduled_at),
     firedAt: Number(row.fired_at),
+    caughtUp: Number(row.caught_up) === 1,
     guard: verdictOf(row.guard_verdict),
     check: verdictOf(row.check_verdict),
     outcome,
     sessionId: row.session_id === null ? null : String(row.session_id),
+    error: row.error === null ? null : String(row.error),
   };
 }
 
@@ -473,6 +477,11 @@ export class Store {
     this.addColumn("sessions", "runtime", "TEXT NOT NULL DEFAULT 'container'");
     this.addColumn("sessions", "checkout", "INTEGER NOT NULL DEFAULT 0");
     this.migrateSessionOwners();
+    // AUTO-2, AUTO-13: stores from before scheduling: firings say whether they caught up and why
+    // they failed, and a run's trigger context is JSON, none ("run now") null.
+    this.addColumn("automation_firings", "caught_up", "INTEGER NOT NULL DEFAULT 0");
+    this.addColumn("automation_firings", "error", "TEXT");
+    this.db.exec("UPDATE sessions SET run_trigger_context = NULL WHERE run_trigger_context = ''");
     // PERSON-1: every store has its owner; TASK-13 and UI-4 on stores from before people.
     if (this.db.prepare("SELECT 1 FROM people WHERE owner = 1").get() === undefined) {
       this.db.prepare("INSERT INTO people (id, name, color, owner, created_at) VALUES (?, ?, ?, 1, ?)").run(randomUUID(), ownerName, PALETTE[5], Date.now());
@@ -1462,8 +1471,9 @@ export class Store {
   }
 
   /**
-   * AUTO-2, AUTO-8: records what became of a trigger's scheduled time; the store's own doing, so
-   * no principal. Each scheduled time of a trigger is recorded once: a second is refused (409).
+   * AUTO-2, AUTO-8: records a trigger's scheduled time as it fires, or what became of it; the
+   * store's own doing, so no principal. Each scheduled time of a trigger is recorded once: a
+   * second is refused (409).
    */
   recordFiring(input: Omit<Firing, "id" | "automationId">): Firing {
     return this.transaction(() => {
@@ -1472,11 +1482,12 @@ export class Store {
       const created: Firing = { ...input, id: randomUUID(), automationId: String(row.automation_id) };
       try {
         this.db.prepare(
-          "INSERT INTO automation_firings (id, automation_id, trigger_id, scheduled_at, fired_at, guard_verdict, check_verdict, outcome, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO automation_firings (id, automation_id, trigger_id, scheduled_at, fired_at, caught_up, guard_verdict, check_verdict, outcome, session_id, error) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         ).run(
-          created.id, created.automationId, created.triggerId, created.scheduledAt, created.firedAt,
+          created.id, created.automationId, created.triggerId, created.scheduledAt, created.firedAt, created.caughtUp ? 1 : 0,
           created.guard === null ? null : JSON.stringify(created.guard), created.check === null ? null : JSON.stringify(created.check),
-          created.outcome, created.sessionId,
+          created.outcome, created.sessionId, created.error,
         );
       } catch (cause) {
         if (cause instanceof Error && /UNIQUE constraint failed/.test(cause.message)) {
@@ -1486,6 +1497,19 @@ export class Store {
       }
       return created;
     });
+  }
+
+  /** AUTO-8: what became of a pending firing: what its guard and check said, and its outcome. A settled firing stays as it is. */
+  settleFiring(firingId: string, result: Pick<Firing, "guard" | "check" | "outcome" | "sessionId" | "error">): void {
+    this.db.prepare("UPDATE automation_firings SET guard_verdict = ?, check_verdict = ?, outcome = ?, session_id = ?, error = ? WHERE id = ? AND outcome = 'pending'").run(
+      result.guard === null ? null : JSON.stringify(result.guard), result.check === null ? null : JSON.stringify(result.check),
+      result.outcome, result.sessionId, result.error, firingId,
+    );
+  }
+
+  /** AUTO-8: firings still pending when the gateway that fired them stopped fail, with `error`; returns how many. */
+  failPendingFirings(error: string): number {
+    return Number(this.db.prepare("UPDATE automation_firings SET outcome = 'failed', error = ? WHERE outcome = 'pending'").run(error).changes);
   }
 
   /**
@@ -1498,7 +1522,7 @@ export class Store {
   createRun(
     principal: Principal | null,
     automationId: string,
-    input: { machine?: string; runtime: SessionRuntime; triggerContext?: string },
+    input: { machine?: string; runtime: SessionRuntime; triggerContext?: TriggerContext },
   ): Session {
     const system = this.ownerPrincipal();
     if (input.runtime === "host" && (principal === null || !this.isOwner(principal))) throw new StoreError(403, "only the store's owner starts host runs");
@@ -1525,13 +1549,16 @@ export class Store {
         model: owner.model,
         startedAt: Date.now(),
         endedAt: null,
-        run: { startedBy, triggerContext: input.triggerContext ?? "", outcome: null, endedBy: null },
+        run: { startedBy, triggerContext: input.triggerContext ?? null, outcome: null, endedBy: null },
       };
       const [kind, id] = actorColumns(startedBy);
       this.db.prepare(
         "INSERT INTO sessions (id, project_id, automation_id, name, machine, runtime, checkout, model, started_at, run_started_by_kind, run_started_by_id, run_trigger_context) " +
           "VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)",
-      ).run(created.id, created.projectId, automationId, created.name, created.machine, created.runtime, created.model, created.startedAt, kind, id, created.run?.triggerContext ?? "");
+      ).run(
+        created.id, created.projectId, automationId, created.name, created.machine, created.runtime, created.model, created.startedAt, kind, id,
+        input.triggerContext === undefined ? null : JSON.stringify(input.triggerContext),
+      );
       return created;
     });
   }
@@ -1677,15 +1704,17 @@ export class Store {
             "run_started_by_kind, run_started_by_id, run_trigger_context, run_outcome, run_ended_by_kind, run_ended_by_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         ).run(
           found.id, moved.id, found.taskId, found.automationId, found.name, found.branch, found.baseRef, found.machine, found.runtime, found.checkout ? 1 : 0,
-          found.model, found.startedAt, found.endedAt, startedKind, startedId, found.run?.triggerContext ?? null, found.run?.outcome ?? null, endedKind, endedId,
+          found.model, found.startedAt, found.endedAt, startedKind, startedId, found.run?.triggerContext == null ? null : JSON.stringify(found.run.triggerContext),
+          found.run?.outcome ?? null, endedKind, endedId,
         );
       }
       for (const found of records.firings) {
         this.db.prepare(
-          "INSERT INTO automation_firings (id, automation_id, trigger_id, scheduled_at, fired_at, guard_verdict, check_verdict, outcome, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO automation_firings (id, automation_id, trigger_id, scheduled_at, fired_at, caught_up, guard_verdict, check_verdict, outcome, session_id, error) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         ).run(
-          found.id, found.automationId, found.triggerId, found.scheduledAt, found.firedAt, found.guard === null ? null : JSON.stringify(found.guard),
-          found.check === null ? null : JSON.stringify(found.check), found.outcome, found.sessionId,
+          found.id, found.automationId, found.triggerId, found.scheduledAt, found.firedAt, found.caughtUp ? 1 : 0, found.guard === null ? null : JSON.stringify(found.guard),
+          found.check === null ? null : JSON.stringify(found.check), found.outcome, found.sessionId, found.error,
         );
       }
       for (const found of records.comments) {

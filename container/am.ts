@@ -66,8 +66,8 @@ const USAGE = `usage: am [--json] COMMAND [--task ID]
 
   automation list                     the project's automations: on or off, triggers, and
                                       whether a run is going
-  automation show [NAME]              an automation: its fields, triggers, instructions, and
-                                      runs (default: the one this run serves)
+  automation show [NAME]              an automation: its fields, triggers, instructions,
+                                      runs, and firings (default: the one this run serves)
   automation create NAME [FIELDS]     create an automation (stdin: its instructions)
   automation set NAME [FIELDS] [--name NEW] [--instructions]
                                       change an automation's fields; --instructions replaces
@@ -76,7 +76,11 @@ const USAGE = `usage: am [--json] COMMAND [--task ID]
               --on|--off --slug SLUG (its runs' branches: am/SLUG-RUN)
   automation trigger add NAME --cron "M H D MON WD" [--timezone TZ] [--guard PATH]
                      [--check PATH]   add a schedule (default timezone Europe/Budapest);
-                                      guard and check are files of its folder
+                                      guard and check are files of its folder: the guard
+                                      runs (its #! line, else sh) in the session image with
+                                      the folder read-only, exit 0 passes and its output goes
+                                      on; the check is a prompt omp's tiny model answers yes
+                                      or no, reading the folder and the web
   automation trigger set NAME TRIGGER [--cron C] [--timezone TZ] [--guard PATH|none]
                      [--check PATH|none]
                                       change a trigger (TRIGGER: its id, from show)
@@ -504,6 +508,28 @@ function triggerLine(trigger: Trigger): string {
   return `${trigger.id}\t${trigger.cron} (${trigger.timezone})${guard}${check}`;
 }
 
+/** How many firings `am automation show` lists, newest first. */
+const SHOWN_FIRINGS = 10;
+
+/** AUTO-8: a firing as `am automation show` lists it: its time, its outcome, what the guard and the check said, and its run or error. */
+function firingLine(value: unknown): string {
+  const verdict = (field: unknown): { passed: boolean; output: string } | null =>
+    isRecord(field) && typeof field.passed === "boolean" && typeof field.output === "string" ? { passed: field.passed, output: field.output } : null;
+  if (!isRecord(value) || typeof value.scheduledAt !== "number" || typeof value.outcome !== "string" || typeof value.caughtUp !== "boolean") {
+    throw unexpected("a firing");
+  }
+  const guard = verdict(value.guard);
+  const check = verdict(value.check);
+  return [
+    `  ${new Date(value.scheduledAt).toISOString()}${value.caughtUp ? " (caught up)" : ""}`,
+    value.outcome,
+    guard === null ? "no guard" : `guard ${guard.passed ? "passed" : "failed"}`,
+    check === null ? "no check" : `check: ${check.passed ? "yes" : "no"}, ${check.output.trim().replaceAll("\n", " ")}`,
+    ...(typeof value.sessionId === "string" ? [`run ${value.sessionId}`] : []),
+    ...(typeof value.error === "string" ? [value.error] : []),
+  ].join("\t");
+}
+
 interface Me {
   kind: string;
   project: { id: string; name: string };
@@ -802,15 +828,15 @@ async function automationCommand(json: boolean, me: Me, command: string | undefi
   if (command === "show" && args.length <= 1) {
     const automation = args[0] === undefined ? me.automation : await automationByName(me, args[0]);
     if (automation === null) throw new CliError("name the automation: am automation show NAME (am automation list)");
-    const detail = await call("GET", `/automations/${automation.id}`);
-    if (!isRecord(detail)) throw unexpected("an automation");
+    const [detail, firings] = await Promise.all([call("GET", `/automations/${automation.id}`), call("GET", `/automations/${automation.id}/firings`)]);
+    if (!isRecord(detail) || !Array.isArray(firings)) throw unexpected("an automation");
     const shown = automationOf(detail.automation);
     const triggers = listOf(detail.triggers, "a list of triggers", triggerOf);
     const runs = listOf(detail.runs, "a list of runs", (item) => {
       const outcome = isRecord(item) && isRecord(item.run) && typeof item.run.outcome === "string" ? item.run.outcome : null;
       return { session: sessionOf(item), outcome };
     });
-    print(json, detail, () => [
+    print(json, { ...detail, firings }, () => [
       automationText(shown),
       "",
       "triggers:",
@@ -826,6 +852,9 @@ async function automationCommand(json: boolean, me: Me, command: string | undefi
         `started ${new Date(session.startedAt).toISOString()}`,
         session.branch ?? "no branch",
       ].join("\t"))),
+      "",
+      `firings${firings.length > SHOWN_FIRINGS ? ` (the newest ${SHOWN_FIRINGS} of ${firings.length}; all with am --json)` : ""}:`,
+      ...(firings.length === 0 ? ["  (none)"] : firings.slice(0, SHOWN_FIRINGS).map(firingLine)),
     ].join("\n"));
     return true;
   }

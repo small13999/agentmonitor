@@ -2,8 +2,9 @@ import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from "node:
 import type { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { z } from "zod";
-import type { Automation, Card, EndedSession, HistoryEntry, TaskChanges } from "../../shared/api.ts";
+import type { Automation, Card, EndedSession, HistoryEntry, TaskChanges, TriggerContext } from "../../shared/api.ts";
 import { email } from "../config.ts";
+import { schedule } from "../scheduler/cron.ts";
 import { folderPath } from "./bundle.ts";
 import type { Folders } from "./folders.ts";
 import type { ProjectMoves } from "./move.ts";
@@ -71,8 +72,8 @@ export type SessionInput = z.infer<typeof sessionBody>;
 // AUTO-9: "run now"; HOST-1: on the host only where the project allows it, for its owner.
 const runBody = z.strictObject({ runtime: z.enum(["container", "host"]).optional() });
 export type RunInput = z.infer<typeof runBody> & {
-  /** AUTO-13: what the trigger's guard and check found; the scheduler's, never a request's. */
-  triggerContext?: string;
+  /** AUTO-13: the firing that started the run; the scheduler's, never a request's. */
+  triggerContext?: TriggerContext;
 };
 // AUTO-1: a slug names the automation's runs' branches, `am/<slug>-<run>` (AUTO-9).
 const slug = z.string().max(40).regex(/^[a-z0-9]+(?:[.-][a-z0-9]+)*$/, "a slug is lowercase letters and digits, joined by single dots or dashes");
@@ -87,8 +88,14 @@ const automationFields = {
 };
 const automationBody = z.strictObject({ name, ...automationFields });
 const automationUpdateBody = z.strictObject({ name: name.optional(), ...automationFields });
-// AUTO-2: five cron fields; the scheduler reads them, this only keeps out what is no schedule.
-const cron = z.string().trim().refine((value) => /^[0-9A-Za-z*,/-]+( +[0-9A-Za-z*,/-]+){4}$/.test(value), "a cron schedule has five fields: minute hour day month weekday");
+// AUTO-2: five cron fields, as the scheduler reads them.
+const cron = z.string().trim().superRefine((value, context) => {
+  try {
+    schedule(value, "UTC");
+  } catch (cause) {
+    context.addIssue({ code: "custom", message: `not a cron schedule (minute hour day month weekday): ${cause instanceof Error ? cause.message : String(cause)}` });
+  }
+});
 const timezone = z.string().refine((value) => {
   try {
     new Intl.DateTimeFormat("en-US", { timeZone: value });

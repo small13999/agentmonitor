@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, watch as watchDir, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, watch as watchDir, writeFileSync } from "node:fs";
 import { watch } from "node:fs/promises";
 import { createServer as createHttpsServer, type Server as HttpsServer } from "node:https";
 import { connect, createServer, type Socket } from "node:net";
@@ -92,16 +92,39 @@ async function freePort(): Promise<number> {
   return promise;
 }
 
+export type GatewayOptions = { runtime: "podman" | "none"; env?: Record<string, string>; stateDir?: string; hub?: boolean };
+
+/**
+ * AUTO-2: the time a test gateway's scheduler reads (AGENTMONITOR_CLOCK_FILE) until a test moves
+ * it with `setClock`, so no test fires a trigger by the real clock.
+ */
+const TEST_TIME = "2030-01-07T06:00:00.000Z";
+
 /** A real gateway process with its own state directory, driven the way the UI and agents drive it. */
 export class Gateway {
   readonly stateDir: string;
   readonly url: string;
   private readonly child: ChildProcess;
+  private readonly options: GatewayOptions;
+  /** Everything the gateway printed so far. */
+  private log = "";
+  private logWaiters: Array<{ pattern: RegExp; resolve: (line: string) => void }> = [];
 
-  private constructor(stateDir: string, url: string, child: ChildProcess) {
+  private constructor(stateDir: string, url: string, child: ChildProcess, options: GatewayOptions) {
     this.stateDir = stateDir;
     this.url = url;
     this.child = child;
+    this.options = options;
+    const append = (chunk: string) => {
+      this.log += chunk;
+      this.logWaiters = this.logWaiters.filter(({ pattern, resolve }) => {
+        const line = this.loggedLine(pattern);
+        if (line !== undefined) resolve(line);
+        return line === undefined;
+      });
+    };
+    child.stdout?.setEncoding("utf8").on("data", append);
+    child.stderr?.setEncoding("utf8").on("data", append);
   }
 
   /**
@@ -111,10 +134,10 @@ export class Gateway {
    * names its hosts as a hub's (shared/hosts.ts) under `localhost`: its UI, which `url` names,
    * is `http://am.localhost:<port>`.
    */
-  static async start(
-    options: { runtime: "podman" | "none"; env?: Record<string, string>; stateDir?: string; hub?: boolean } = { runtime: "none" },
-  ): Promise<Gateway> {
+  static async start(options: GatewayOptions = { runtime: "none" }): Promise<Gateway> {
     const stateDir = options.stateDir ?? mkdtempSync(join(tmpdir(), "am-gw-"));
+    const clock = join(stateDir, "test-clock");
+    if (!existsSync(clock)) writeFileSync(clock, TEST_TIME);
     const port = await freePort();
     const url = options.hub === true ? `http://am.localhost:${port}` : `http://127.0.0.1:${port}`;
     const child = spawn(process.execPath, [join(root, "server", "index.ts")], {
@@ -127,22 +150,17 @@ export class Gateway {
         AGENTMONITOR_WORKSPACE_RUNTIME: options.runtime,
         // Never the user's settings, e.g. the hubs of their hubs.json (STORE-3).
         AGENTMONITOR_CONFIG_DIR: join(stateDir, "config"),
+        AGENTMONITOR_CLOCK_FILE: clock,
         ...(options.hub === true ? { AGENTMONITOR_PUBLIC_ORIGIN: url } : {}),
         ...options.env,
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
-    let log = "";
-    const { promise: listening, resolve, reject } = Promise.withResolvers<void>();
-    child.stdout?.on("data", (chunk) => {
-      log += chunk;
-      if (log.includes("agentmonitor gateway")) resolve();
-    });
-    child.stderr?.on("data", (chunk) => { log += chunk; });
-    child.once("exit", (code) => reject(new Error(`gateway exited with ${code}:\n${log}`)));
-    const gateway = new Gateway(stateDir, url, child);
+    const gateway = new Gateway(stateDir, url, child, options);
+    const exited = Promise.withResolvers<never>();
+    child.once("exit", (code) => exited.reject(new Error(`gateway exited with ${code}:\n${gateway.log}`)));
     try {
-      await listening;
+      await Promise.race([gateway.logged(/agentmonitor gateway/), exited.promise]);
     } catch (error) {
       await gateway.stop();
       throw error;
@@ -150,7 +168,27 @@ export class Gateway {
     return gateway;
   }
 
-  async stop(): Promise<void> {
+  private loggedLine(pattern: RegExp): string | undefined {
+    return this.log.split("\n").find((line) => pattern.test(line));
+  }
+
+  /** Resolves with the first line the gateway printed, so far or from now on, that `pattern` matches. */
+  logged(pattern: RegExp): Promise<string> {
+    const line = this.loggedLine(pattern);
+    if (line !== undefined) return Promise.resolve(line);
+    const { promise, resolve } = Promise.withResolvers<string>();
+    this.logWaiters.push({ pattern, resolve });
+    return promise;
+  }
+
+  /** AUTO-2: moves the time the gateway's scheduler reads, which it fires on at once (written whole, by a rename). */
+  setClock(iso: string): void {
+    const clock = join(this.stateDir, "test-clock");
+    writeFileSync(`${clock}.new`, iso);
+    renameSync(`${clock}.new`, clock);
+  }
+
+  private async kill(): Promise<void> {
     // A gateway already stopped (by a test, then again after it) exited on its signal: no exit code.
     if (this.child.exitCode === null && this.child.signalCode === null) {
       const { promise, resolve } = Promise.withResolvers<void>();
@@ -158,6 +196,20 @@ export class Gateway {
       this.child.kill();
       await promise;
     }
+  }
+
+  /**
+   * The gateway stops and another starts on its state directory, as a restart does; containers
+   * and host sessions go on. `clock`: the time it is when the new one starts (AUTO-2: downtime).
+   */
+  async restart(clock?: string): Promise<Gateway> {
+    await this.kill();
+    if (clock !== undefined) this.setClock(clock);
+    return Gateway.start({ ...this.options, stateDir: this.stateDir });
+  }
+
+  async stop(): Promise<void> {
+    await this.kill();
     const listed = spawnSync("podman", ["ps", "-aq", "--filter", `label=agentmonitor.state=${this.stateDir}`], { encoding: "utf8" });
     const containers = (listed.stdout ?? "").split("\n").filter(Boolean);
     if (containers.length > 0) spawnSync("podman", ["rm", "-f", "-t", "0", ...containers]);

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { Actor, Automation, Comment, Firing, FiringVerdict, FolderFile, HistoryEvent, Person, Project, Run, Session, Task, Topic, TopicLink, Trigger } from "../../shared/api.ts";
+import type { Actor, Automation, Comment, Firing, FiringVerdict, FolderFile, HistoryEvent, Person, Project, Run, Session, Task, Topic, TopicLink, Trigger, TriggerContext } from "../../shared/api.ts";
 import type { CloudflareTokens } from "../cloudflare.ts";
 
 const taskState = z.enum(["open", "in_progress", "in_review", "done", "cancelled"]);
@@ -105,9 +105,21 @@ const task: z.ZodType<Task> = z.object({
   updatedAt: z.number(),
 });
 const topicLink: z.ZodType<TopicLink> = z.object({ taskId: id, topicId: id, linkedAt: z.number() });
+const verdict: z.ZodType<FiringVerdict> = z.object({ passed: z.boolean(), output: z.string() });
+/** AUTO-13: a run's trigger context, as the store keeps it (JSON) and bundles carry it. */
+export const triggerContext: z.ZodType<TriggerContext> = z.object({
+  firingId: id,
+  triggerId: id,
+  cron: z.string(),
+  timezone: z.string(),
+  scheduledAt: z.number(),
+  caughtUp: z.boolean(),
+  guard: verdict.nullable(),
+  check: verdict.nullable(),
+});
 const run: z.ZodType<Run> = z.object({
   startedBy: actor.nullable(),
-  triggerContext: z.string(),
+  triggerContext: triggerContext.nullable(),
   outcome: z.enum(["finished", "review", "timed_out", "failed", "ended"]).nullable(),
   endedBy: actor.nullable(),
 });
@@ -149,17 +161,18 @@ const trigger: z.ZodType<Trigger> = z.object({
   checkPath: folderPath.nullable(),
   createdAt: z.number(),
 });
-const verdict: z.ZodType<FiringVerdict> = z.object({ passed: z.boolean(), output: z.string() });
 const firing: z.ZodType<Firing> = z.object({
   id,
   automationId: id,
   triggerId: id,
   scheduledAt: z.number(),
   firedAt: z.number(),
+  caughtUp: z.boolean(),
   guard: verdict.nullable(),
   check: verdict.nullable(),
-  outcome: z.enum(["started", "off", "running", "guard", "check", "failed"]),
+  outcome: z.enum(["pending", "started", "off", "running", "guard", "check", "failed"]),
   sessionId: id.nullable(),
+  error: z.string().nullable(),
 });
 const comment: z.ZodType<Comment> = z.object({
   id,

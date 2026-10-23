@@ -70,7 +70,7 @@ spec("AUTO-1", "an automation has a name, instructions, a model, triggers, an en
   const run = await gateway.data<Session>("POST", `/automations/${created.id}/runs`, {});
   assert.deepEqual([run.taskId, run.automationId, run.model, run.run], [null, created.id, "fake/scripted", {
     startedBy: { kind: "person", personId: owner.id },
-    triggerContext: "",
+    triggerContext: null,
     outcome: null,
     endedBy: null,
   }]);

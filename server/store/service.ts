@@ -28,6 +28,8 @@ import { branchPullRequests } from "../github.ts";
 import { HostRuntime } from "../runtime/host.ts";
 import { CONTAINER_FOLDER, PodmanRuntime } from "../runtime/podman.ts";
 import type { LaunchInput, Runtime, WorkspaceDirs } from "../runtime/runtime.ts";
+import { fileClock, systemClock } from "../scheduler/clock.ts";
+import { Scheduler } from "../scheduler/scheduler.ts";
 import { newestTranscript } from "../transcript.ts";
 import { Folders } from "./folders.ts";
 import { ProjectMoves } from "./move.ts";
@@ -36,7 +38,7 @@ import { folderOwnerOf, runShortId, Store, StoreError, type Principal, type Proj
 
 type ServiceConfig = Pick<
   GatewayConfig,
-  "workspaceRuntime" | "workspaceMemoryMib" | "machineName" | "ompAgentDir" | "credentialsHome" | "cloudflareApi" | "ownerEmail" | "publicOrigin"
+  "workspaceRuntime" | "workspaceMemoryMib" | "machineName" | "ompAgentDir" | "credentialsHome" | "cloudflareApi" | "ownerEmail" | "publicOrigin" | "clockFile"
 >;
 
 export interface TernUpstream {
@@ -79,6 +81,8 @@ export class StoreService implements StoreContext {
   private readonly runtimes: Record<SessionRuntime, Runtime> | null;
   private readonly config: ServiceConfig;
   private readonly cloudflare: CloudflareBroker;
+  /** AUTO-2: fires the automations' triggers; runs while the store is open. */
+  private readonly scheduler: Scheduler;
 
   constructor(stateDir: string, config: ServiceConfig) {
     this.store = new Store(join(stateDir, "store.sqlite"), userInfo().username);
@@ -101,6 +105,11 @@ export class StoreService implements StoreContext {
       endSession: (principal, sessionId) => this.endSession(principal, sessionId),
       repo: (project) => (this.runtimes === null ? null : project.repoPath),
     }, join(stateDir, "moves"));
+    this.scheduler = new Scheduler(this, {
+      clock: config.clockFile === null ? systemClock : fileClock(config.clockFile),
+      stateFile: join(stateDir, "scheduler.json"),
+      gates: { stateDir, ompAgentDir: config.ompAgentDir, memoryMib: config.workspaceMemoryMib },
+    });
   }
 
   dirs(sessionId: string): WorkspaceDirs {
@@ -566,13 +575,15 @@ export class StoreService implements StoreContext {
     return this.store.finishTask(principal, taskId, state);
   }
 
-  /** Re-open every running session's socket after a gateway restart. */
+  /** Re-open every running session's socket after a gateway restart, then fire the automations' triggers (AUTO-2). */
   async start(): Promise<void> {
     await Promise.all(this.store.runningSessionIds().map((id) => this.listen(id)));
+    this.scheduler.start();
   }
 
-  /** Closes the agent sockets and the database; for a dev server that reloads its config. */
+  /** Stops the scheduler, closes the agent sockets and the database; for a dev server that reloads its config. */
   close(): void {
+    this.scheduler.stop();
     for (const id of [...this.servers.keys()]) this.unlisten(id);
     this.store.close();
   }
