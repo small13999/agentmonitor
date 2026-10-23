@@ -15,10 +15,26 @@ export interface Topic {
   id: string;
   projectId: string;
   name: string;
+  /** UI-4: the topic's colour wherever its name shows, `#rrggbb`. */
+  color: string;
   createdAt: number;
   status: string;
   statusRevision: number;
 }
+
+/** PERSON-1: someone who uses the store; its owner adds the others. */
+export interface Person {
+  id: string;
+  name: string;
+  /** Initials on this colour stand in for an avatar, `#rrggbb`. */
+  color: string;
+  /** The store's owner; until login exists every request is the owner. */
+  owner: boolean;
+  createdAt: number;
+}
+
+/** PERSON-1, PERSON-2: who did something: a person, or the agent of a session. */
+export type Actor = { kind: "person"; personId: string } | { kind: "agent"; sessionId: string };
 
 /** TASK-1: what a task's state can be; done and cancelled tasks are finished. */
 export type TaskState = "open" | "in_progress" | "in_review" | "done" | "cancelled";
@@ -33,6 +49,8 @@ export interface Task {
   title: string;
   description: string;
   state: TaskState;
+  /** TASK-13: one person or nobody. */
+  assigneeId: string | null;
   branch: string | null;
   /** The ref the branch was created from; its merge base with the branch is where the task's work starts. */
   baseRef: string | null;
@@ -56,6 +74,42 @@ export interface TaskDetail {
   topics: Topic[];
   /** Every session the task has had, newest first. */
   sessions: Session[];
+}
+
+/** COMMENT-1: Markdown discussion on a task; never part of a running chat (COMMENT-3). */
+export interface Comment {
+  id: string;
+  taskId: string;
+  author: Actor;
+  body: string;
+  createdAt: number;
+  /** COMMENT-2: when its author last edited it; null if never. */
+  editedAt: number | null;
+}
+
+/** TASK-14: one thing that happened to a task. */
+export type HistoryEvent =
+  | { kind: "created" }
+  | { kind: "state"; from: TaskState; to: TaskState }
+  | { kind: "assignee"; personId: string | null }
+  | { kind: "topic"; topicId: string; name: string; linked: boolean }
+  | { kind: "session"; sessionId: string; event: "started" | "ended"; machine: string | null; runtime: SessionRuntime }
+  | { kind: "comment"; commentId: string }
+  | { kind: "file"; path: string }
+  | { kind: "pull_request"; number: number; title: string; url: string };
+
+/** TASK-14: an event with when and who; `actor` is null for what no one did (a pull request seen on GitHub). */
+export type HistoryEntry = HistoryEvent & { at: number; actor: Actor | null };
+
+/** FOLDER-1, FOLDER-2: a file in a task's folder; `path` is relative to the folder, `/`-separated. */
+export interface FolderFile {
+  path: string;
+  size: number;
+  contentType: string;
+  /** Null when it is not known who wrote it (a file that appeared in the folder's directory). */
+  addedBy: Actor | null;
+  addedAt: number;
+  updatedAt: number;
 }
 
 /**

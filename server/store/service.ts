@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:http";
+import { userInfo } from "node:os";
 import { basename, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
@@ -73,7 +74,7 @@ export class StoreService implements StoreContext {
   private readonly cloudflare: CloudflareBroker;
 
   constructor(stateDir: string, config: ServiceConfig) {
-    this.store = new Store(join(stateDir, "store.sqlite"));
+    this.store = new Store(join(stateDir, "store.sqlite"), userInfo().username);
     this.root = join(stateDir, "sessions");
     this.runtimes = config.workspaceRuntime === "podman"
       ? {
@@ -126,7 +127,7 @@ export class StoreService implements StoreContext {
    * when the address stops answering.
    */
   async ternUpstream(sessionId: string): Promise<TernUpstream> {
-    const { session } = this.store.getSession({ kind: "human" }, sessionId);
+    const { session } = this.store.getSession(this.store.ownerPrincipal(), sessionId);
     if (session.endedAt !== null) throw new StoreError(409, `session ${session.name} has ended`);
     const known = this.ternUpstreams.get(sessionId);
     if (known !== undefined) return known;
@@ -157,7 +158,7 @@ export class StoreService implements StoreContext {
 
   /** The session's processes started again, resuming its newest chat, once Tern answers. */
   private async restart(runtime: Runtime, session: Session): Promise<void> {
-    const project = this.store.getProject({ kind: "human" }, session.projectId);
+    const project = this.store.getProject(this.store.ownerPrincipal(), session.projectId);
     const dirs = this.dirs(session.id);
     if (project.repoPath === null || !existsSync(session.checkout ? project.repoPath : dirs.worktree)) {
       throw new StoreError(409, `session ${session.name} has no worktree to start again on`);
@@ -206,7 +207,8 @@ export class StoreService implements StoreContext {
       if (new URL(request.url ?? "/", "http://localhost").pathname.startsWith(CLOUDFLARE_API_PREFIX)) {
         let project: string;
         try {
-          project = this.store.getProject({ kind: "human" }, this.store.getSession({ kind: "human" }, sessionId).session.projectId).name;
+          const owner = this.store.ownerPrincipal();
+          project = this.store.getProject(owner, this.store.getSession(owner, sessionId).session.projectId).name;
         } catch {
           response.writeHead(403).end();
           return;
@@ -240,7 +242,7 @@ export class StoreService implements StoreContext {
    * session (HOST-6) is told it works in the main checkout, `checkout`, instead.
    */
   private taskContext(taskId: string, restored: RestoredSnapshot, checkout: string | null): string {
-    const human: Principal = { kind: "human" };
+    const human = this.store.ownerPrincipal();
     const { task, topics } = this.store.getTask(human, taskId);
     const notes = this.store.getNotes(human, taskId);
     const sections = [

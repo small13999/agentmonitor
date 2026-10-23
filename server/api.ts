@@ -98,7 +98,8 @@ export async function handleApi(request: IncomingMessage, response: ServerRespon
         sendJson(response, 403, { ok: false, error: "cross-origin mutation refused" });
         return true;
       }
-      await handleStoreApi(request, response, store, { kind: "human" });
+      // PERSON-1: until login exists every human request is the store's owner.
+      await handleStoreApi(request, response, store, store.store.ownerPrincipal());
       return true;
     }
     sendJson(response, 404, { ok: false, error: "unknown endpoint" });

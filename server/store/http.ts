@@ -34,6 +34,7 @@ const taskUpdateBody = z.strictObject({
   title: name.optional(),
   description: description.optional(),
   state: z.enum(["open", "in_progress", "in_review"]).optional(),
+  assigneeId: z.uuid().nullable().optional(),
 });
 const finishBody = z.strictObject({ state: z.enum(["done", "cancelled"]), confirm: z.boolean().optional() });
 const sessionBody = z.strictObject({
@@ -57,6 +58,13 @@ interface Route {
 const id = "([0-9a-f-]{36})";
 const routes: Route[] = [
   { method: "GET", pattern: /^\/me$/, handler: (c, p) => c.store.whoami(p) },
+  { method: "GET", pattern: /^\/people$/, handler: (c, p) => c.store.listPeople(p) },
+  { method: "POST", pattern: /^\/people$/, handler: async (c, p, _, body) => c.store.createPerson(p, nameBody.parse(await body()).name) },
+  {
+    method: "PATCH",
+    pattern: new RegExp(`^/people/${id}$`),
+    handler: async (c, p, [personId], body) => c.store.updatePerson(p, personId, nameBody.parse(await body())),
+  },
   { method: "GET", pattern: /^\/projects$/, handler: (c, p) => c.store.listProjects(p) },
   {
     method: "POST",
@@ -105,6 +113,7 @@ const routes: Route[] = [
     pattern: new RegExp(`^/tasks/${id}$`),
     handler: async (c, p, [taskId], body) => c.store.updateTask(p, taskId, taskUpdateBody.parse(await body())),
   },
+  { method: "GET", pattern: new RegExp(`^/tasks/${id}/history$`), handler: (c, p, [taskId]) => c.store.taskHistory(p, taskId) },
   {
     method: "POST",
     pattern: new RegExp(`^/tasks/${id}/finish$`),

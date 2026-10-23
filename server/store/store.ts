@@ -2,15 +2,40 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { Project, Session, SessionRuntime, Task, TaskDetail, TaskNotes, TaskState, TaskSummary, Topic, TopicLink } from "../../shared/api.ts";
+import { z } from "zod";
+import type {
+  Actor, HistoryEntry, HistoryEvent, Person, Project, Session, SessionRuntime, Task, TaskDetail, TaskNotes, TaskState, TaskSummary, Topic, TopicLink,
+} from "../../shared/api.ts";
 
-export type { Project, Session, SessionRuntime, Task, TaskDetail, TaskNotes, TaskState, TaskSummary, Topic, TopicLink };
+export type { Actor, HistoryEntry, HistoryEvent, Person, Project, Session, SessionRuntime, Task, TaskDetail, TaskNotes, TaskState, TaskSummary, Topic, TopicLink };
 
 /** TOPIC-2 and TASK-7: a status is a short current-state note, not a document. */
 export const STATUS_MAX_LINES = 50;
 
-/** An agent is the session whose socket it talks through. */
-export type Principal = { kind: "human" } | { kind: "agent"; sessionId: string };
+/** A person (PERSON-1; until login every human request is the store's owner), or the agent of a session. */
+export type Principal = { kind: "human"; personId: string } | { kind: "agent"; sessionId: string };
+
+/** UI-4 and PERSON-1: colours handed out in turn to topics and people. */
+const PALETTE = ["#e5484d", "#f76b15", "#d6a000", "#46a758", "#12a594", "#0090ff", "#6e56cf", "#d6409f", "#ab4aba", "#978365"];
+
+const taskState = z.enum(["open", "in_progress", "in_review", "done", "cancelled"]);
+/** TASK-14: a stored event's data, as recorded. */
+const historyEvent: z.ZodType<HistoryEvent> = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("created") }),
+  z.object({ kind: z.literal("state"), from: taskState, to: taskState }),
+  z.object({ kind: z.literal("assignee"), personId: z.string().nullable() }),
+  z.object({ kind: z.literal("topic"), topicId: z.string(), name: z.string(), linked: z.boolean() }),
+  z.object({
+    kind: z.literal("session"),
+    sessionId: z.string(),
+    event: z.enum(["started", "ended"]),
+    machine: z.string().nullable(),
+    runtime: z.enum(["container", "host"]),
+  }),
+  z.object({ kind: z.literal("comment"), commentId: z.string() }),
+  z.object({ kind: z.literal("file"), path: z.string() }),
+  z.object({ kind: z.literal("pull_request"), number: z.number(), title: z.string(), url: z.string() }),
+]);
 
 /** A refused store operation; `status` is the HTTP status the API answers with. */
 export class StoreError extends Error {
@@ -42,6 +67,7 @@ CREATE TABLE IF NOT EXISTS topics (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id),
   name TEXT NOT NULL,
+  color TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL,
   status TEXT NOT NULL DEFAULT '',
   status_revision INTEGER NOT NULL DEFAULT 0,
@@ -53,6 +79,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   title TEXT NOT NULL,
   description TEXT NOT NULL DEFAULT '',
   state TEXT NOT NULL,
+  assignee_id TEXT REFERENCES people(id),
   branch TEXT,
   base_ref TEXT,
   status TEXT NOT NULL DEFAULT '',
@@ -82,6 +109,26 @@ CREATE TABLE IF NOT EXISTS sessions (
   started_at INTEGER NOT NULL,
   ended_at INTEGER
 );
+CREATE TABLE IF NOT EXISTS people (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  color TEXT NOT NULL,
+  owner INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+`;
+
+/** TASK-14: what happened to a task, appended as it happens; created on its own so old stores can be backfilled. */
+const EVENTS_SCHEMA = `
+CREATE TABLE task_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  at INTEGER NOT NULL,
+  actor_kind TEXT,
+  actor_id TEXT,
+  data TEXT NOT NULL
+);
+CREATE INDEX task_events_task ON task_events (task_id, at);
 `;
 
 type Row = Record<string, unknown>;
@@ -101,10 +148,25 @@ function topic(row: Row): Topic {
     id: String(row.id),
     projectId: String(row.project_id),
     name: String(row.name),
+    color: String(row.color),
     createdAt: Number(row.created_at),
     status: String(row.status),
     statusRevision: Number(row.status_revision),
   };
+}
+
+function person(row: Row): Person {
+  return {
+    id: String(row.id),
+    name: String(row.name),
+    color: String(row.color),
+    owner: Number(row.owner) === 1,
+    createdAt: Number(row.created_at),
+  };
+}
+
+function actorOf(principal: Principal): Actor {
+  return principal.kind === "human" ? { kind: "person", personId: principal.personId } : { kind: "agent", sessionId: principal.sessionId };
 }
 
 function task(row: Row): Task {
@@ -115,6 +177,7 @@ function task(row: Row): Task {
     title: String(row.title),
     description: String(row.description),
     state: row.state,
+    assigneeId: row.assignee_id === null ? null : String(row.assignee_id),
     branch: row.branch === null ? null : String(row.branch),
     baseRef: row.base_ref === null ? null : String(row.base_ref),
     status: String(row.status),
@@ -122,6 +185,10 @@ function task(row: Row): Task {
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
   };
+}
+
+function sessionEvent(found: Session, event: "started" | "ended"): HistoryEvent {
+  return { kind: "session", sessionId: found.id, event, machine: found.machine, runtime: found.runtime };
 }
 
 function session(row: Row): Session {
@@ -157,7 +224,7 @@ function checkStatusLength(status: string): void {
 export class Store {
   private readonly db: DatabaseSync;
 
-  constructor(path: string) {
+  constructor(path: string, ownerName: string) {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
@@ -167,6 +234,35 @@ export class Store {
     this.addColumn("projects", "host_sessions", "INTEGER NOT NULL DEFAULT 0");
     this.addColumn("sessions", "runtime", "TEXT NOT NULL DEFAULT 'container'");
     this.addColumn("sessions", "checkout", "INTEGER NOT NULL DEFAULT 0");
+    // PERSON-1: every store has its owner; TASK-13 and UI-4 on stores from before people.
+    if (this.db.prepare("SELECT 1 FROM people WHERE owner = 1").get() === undefined) {
+      this.db.prepare("INSERT INTO people (id, name, color, owner, created_at) VALUES (?, ?, ?, 1, ?)").run(randomUUID(), ownerName, PALETTE[5], Date.now());
+    }
+    this.addColumn("tasks", "assignee_id", "TEXT REFERENCES people(id)");
+    this.addColumn("topics", "color", "TEXT NOT NULL DEFAULT ''");
+    for (const [index, row] of this.db.prepare("SELECT id FROM topics WHERE color = '' ORDER BY created_at").all().entries()) {
+      this.db.prepare("UPDATE topics SET color = ? WHERE id = ?").run(PALETTE[index % PALETTE.length], String(row.id));
+    }
+    this.migrateHistory();
+  }
+
+  /**
+   * TASK-14: a store from before history gets what its records still tell: each task's
+   * creation and its sessions' starts and ends, by the owner.
+   */
+  private migrateHistory(): void {
+    if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_events'").get() !== undefined) return;
+    this.transaction(() => {
+      this.db.exec(EVENTS_SCHEMA);
+      const owner = this.ownerPrincipal();
+      for (const row of this.db.prepare("SELECT id, created_at FROM tasks").all()) {
+        this.recordTaskEvent(String(row.id), owner, { kind: "created" }, Number(row.created_at));
+      }
+      for (const found of this.db.prepare("SELECT * FROM sessions").all().map(session)) {
+        this.recordTaskEvent(found.taskId, owner, sessionEvent(found, "started"), found.startedAt);
+        if (found.endedAt !== null) this.recordTaskEvent(found.taskId, owner, sessionEvent(found, "ended"), found.endedAt);
+      }
+    });
   }
 
   private addColumn(table: string, column: string, definition: string): void {
@@ -246,6 +342,71 @@ export class Store {
     if (principal.kind !== "human") throw new StoreError(403, "only a human can do this");
   }
 
+  /** PERSON-1: the store's owner, as whom every human request acts until login exists. */
+  ownerPrincipal(): Principal {
+    const row = this.db.prepare("SELECT id FROM people WHERE owner = 1").get();
+    if (row === undefined) throw new Error("the store has no owner");
+    return { kind: "human", personId: String(row.id) };
+  }
+
+  /** TASK-14: appends what happened to a task, by whom (null: no one, as a pull request seen on GitHub). */
+  recordTaskEvent(taskId: string, principal: Principal | null, event: HistoryEvent, at = Date.now()): void {
+    const actor = principal === null ? null : actorOf(principal);
+    this.db.prepare("INSERT INTO task_events (task_id, at, actor_kind, actor_id, data) VALUES (?, ?, ?, ?, ?)").run(
+      taskId,
+      at,
+      actor?.kind ?? null,
+      actor === null ? null : actor.kind === "person" ? actor.personId : actor.sessionId,
+      JSON.stringify(event),
+    );
+  }
+
+  /** TASK-14: what happened to the task, oldest first. */
+  taskHistory(principal: Principal, taskId: string): HistoryEntry[] {
+    this.visibleTask(principal, taskId);
+    return this.db.prepare("SELECT * FROM task_events WHERE task_id = ? ORDER BY at, id").all(taskId).map((row) => {
+      const actor: Actor | null = row.actor_kind === "person"
+        ? { kind: "person", personId: String(row.actor_id) }
+        : row.actor_kind === "agent" ? { kind: "agent", sessionId: String(row.actor_id) } : null;
+      return { ...historyEvent.parse(JSON.parse(String(row.data))), at: Number(row.at), actor };
+    });
+  }
+
+  /** PERSON-1: everyone who uses the store, the owner first. */
+  listPeople(principal: Principal): Person[] {
+    this.scope(principal);
+    return this.db.prepare("SELECT * FROM people ORDER BY owner DESC, created_at").all().map(person);
+  }
+
+  /** PERSON-1: only the owner adds people. */
+  createPerson(principal: Principal, name: string): Person {
+    this.requireOwner(principal);
+    const count = Number(this.db.prepare("SELECT count(*) AS n FROM people").get()?.n ?? 0);
+    const created: Person = { id: randomUUID(), name, color: PALETTE[(5 + count) % PALETTE.length], owner: false, createdAt: Date.now() };
+    this.db.prepare("INSERT INTO people (id, name, color, owner, created_at) VALUES (?, ?, ?, 0, ?)").run(created.id, name, created.color, created.createdAt);
+    return created;
+  }
+
+  /** A person renames themselves; the owner renames anyone. */
+  updatePerson(principal: Principal, personId: string, input: { name: string }): Person {
+    if (principal.kind !== "human" || (principal.personId !== personId && !this.isOwner(principal))) {
+      throw new StoreError(403, "only the person or the store's owner can do this");
+    }
+    const row = this.db.prepare("SELECT * FROM people WHERE id = ?").get(personId);
+    if (row === undefined) throw new StoreError(404, `person ${personId} not found`);
+    this.db.prepare("UPDATE people SET name = ? WHERE id = ?").run(input.name, personId);
+    return { ...person(row), name: input.name };
+  }
+
+  private isOwner(principal: Principal): boolean {
+    if (principal.kind !== "human") return false;
+    return this.db.prepare("SELECT 1 FROM people WHERE id = ? AND owner = 1").get(principal.personId) !== undefined;
+  }
+
+  private requireOwner(principal: Principal): void {
+    if (!this.isOwner(principal)) throw new StoreError(403, "only the store's owner can do this");
+  }
+
   private visibleProject(principal: Principal, projectId: string): Project {
     const scope = this.scope(principal);
     const row = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(projectId);
@@ -293,8 +454,12 @@ export class Store {
     return row === undefined ? null : session(row);
   }
 
-  whoami(principal: Principal): { kind: "human" } | { kind: "agent"; project: Project; session: Session; task: Task } {
-    if (principal.kind === "human") return { kind: "human" };
+  whoami(principal: Principal): { kind: "human"; person: Person } | { kind: "agent"; project: Project; session: Session; task: Task } {
+    if (principal.kind === "human") {
+      const row = this.db.prepare("SELECT * FROM people WHERE id = ?").get(principal.personId);
+      if (row === undefined) throw new StoreError(403, "this person no longer exists");
+      return { kind: "human", person: person(row) };
+    }
     const own = this.visibleSession(principal, principal.sessionId);
     return { kind: "agent", project: this.visibleProject(principal, own.projectId), session: own, task: this.visibleTask(principal, own.taskId) };
   }
@@ -351,9 +516,10 @@ export class Store {
     if (this.db.prepare("SELECT 1 FROM topics WHERE project_id = ? AND name = ?").get(projectId, name) !== undefined) {
       throw new StoreError(409, `topic "${name}" already exists in this project`);
     }
-    const created: Topic = { id: randomUUID(), projectId, name, createdAt: Date.now(), status: "", statusRevision: 0 };
-    this.db.prepare("INSERT INTO topics (id, project_id, name, created_at) VALUES (?, ?, ?, ?)")
-      .run(created.id, projectId, name, created.createdAt);
+    const count = Number(this.db.prepare("SELECT count(*) AS n FROM topics WHERE project_id = ?").get(projectId)?.n ?? 0);
+    const created: Topic = { id: randomUUID(), projectId, name, color: PALETTE[count % PALETTE.length], createdAt: Date.now(), status: "", statusRevision: 0 };
+    this.db.prepare("INSERT INTO topics (id, project_id, name, color, created_at) VALUES (?, ?, ?, ?, ?)")
+      .run(created.id, projectId, name, created.color, created.createdAt);
     return created;
   }
 
@@ -412,6 +578,7 @@ export class Store {
       title: input.title,
       description: input.description ?? "",
       state: "open",
+      assigneeId: null,
       branch: null,
       baseRef: null,
       status: "",
@@ -419,24 +586,40 @@ export class Store {
       createdAt: now,
       updatedAt: now,
     };
-    this.db.prepare("INSERT INTO tasks (id, project_id, title, description, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-      .run(created.id, projectId, created.title, created.description, created.state, now, now);
+    this.transaction(() => {
+      this.db.prepare("INSERT INTO tasks (id, project_id, title, description, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .run(created.id, projectId, created.title, created.description, created.state, now, now);
+      this.recordTaskEvent(created.id, principal, { kind: "created" }, now);
+    });
     return created;
   }
 
-  /** Title, description, and the unfinished states; finishing a task is the gateway's job (TASK-9). */
-  updateTask(principal: Principal, taskId: string, input: { title?: string; description?: string; state?: TaskState }): Task {
+  /**
+   * Title, description, assignee (TASK-13), and the unfinished states; finishing a task is the
+   * gateway's job (TASK-9). State and assignee changes go into its history (TASK-14).
+   */
+  updateTask(
+    principal: Principal,
+    taskId: string,
+    input: { title?: string; description?: string; state?: TaskState; assigneeId?: string | null },
+  ): Task {
     return this.transaction(() => {
       const current = this.visibleTask(principal, taskId);
+      if (input.assigneeId != null && this.db.prepare("SELECT 1 FROM people WHERE id = ?").get(input.assigneeId) === undefined) {
+        throw new StoreError(404, `person ${input.assigneeId} not found`);
+      }
       const next: Task = {
         ...current,
         title: input.title ?? current.title,
         description: input.description ?? current.description,
         state: input.state ?? current.state,
+        assigneeId: input.assigneeId === undefined ? current.assigneeId : input.assigneeId,
         updatedAt: Date.now(),
       };
-      this.db.prepare("UPDATE tasks SET title = ?, description = ?, state = ?, updated_at = ? WHERE id = ?")
-        .run(next.title, next.description, next.state, next.updatedAt, taskId);
+      this.db.prepare("UPDATE tasks SET title = ?, description = ?, state = ?, assignee_id = ?, updated_at = ? WHERE id = ?")
+        .run(next.title, next.description, next.state, next.assigneeId, next.updatedAt, taskId);
+      if (next.state !== current.state) this.recordTaskEvent(taskId, principal, { kind: "state", from: current.state, to: next.state }, next.updatedAt);
+      if (next.assigneeId !== current.assigneeId) this.recordTaskEvent(taskId, principal, { kind: "assignee", personId: next.assigneeId }, next.updatedAt);
       return next;
     });
   }
@@ -451,15 +634,17 @@ export class Store {
     const { projectId } = this.visibleTask(principal, taskId);
     const target = this.visibleTopic(principal, topicId);
     if (target.projectId !== projectId) throw new StoreError(404, `topic ${topicId} not found`);
-    this.db.prepare("INSERT OR IGNORE INTO task_topics (task_id, topic_id, linked_at) VALUES (?, ?, ?)")
+    const linked = this.db.prepare("INSERT OR IGNORE INTO task_topics (task_id, topic_id, linked_at) VALUES (?, ?, ?)")
       .run(taskId, topicId, Date.now());
+    if (Number(linked.changes) > 0) this.recordTaskEvent(taskId, principal, { kind: "topic", topicId, name: target.name, linked: true });
     return this.topicsOf(taskId);
   }
 
   unlinkTopic(principal: Principal, taskId: string, topicId: string): Topic[] {
     this.visibleTask(principal, taskId);
-    this.visibleTopic(principal, topicId);
-    this.db.prepare("DELETE FROM task_topics WHERE task_id = ? AND topic_id = ?").run(taskId, topicId);
+    const target = this.visibleTopic(principal, topicId);
+    const unlinked = this.db.prepare("DELETE FROM task_topics WHERE task_id = ? AND topic_id = ?").run(taskId, topicId);
+    if (Number(unlinked.changes) > 0) this.recordTaskEvent(taskId, principal, { kind: "topic", topicId, name: target.name, linked: false });
     return this.topicsOf(taskId);
   }
 
@@ -552,8 +737,10 @@ export class Store {
       this.db.prepare(
         "INSERT INTO sessions (id, project_id, task_id, name, branch, base_ref, machine, runtime, checkout, model, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       ).run(created.id, created.projectId, taskId, created.name, created.branch, created.baseRef, created.machine, created.runtime, checkout ? 1 : 0, created.model, created.startedAt);
+      this.recordTaskEvent(taskId, principal, sessionEvent(created, "started"), created.startedAt);
       if (owner.state === "open") {
         this.db.prepare("UPDATE tasks SET state = 'in_progress', updated_at = ? WHERE id = ?").run(created.startedAt, taskId);
+        this.recordTaskEvent(taskId, principal, { kind: "state", from: "open", to: "in_progress" }, created.startedAt);
       }
       return created;
     });
@@ -564,8 +751,9 @@ export class Store {
     this.db.prepare("UPDATE sessions SET branch = ?, base_ref = ? WHERE id = ?").run(branch, baseRef, sessionId);
   }
 
-  /** Removes a session whose launch failed. */
+  /** Removes a session whose launch failed, and its start from the task's history. */
   discardSession(sessionId: string): void {
+    this.db.prepare("DELETE FROM task_events WHERE json_extract(data, '$.sessionId') = ?").run(sessionId);
     this.db.prepare("DELETE FROM sessions WHERE id = ?").run(sessionId);
   }
 
@@ -577,6 +765,7 @@ export class Store {
       if (found.endedAt !== null) throw new StoreError(409, `session ${found.name} has already ended`);
       const endedAt = Date.now();
       this.db.prepare("UPDATE sessions SET ended_at = ? WHERE id = ?").run(endedAt, sessionId);
+      this.recordTaskEvent(found.taskId, principal, sessionEvent(found, "ended"), endedAt);
       return { ...found, endedAt };
     });
   }
@@ -588,6 +777,7 @@ export class Store {
       const current = this.visibleTask(principal, taskId);
       const next: Task = { ...current, state, updatedAt: Date.now() };
       this.db.prepare("UPDATE tasks SET state = ?, updated_at = ? WHERE id = ?").run(state, next.updatedAt, taskId);
+      if (current.state !== state) this.recordTaskEvent(taskId, principal, { kind: "state", from: current.state, to: state }, next.updatedAt);
       return next;
     });
   }
