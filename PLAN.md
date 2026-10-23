@@ -22,7 +22,7 @@ through Agent Monitor (dogfooding).
 | 4 | Redesign from a clean slate: task page, comments, attachments (folder), people and assignee, board, session Settings tab, topic reader, visual identity; done through Agent Monitor itself | Done: slices merged (`cfb952a`), Studio (`5ff8e0e`, `4ffc0d2`); leftovers (project settings, `am` history/people/changes) in a step 5 slice |
 | 5 | Hub on Hetzner for draftcoach: Cloudflare Tunnel + Access, login, teammate access, flat hosts; the user's local Agent Monitor lists the hub's projects | Done: AUTH-1..3, STORE-3/6, PREVIEW-2, CLOUDFLARE-3 (`5386015`); hub live at am.draftcoach.gg, draftcoach moved there, the PC lists it through `hubs.json`; a hub session answered end to end |
 | 6 | Preview tab per task (and the draftcoach preview login), Deploy changes | |
-| 7 | Automations | |
+| 7 | Automations | In progress: claims in SPEC.md (`e043ace`); foundation task, then scheduling, run behaviour, and the automation page in parallel; first automation: draftcoach Patch review |
 | 8 | Agent commits every turn and Agent Monitor pushes the task branch (replaces snapshots), idle stop, "Run session locally" | |
 
 ## Decided, not yet claims
