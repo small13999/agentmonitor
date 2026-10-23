@@ -1,4 +1,4 @@
-import { useState, type ReactNode, type SubmitEvent } from "react";
+import { Fragment, useState, type ReactNode, type SubmitEvent } from "react";
 import {
   api, storeUrl, usePolled, type Automation, type AutomationDetail, type AutomationSummary, type Card, type Firing, type FiringOutcome, type FiringVerdict, type FolderFile,
   type Person, type Project, type RunOutcome, type Session, type SessionRuntime, type StoreListing, type TaskDetail, type Trigger,
@@ -8,6 +8,7 @@ import { Folder, folderRoute, Preview, sizeOf, type FolderOwner } from "./Folder
 import { Markdown } from "./Markdown.tsx";
 import { ActorName, useDirectory, type Directory } from "./People.tsx";
 import { ProjectMenu } from "./TaskList.tsx";
+import { WorkSection } from "./Work.tsx";
 import { WorkspaceTabs, type WorkspaceTab } from "./Workspace.tsx";
 
 /** AUTO-2: the timezone a schedule is read in unless another is given. */
@@ -417,7 +418,7 @@ function RunOutputs({ automation, group, onChanged }: { automation: Automation; 
   );
 }
 
-/** AUTO-10: the runs that wait for a person, each with its session to open. */
+/** AUTO-10: the runs that wait for a person, each with its session to open; AUTO-16: each with its work and Deploy. */
 function ReviewSection({ automation, runs, outputs, onChanged }: { automation: Automation; runs: Session[]; outputs: OutputGroup[]; onChanged: () => void }) {
   const waiting = runs.filter(waitsForReview);
   if (waiting.length === 0) return null;
@@ -428,11 +429,14 @@ function ReviewSection({ automation, runs, outputs, onChanged }: { automation: A
         {waiting.map((run) => {
           const files = outputs.find((group) => group.run?.id === run.id)?.files.length ?? 0;
           return (
-            <li key={run.id} className="session-row review-row">
-              <span className="run-name">Run <code>{runShortId(run.id)}</code></span>
-              <Time at={run.startedAt} />
-              <span className="muted small">{files === 0 ? "no outputs" : files === 1 ? "1 output" : `${files} outputs`}</span>
-              <RunActions automation={automation} run={run} onChanged={onChanged} />
+            <li key={run.id} className="review-item" aria-label={`Run ${runShortId(run.id)}`}>
+              <div className="session-row review-row">
+                <span className="run-name">Run <code>{runShortId(run.id)}</code></span>
+                <Time at={run.startedAt} />
+                <span className="muted small">{files === 0 ? "no outputs" : files === 1 ? "1 output" : `${files} outputs`}</span>
+                <RunActions automation={automation} run={run} onChanged={onChanged} />
+              </div>
+              <WorkSection path={`/runs/${run.id}/changes`} deployPath={`/runs/${run.id}/deploy`} onDeployed={onChanged} />
             </li>
           );
         })}
@@ -485,6 +489,8 @@ function RunsSection({ automation, runs, firings, triggers, directory }: {
   triggers: Trigger[];
   directory: Directory;
 }) {
+  // AUTO-16: the run whose work shows below its row.
+  const [workOf, setWorkOf] = useState<string | null>(null);
   const fired = new Set((firings ?? []).flatMap((firing) => (firing.sessionId === null ? [] : [firing.sessionId])));
   const rows: HistoryRow[] = [
     ...(firings ?? []).map((firing) => ({ key: firing.id, at: firing.firedAt, shown: firing.scheduledAt, firing, run: runs.find((run) => run.id === firing.sessionId) ?? null })),
@@ -512,26 +518,46 @@ function RunsSection({ automation, runs, firings, triggers, directory }: {
           </thead>
           <tbody>
             {rows.map((row) => (
-              <tr key={row.key}>
-                <td><Time at={row.shown} /></td>
-                <td>{cause(row)}</td>
-                <td><Verdict verdict={row.firing?.guard ?? null} /></td>
-                <td><Verdict verdict={row.firing?.check ?? null} /></td>
-                <td>
-                  {row.run !== null
-                    ? <RunState session={row.run} />
-                    : <span className={`outcome outcome-firing-${row.firing?.outcome ?? "started"}`}>{FIRING_OUTCOME_LABEL[row.firing?.outcome ?? "started"]}</span>}
-                </td>
-                <td>
-                  {row.run === null ? (
-                    <span className="muted">—</span>
-                  ) : row.run.endedAt === null ? (
-                    <a href={chatHref(automation.id, row.run.id)}>Run <code>{runShortId(row.run.id)}</code></a>
-                  ) : (
-                    <span className="muted small">Run <code>{runShortId(row.run.id)}</code>, ended <Time at={row.run.endedAt} /></span>
-                  )}
-                </td>
-              </tr>
+              <Fragment key={row.key}>
+                <tr>
+                  <td><Time at={row.shown} /></td>
+                  <td>{cause(row)}</td>
+                  <td><Verdict verdict={row.firing?.guard ?? null} /></td>
+                  <td><Verdict verdict={row.firing?.check ?? null} /></td>
+                  <td>
+                    {row.run !== null
+                      ? <RunState session={row.run} />
+                      : <span className={`outcome outcome-firing-${row.firing?.outcome ?? "started"}`}>{FIRING_OUTCOME_LABEL[row.firing?.outcome ?? "started"]}</span>}
+                  </td>
+                  <td>
+                    {row.run === null ? (
+                      <span className="muted">—</span>
+                    ) : row.run.endedAt === null ? (
+                      <a href={chatHref(automation.id, row.run.id)}>Run <code>{runShortId(row.run.id)}</code></a>
+                    ) : (
+                      <span className="muted small">Run <code>{runShortId(row.run.id)}</code>, ended <Time at={row.run.endedAt} /></span>
+                    )}
+                    {row.run !== null && row.run.branch !== null && (
+                      <button
+                        type="button"
+                        className="ghost small"
+                        aria-expanded={workOf === row.run.id}
+                        aria-label={`Work of run ${runShortId(row.run.id)}`}
+                        onClick={() => setWorkOf(workOf === row.run?.id ? null : row.run?.id ?? null)}
+                      >
+                        Work
+                      </button>
+                    )}
+                  </td>
+                </tr>
+                {row.run !== null && workOf === row.run.id && (
+                  <tr className="run-work">
+                    <td colSpan={6}>
+                      <WorkSection path={`/runs/${row.run.id}/changes`} deployPath={`/runs/${row.run.id}/deploy`} onDeployed={() => undefined} />
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
             ))}
           </tbody>
         </table>

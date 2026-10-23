@@ -2,7 +2,7 @@ import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from "node:
 import type { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { z } from "zod";
-import type { Automation, Card, EndedSession, HistoryEntry, TaskChanges, TaskDetail } from "../../shared/api.ts";
+import type { Automation, Card, EndedSession, HistoryEntry, TaskDetail, TaskSummary, Work } from "../../shared/api.ts";
 import { email } from "../config.ts";
 import { schedule } from "../scheduler/cron.ts";
 import { folderPath } from "./bundle.ts";
@@ -37,8 +37,14 @@ export interface StoreContext {
   cards(principal: Principal, projectId: string): Promise<Card[]>;
   /** TASK-14: the task's history, with the pull requests of its branch GitHub knows of. */
   taskHistory(principal: Principal, taskId: string): Promise<HistoryEntry[]>;
-  /** CARD-3, CARD-4: what the task's branch changed, its uncommitted files and pull requests, and overlapping tasks. */
-  taskChanges(principal: Principal, taskId: string): Promise<TaskChanges>;
+  /** BOARD-1, CARD-6: the project's tasks, each unfinished one with its board badge. */
+  listTasks(principal: Principal, projectId: string, search: string): Promise<TaskSummary[]>;
+  /** CARD-3, CARD-4: a task's Work section: its branch's state, commits, files, pull requests, and overlapping tasks. */
+  taskWork(principal: Principal, taskId: string): Promise<Work>;
+  /** AUTO-16: a run's Work section, as a task's. */
+  runWork(principal: Principal, runId: string): Promise<Work>;
+  /** DEPLOY-1, AUTO-16: sends the agent of a task, or of a run waiting for review, the deploy instruction; a task's session starts if it has none. */
+  deploy(principal: Principal, target: { kind: "task" | "run"; id: string }): Promise<Session>;
   /** CLOUDFLARE-2: humans only; allows the session's Cloudflare writes for 10 minutes from now. */
   allowCloudflareWrites(principal: Principal, sessionId: string): { writesUntil: number };
   revokeCloudflareWrites(principal: Principal, sessionId: string): { writesUntil: null };
@@ -281,7 +287,7 @@ const routes: Route[] = [
   {
     method: "GET",
     pattern: new RegExp(`^/projects/${id}/tasks$`),
-    handler: (c, p, [projectId], _, __, query) => c.store.listTasks(p, projectId, query.get("q") ?? ""),
+    handler: (c, p, [projectId], _, __, query) => c.listTasks(p, projectId, query.get("q") ?? ""),
   },
   {
     method: "POST",
@@ -303,7 +309,8 @@ const routes: Route[] = [
       return c.taskHistory(p, taskId);
     },
   },
-  { method: "GET", pattern: new RegExp(`^/tasks/${id}/changes$`), handler: (c, p, [taskId]) => c.taskChanges(p, taskId) },
+  { method: "GET", pattern: new RegExp(`^/tasks/${id}/changes$`), handler: (c, p, [taskId]) => c.taskWork(p, taskId) },
+  { method: "POST", pattern: new RegExp(`^/tasks/${id}/deploy$`), handler: (c, p, [taskId]) => c.deploy(p, { kind: "task", id: taskId }) },
   { method: "GET", pattern: new RegExp(`^/tasks/${id}/comments$`), handler: (c, p, [taskId]) => c.store.listComments(p, taskId) },
   {
     method: "POST",
@@ -362,6 +369,8 @@ const routes: Route[] = [
   // AUTO-10, AUTO-12: a run is a session; these are what only runs have.
   { method: "POST", pattern: new RegExp(`^/runs/${id}/end$`), handler: async (c, p, [runId], body) => c.endRun(p, runId, runEndBody.parse(await body())) },
   { method: "POST", pattern: new RegExp(`^/runs/${id}/task$`), handler: async (c, p, [runId], body) => c.taskFromRun(p, runId, runTaskBody.parse(await body())) },
+  { method: "GET", pattern: new RegExp(`^/runs/${id}/changes$`), handler: (c, p, [runId]) => c.runWork(p, runId) },
+  { method: "POST", pattern: new RegExp(`^/runs/${id}/deploy$`), handler: (c, p, [runId]) => c.deploy(p, { kind: "run", id: runId }) },
   ...folderRoutes("automation"),
   {
     method: "POST",

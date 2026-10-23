@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import type {
-  Actor, Automation, AutomationDetail, AutomationSummary, ChangedFile, Card, Comment, EndedSession, EndMode, Firing, FiringOutcome, FiringVerdict, FolderFile, HistoryEntry, Person, Project, RunOutcome,
-  Session, SessionRuntime, StoreListing, Task, TaskChanges, TaskDetail, TaskState, TaskSummary, Topic, TopicLink, Trigger, UnpushedWork,
+  Actor, Automation, AutomationDetail, AutomationSummary, BranchState, ChangedFile, Card, CheckState, Comment, EndedSession, EndMode, Firing, FiringOutcome, FiringVerdict, FolderFile,
+  HistoryEntry, Person, Project, PullRequest, RunOutcome, Session, SessionRuntime, StoreListing, Task, TaskDetail, TaskState, TaskSummary, Topic, TopicLink, Trigger, UnpushedWork, Work,
+  WorkBadge, WorkCommit,
 } from "../shared/api.ts";
 export type {
-  Actor, Automation, AutomationDetail, AutomationSummary, ChangedFile, Card, Comment, EndedSession, EndMode, Firing, FiringOutcome, FiringVerdict, FolderFile, HistoryEntry, Person, Project, RunOutcome,
-  Session, SessionRuntime, StoreListing, Task, TaskChanges, TaskDetail, TaskState, TaskSummary, Topic, TopicLink, Trigger, UnpushedWork,
+  Actor, Automation, AutomationDetail, AutomationSummary, BranchState, ChangedFile, Card, CheckState, Comment, EndedSession, EndMode, Firing, FiringOutcome, FiringVerdict, FolderFile,
+  HistoryEntry, Person, Project, PullRequest, RunOutcome, Session, SessionRuntime, StoreListing, Task, TaskDetail, TaskState, TaskSummary, Topic, TopicLink, Trigger, UnpushedWork, Work,
+  WorkBadge, WorkCommit,
 };
 
 /** A refused call; `details` holds the error's extra fields, e.g. the files that block ending a session. */

@@ -979,7 +979,7 @@ export class Store {
    * `search`, only the tasks whose title, description, or comments hold each of its words,
    * ignoring case.
    */
-  listTasks(principal: Principal, projectId: string, search = ""): TaskSummary[] {
+  listTasks(principal: Principal, projectId: string, search = ""): Array<Omit<TaskSummary, "badge">> {
     this.visibleProject(principal, projectId);
     const words = search.toLowerCase().split(/\s+/).filter(Boolean);
     const commentsOf = this.db.prepare("SELECT body FROM comments WHERE task_id = ?");

@@ -2,6 +2,7 @@ import { useState, type SubmitEvent } from "react";
 import { api, type Card, type Person, type Project, type Task, type TaskState, type TaskSummary } from "./api.ts";
 import { AgentAvatar, PersonAvatar } from "./People.tsx";
 import { TopicName } from "./Topics.tsx";
+import { BADGE_LABEL } from "./Work.tsx";
 
 export const LIGHT_LABEL: Record<Card["turn"], string> = {
   blocked: "Waiting on you",
@@ -48,7 +49,7 @@ function OverlapMark({ card }: { card: Card }) {
 
 /**
  * BOARD-1: the task's title, topic names, and assignee, and its running session's light (CARD-1)
- * and machine. The whole card opens the task's page.
+ * and machine; CARD-6: one badge for its work. The whole card opens the task's page.
  */
 function TaskCard({ summary, card, assignee }: { summary: TaskSummary; card: Card | null; assignee: Person | null }) {
   const { task } = summary;
@@ -72,6 +73,7 @@ function TaskCard({ summary, card, assignee }: { summary: TaskSummary; card: Car
             <OverlapMark card={card} />
           </>
         )}
+        {summary.badge !== null && <span className={`work-badge work-badge-${summary.badge}`} title="Its work (see the task's page)">{BADGE_LABEL[summary.badge]}</span>}
       </footer>
     </article>
   );

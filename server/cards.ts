@@ -1,7 +1,6 @@
 import { existsSync } from "node:fs";
 import { z } from "zod";
 import { git, uncommittedFiles, unpushedCommits } from "./git.ts";
-import { openPullRequests } from "./github.ts";
 import { ompRequest } from "./omp-channel.ts";
 import type { WorkspaceDirs } from "./runtime/runtime.ts";
 import type { Card, TurnLight } from "../shared/api.ts";
@@ -53,7 +52,7 @@ export async function gitState(worktree: string, baseRef: string): Promise<Card[
   }
 }
 
-/** CARD-1, CARD-3, CARD-4: one card per running session of the project, oldest first. */
+/** CARD-1, CARD-4: one card per running session of the project, oldest first. */
 export async function projectCards(
   store: Store,
   dirsOf: (sessionId: string) => WorkspaceDirs,
@@ -65,10 +64,9 @@ export async function projectCards(
   const cards = await Promise.all(store.listSessions(principal, projectId).map(async (session) => {
     const dirs = dirsOf(session.id);
     const hasWorktree = session.branch !== null && session.baseRef !== null && existsSync(dirs.worktree);
-    const [live, gitInfo, prs] = await Promise.all([
+    const [live, gitInfo] = await Promise.all([
       liveState(dirs.run),
       hasWorktree ? gitState(dirs.worktree, session.baseRef ?? "") : null,
-      hasWorktree ? openPullRequests(dirs.worktree, session.branch ?? "") : null,
     ]);
     // SESSION-7: the chat the session runs now: the one omp has open (a host session's path is
     // this machine's; omp writes it with the first message), else the newest; a checkout
@@ -84,7 +82,6 @@ export async function projectCards(
       lastUserMessage: messages.user,
       lastReply: messages.reply,
       git: gitInfo,
-      pullRequests: prs,
       overlaps: [],
       cloudflare: cloudflareOf(session.id),
     };
