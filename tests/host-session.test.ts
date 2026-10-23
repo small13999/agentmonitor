@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
-import { execFile, execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { get, request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
 import { promisify } from "node:util";
 import { after, afterEach, before } from "node:test";
 import { chromium, type Browser, type Page } from "playwright";
+import { z } from "zod";
 import { FakeModel } from "./fake-model.ts";
 import { buildApp, Gateway, type OmpChannel } from "./harness.ts";
 import { spec } from "./spec.ts";
@@ -95,9 +97,9 @@ after(async () => {
   if (scratch !== undefined) rmSync(scratch, { recursive: true, force: true });
 });
 
-function dirs(target: Session): { run: string; worktree: string } {
+function dirs(target: Session): { run: string; worktree: string; ompHome: string } {
   const root = join(gateway.stateDir, "sessions", target.id);
-  return { run: join(root, "run"), worktree: join(root, "worktree") };
+  return { run: join(root, "run"), worktree: join(root, "worktree"), ompHome: join(root, "omp-home") };
 }
 
 /** Processes started for the session, by the marker every one of them carries. */
@@ -267,26 +269,41 @@ spec("HOST-2", "a host session's agent works as the user in its own worktree, an
 let main: Session;
 let mainTask: Task;
 
-spec("HOST-7", "a session in the main checkout goes on with a copy of one of the user's omp chats", async () => {
+/** The chats of the checkout that Tern's /sessions lists, as omp with `agent` as its agent directory answers it. */
+async function chatsOfCheckout(agent: string): Promise<string[]> {
+  const omp = spawn("omp", ["acp"], { cwd: repo, env: { ...process.env, HOME: home, PI_CODING_AGENT_DIR: agent }, stdio: ["pipe", "pipe", "ignore"] });
+  const send = (id: number, method: string, params: unknown) => omp.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+  send(1, "initialize", { protocolVersion: 1, clientCapabilities: {} });
+  send(2, "session/list", { cwd: repo });
+  try {
+    for await (const line of createInterface({ input: omp.stdout })) {
+      const reply = z.object({ id: z.number(), result: z.object({ sessions: z.array(z.object({ sessionId: z.string() })) }) }).safeParse(JSON.parse(line));
+      if (reply.success && reply.data.id === 2) return reply.data.result.sessions.map((found) => found.sessionId);
+    }
+    throw new Error("omp acp ended without listing chats");
+  } finally {
+    omp.kill();
+  }
+}
+
+spec("HOST-7", "a session in the main checkout has the user's omp chats there, as omp in a terminal does", async () => {
   // The user's chat, as omp in a terminal in the checkout leaves it; the fake model answers in this
   // process, and omp -p reads stdin until it closes.
   const userChat = promisify(execFile)("omp", ["-p", "--model", "fake/scripted", "say:origin-7c1"], { cwd: repo, env: { ...process.env, HOME: home, PI_CODING_AGENT_DIR: agentDir } });
   userChat.child.stdin?.end();
   await userChat;
-  const sessions = join(agentDir, "sessions");
-  const [chat] = readdirSync(sessions, { recursive: true, encoding: "utf8" }).filter((path) => path.endsWith(".jsonl") && path.split("/").length === 2);
-  const chatId = /_([0-9a-f-]{36})\.jsonl$/.exec(chat)?.[1] ?? "";
-  const original = readFileSync(join(sessions, chat));
+  const [origin] = await chatsOfCheckout(agentDir);
 
   mainTask = await gateway.data<Task>("POST", `/projects/${project.id}/tasks`, { title: "Integration" });
-  const inWorktree = await gateway.api("POST", `/tasks/${mainTask.id}/sessions`, { runtime: "host", resume: chatId.slice(0, 8) });
-  assert.equal(inWorktree.status, 400);
-  main = await gateway.data<Session>("POST", `/tasks/${mainTask.id}/sessions`, { runtime: "host", checkout: true, resume: chatId.slice(0, 8) });
+  main = await gateway.data<Session>("POST", `/tasks/${mainTask.id}/sessions`, { runtime: "host", checkout: true });
   channel = await gateway.omp(main.id);
-  assert.equal((await card(main)).lastUserMessage, "say:origin-7c1");
-  const shown = await prompt(main, "say:goes-on");
-  assert.deepEqual([shown.lastUserMessage, shown.lastReply], ["say:goes-on", "goes-on"]);
-  assert.deepEqual(readFileSync(join(sessions, chat)), original, "the user's chat is unchanged");
+  assert.ok((await chatsOfCheckout(join(dirs(main).ompHome, "agent"))).includes(origin), "/sessions in the session lists the user's chat");
+
+  const shown = await prompt(main, "say:joins-3f0");
+  assert.deepEqual([shown.lastUserMessage, shown.lastReply], ["say:joins-3f0", "joins-3f0"]);
+  const { sessionFile } = await channel.request("state");
+  const own = /_([0-9a-f-]{36})\.jsonl$/.exec(String(sessionFile))?.[1];
+  assert.deepEqual((await chatsOfCheckout(agentDir)).toSorted(), [origin, own].toSorted(), "omp in a terminal lists the session's chat");
 });
 
 spec("HOST-6", "a host session works in the main checkout, one per project, and ending it leaves the checkout as it is", async () => {

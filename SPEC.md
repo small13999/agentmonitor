@@ -134,9 +134,9 @@ Unnumbered intent; not testable, so not claims.
   worktree, at most one per project, and is marked as such. Ending it stops its
   processes and leaves the checkout, its branch, and its uncommitted work as they
   are.
-- **HOST-7** A session in the main checkout can start by going on with one of the
-  user's own omp chats; it goes on with a copy, and the user's chat stays
-  unchanged.
+- **HOST-7** A session in the main checkout has the user's omp chats of the
+  checkout, as omp in a terminal there does: it can go on with any of them, and
+  its own chats are among them.
 
 ## Transcripts
 
