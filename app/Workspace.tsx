@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type SubmitEvent } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, ApiError, usePolled, type Session, type SessionRuntime, type Task, type TaskNotes } from "./api.ts";
 
 export type WorkspaceTab = "chat" | "notes";
@@ -42,8 +42,8 @@ export function WorkspaceTabs({ taskId, tab, settingsOpen, onSettings }: {
 
 /**
  * The Chat tab of a task without a running session (TASK-3): starting one, in a container or,
- * where the project allows it, on the host (HOST-1), also in the main checkout and going on
- * with one of the user's omp chats (HOST-6, HOST-7); or reopening a finished task first.
+ * where the project allows it, on the host (HOST-1), also in the main checkout among the user's
+ * omp chats (HOST-6, HOST-7); or reopening a finished task first.
  */
 export function StartSession({ task, hostSessions, onStarted }: { task: Task; hostSessions: boolean; onStarted: () => void }) {
   const [busy, setBusy] = useState(false);
@@ -60,11 +60,6 @@ export function StartSession({ task, hostSessions, onStarted }: { task: Task; ho
   const start = (kind: SessionRuntime | "checkout", body: Record<string, unknown>) => {
     setStarting(kind);
     run(() => api<Session>("POST", `/tasks/${task.id}/sessions`, body));
-  };
-  const startInCheckout = (event: SubmitEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const resume = String(new FormData(event.currentTarget).get("resume")).trim();
-    start("checkout", { runtime: "host", checkout: true, ...(resume === "" ? {} : { resume }) });
   };
   const finished = task.state === "done" || task.state === "cancelled";
   return (
@@ -98,20 +93,18 @@ export function StartSession({ task, hostSessions, onStarted }: { task: Task; ho
                 {busy && starting === "host" ? "Starting…" : "Start host session"}
               </button>
             )}
-          </div>
-          {hostSessions && (
-            <form className="actions" aria-label="Main checkout" onSubmit={startInCheckout}>
-              <input name="resume" placeholder="omp chat id to go on with (optional)" aria-label="omp chat to resume" disabled={busy} />
+            {hostSessions && (
               <button
-                type="submit"
+                type="button"
                 className="danger"
                 disabled={busy}
-                title="A host session in the project's main checkout, the live code, instead of a worktree; one per project"
+                title="A host session in the project's main checkout, the live code, with your omp chats there to go on with (/resume); one per project"
+                onClick={() => start("checkout", { runtime: "host", checkout: true })}
               >
                 {busy && starting === "checkout" ? "Starting…" : "Start in main checkout"}
               </button>
-            </form>
-          )}
+            )}
+          </div>
         </>
       )}
       {error && <p className="error">{error}</p>}
