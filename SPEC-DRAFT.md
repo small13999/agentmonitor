@@ -42,81 +42,10 @@ the answer this draft assumes.
 
 ## Step 4: redesign
 
-### People
-
-- **PERSON-1** new: A store has people, each with a name and an avatar; its owner
-  adds them. Every human action (comment, state change, upload, start/end of a
-  session) is recorded with the person who did it. Until login exists (step 5)
-  every request is the store's owner.
-- **PERSON-2** new: An agent's actions are recorded as the agent of its session,
-  shown with the session's avatar and linking to the session.
-
-### Task page
-
-- **TASK-12** new: Opening a task (from the board, the task list, a link) shows its
-  page: title, description, state, assignee, topics, folder, comments, history,
-  and its sessions; title, description, state, assignee, and topics are edited in
-  place.
-- **TASK-13** new: A task's assignee is one person or nobody.
-- **TASK-14** new: A task's history lists in time order its state and assignee
-  changes, sessions started, stopped, and ended (with their machine), comments,
-  files added, and pull requests, each with who and when.
-- **TASK-6** changed: A session's first chat starts with its task's title,
-  description, status, and comments in context.
-- **TASK-8** retired (notes). Replaced by comments.
-- **TASK-15** new: Every task's notes became a comment by the store's owner,
-  dated when the notes were last written.
-
-### Comments
-
-- **COMMENT-1** new: People comment on a task from its page, agents with `am
-  comment`; a comment is Markdown, shows rendered, and shows its author and time.
-- **COMMENT-2** new: A comment's author can edit or delete it; an edited comment
-  says so.
-- **COMMENT-3** new: Comments are discussion between people and never reach a
-  running session's chat; its agent reads them when its session starts (TASK-6) and
-  when it asks (`am comments`).
-
-### Folders
-
-- **FOLDER-1** new: Every task and every automation has a folder in the store (not
-  in git). People add files by dropping them on the page, agents with `am folder`.
-- **FOLDER-2** new: A folder's files show inline by kind (images, video, PDF,
-  Markdown, text), each with who added it and when; one file or the whole folder
-  downloads, the folder as a zip.
-- **FOLDER-3** new: A session's agent finds its owner's folder as a directory in
-  its workspace; what it writes there shows on the page within seconds, and the
-  reverse. Local runs (step 8) get it synced.
-
-### Board
-
-- **BOARD-1** changed: The board shows the project's tasks in Open, In progress,
-  and In review; each card shows the task's title, topic names, assignee, and its
-  session's state and machine.
-- **BOARD-3** new: Done and cancelled tasks leave the board; search and the All
-  tasks list find every task by title, description, and comments.
-- **CARD-2** retired (last messages on the card). The task page and chat show them.
-- **CARD-5** retired, duplicate of BOARD-2.
-- **CARD-1, CARD-3, CARD-4** changed to name the task, not a session card:
-  - CARD-1: A task's card and page show its session as waiting on you, working,
-    idle, stopped, or ended; working pulses.
-  - CARD-3: A task's Changes view shows what its branch changed against the
-    default branch, its uncommitted files, and its open pull requests.
-  - CARD-4: A task's Changes view names the other running tasks of the project
-    that changed any of the same files, and its card marks that it has them.
-
-### Layout and identity
-
-- **UI-2** changed: A task has three tabs: Page, Chat (its session's chat, or
-  starting one), and Settings, a full tab at the right of the tabs with subtabs
-  Changes, Previews, Cloudflare, and End session. Switching tabs keeps the chat
-  loaded.
-- **UI-4** new: A topic's name shows the same everywhere, in the topic's own
-  colour; clicking it opens a panel with its rendered status and linked tasks.
-- **UI-5** new: The header counts the tasks waiting on you, on every page, and
-  links to them.
-- Not claims: type, accent, colours, avatars, motion. A clickable prototype comes
-  first; the user picks before it is built in.
+Moved into SPEC.md (`c55171c`). Still to do there when its slices land: retire
+TASK-8 (notes), CARD-2 (last messages on the card), and CARD-5 (duplicate of
+BOARD-2). Not claims: type, accent, colours, avatars, motion; a clickable prototype
+comes first, and the user picks before it is built in.
 
 ## Step 5: hub on Hetzner
 
