@@ -31,12 +31,14 @@ the answer this draft assumes.
 - **Session states**: running; **stopped** (idle stop, machine off, crash; to people
   it is still the same session and goes on with the same chat, possibly on another
   machine); **ended** (only when a person ends it).
-- **Commits and pushes**: the agent commits by the end of every turn that changed
-  files (its instructions say so; Agent Monitor does not commit, so the agent
-  decides what is committed, which keeps secrets out). The task's branch is the
-  backup and the turn history: Agent Monitor pushes it after every turn. Deploying
-  is separate: when a person says so, the agent opens a pull request with logical
-  commits, and it merges. Nobody needs to know about commits.
+- **Commits and pushes**: a turn ends when its work is ready: committed, pushed,
+  previews running. The agent does all of it within the turn (its instructions say
+  so), so it decides what is committed (secrets stay out) and a failure is the
+  agent's to fix or explain in the same turn; Agent Monitor adds no step after the
+  turn. The task's branch is the backup and the turn history. Deploying is
+  separate: when a person says so, the agent opens a pull request with logical
+  commits, and it merges. Nobody has to know about commits or decide about
+  uncommitted files.
 
 ## Step 4: redesign
 
@@ -188,12 +190,13 @@ the answer this draft assumes.
 ## Step 8: commits, stops, local runs
 
 - **SESSION-9** retired (snapshot refs, "never pushed"). Replaced by SESSION-15.
-- **SESSION-15** new: A session's agent commits by the end of every turn that
-  changed files, and Agent Monitor pushes the task's branch after every turn, so a
-  session's work is on the remote when its turn ends.
-  - **Q** Draft: Agent Monitor pushes (the agent decided the content when it
-    committed; pushing has nothing left to decide, and it also has to happen before
-    an idle stop). Or the agent pushes too?
+- **SESSION-15** new: A turn that changed files ends with them committed and
+  pushed to the task's branch by the session's agent; Agent Monitor does no git
+  work after a turn.
+  - **Q** Instructions alone, or also a backstop: when a turn ends with `am check`
+    failing, Agent Monitor sends the agent back to finish within the same turn, so a
+    person never sees it? Draft: the backstop, because the claim then holds by
+    mechanism, and its test can prove it (a scripted agent that forgets to commit).
 - **TURN-1** retired (snapshot without changing the branch).
 - **TURN-2, TURN-3** changed: a turn's diff is the commits it made; the diff view
   offers the whole branch and each turn, with the turn's prompt and final reply.
@@ -202,10 +205,8 @@ the answer this draft assumes.
   ends a turn.
 - **SESSION-16** new: A running session that is idle for 30 minutes (no turn
   working, not waiting on anyone, its chat open nowhere) stops; opening it goes on
-  with its last chat from its branch, on any machine that may run it.
-  - **Q** Draft: a session with uncommitted files is never idle-stopped (the agent
-    forgot to commit; its card says so) rather than stopped with work only on one
-    machine.
+  with its last chat from its branch, on any machine that may run it. Its work is
+  already pushed (SESSION-15), so stopping has nothing to save.
 - **SESSION-10** changed: Opening a stopped session starts it again on its last
   chat; SESSION-16 covers starting it on another machine.
 - **MACHINE-3** new: A client can run a session of a hub project locally ("Run
@@ -222,5 +223,8 @@ the answer this draft assumes.
 
 - How the integrator pulls in other tasks' branches.
 - Switching host sessions on for an existing project (project settings, step 4).
-- The agent's instructions (`AGENTS.md` of sessions) change with SESSION-15: commit
-  by the end of every turn, never push, deploy only when told.
+- The integrator's turns: it works on the default branch, which no session may push
+  (MERGE-1), so its turns end committed but not pushed, and `am check` never comes
+  out clean there. Either its pushes of the default branch are allowed (for
+  agentmonitor that is a backup, not a deploy), or `am check` skips "unpushed" in the
+  main checkout.
