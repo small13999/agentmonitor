@@ -217,11 +217,11 @@
     "tests/topics.test.ts::TOPIC-3::a status write based on a stale revision is refused": "7e44ec11e7893ef8",
     "tests/topics.test.ts::TASK-2::a task links to many topics, changed by the UI and by agents, and keeps them after its session ends": "904546b3118f4222",
     "tests/topics.test.ts::STORE-2::a task cannot link a topic from another store": "5edb03a0117a1a9a",
-    "tests/work.test.ts::CARD-3::a task's Work section shows its branch's state, its commits with their descriptions, its pull requests with their checks, and the files it changed": "e880927ffc764842",
-    "tests/work.test.ts::CARD-6::a board card shows one badge for its work: not pushed before a pull request open before deployed": "3a5b1fbf50312af9",
-    "tests/work.test.ts::DEPLOY-1::Deploy sends the task's running session the fixed instruction, and the pull request its agent opens and merges shows as deployed": "eb1f87a3203cd450",
-    "tests/work.test.ts::DEPLOY-1::Deploy on a task without a running session starts one on the fixed instruction, which its context also gives for a person's \\\"deploy\\\"": "fd77e7a60cbc5e4a",
-    "tests/work.test.ts::AUTO-16::a run waiting for review shows its work with Deploy, which has its agent deploy; every run's work opens from its row": "2ca531d8a899f91b"
+    "tests/work.test.ts::CARD-3::a task's Work section shows its branch's state, its commits with their descriptions, its pull requests with their checks, and the files it changed": "6e1a68fd2c40388b",
+    "tests/work.test.ts::CARD-6::a board card shows one badge for its work: not pushed before a pull request open before deployed": "f353ee30861a840c",
+    "tests/work.test.ts::DEPLOY-1::Deploy sends the task's running session the fixed instruction, and the pull request its agent opens and merges shows as deployed": "12d7e91b8c30a65c",
+    "tests/work.test.ts::DEPLOY-1::Deploy on a task without a running session starts one on the fixed instruction, which its context also gives for a person's \\\"deploy\\\"": "0d8010f991c92127",
+    "tests/work.test.ts::AUTO-16::a run waiting for review shows its work with Deploy, which has its agent deploy; every run's work opens from its row": "8b2f1567a2587ce1"
   },
   "retired": [
     "AUTO-3",
