@@ -6,7 +6,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { crc32 } from "node:zlib";
 import { FileResponse } from "./http.ts";
-import { StoreError, type FolderEntry, type FolderFile, type Principal, type Store } from "./store.ts";
+import { StoreError, type FolderEntry, type FolderFile, type FolderOwner, type Principal, type Store } from "./store.ts";
 
 /** Content types by extension; they decide how the page shows a file (FOLDER-2). Others are plain bytes. */
 const CONTENT_TYPES: Record<string, string> = {
@@ -191,12 +191,12 @@ async function* zipOf(dir: string, files: FolderFile[]): AsyncGenerator<Buffer> 
 }
 
 /**
- * FOLDER-1..3: every task's folder, a directory per task under the gateway's state directory,
- * outside any repository. The store records who added each file and when; the directory is
- * what counts, since a session's agent writes into it directly (FOLDER-3), so every read
- * brings the records in line with it first.
+ * FOLDER-1..3, AUTO-1: every task's and every automation's folder, a directory per owner (by its
+ * id) under the gateway's state directory, outside any repository. The store records who added
+ * each file and when; the directory is what counts, since a session's agent writes into it
+ * directly (FOLDER-3), so every read brings the records in line with it first.
  */
-export class TaskFolders {
+export class Folders {
   private readonly store: Store;
   private readonly root: string;
 
@@ -205,45 +205,46 @@ export class TaskFolders {
     this.root = root;
   }
 
-  /** The task's folder on this machine, created on first use. */
-  dir(taskId: string): string {
-    const dir = join(this.root, taskId);
+  /** The owner's folder on this machine, created on first use. */
+  dir(owner: FolderOwner): string {
+    const dir = join(this.root, owner.id);
     mkdirSync(dir, { recursive: true });
     return dir;
   }
 
-  /** The task's files as its folder holds them now, by path. */
-  sync(taskId: string): FolderFile[] {
-    return this.store.syncFolder(taskId, scan(this.dir(taskId)));
+  /** The owner's files as its folder holds them now, by path. */
+  sync(owner: FolderOwner): FolderFile[] {
+    return this.store.syncFolder(owner, scan(this.dir(owner)));
   }
 
   /**
-   * STORE-6: `from`, a directory on this filesystem holding a moved task's folder, becomes the
-   * task's folder, its files modified when the records say; refused when the task has files here.
+   * STORE-6: `from`, a directory on this filesystem holding a moved task's or automation's
+   * folder, becomes its folder, its files modified when the records say; refused when it has
+   * files here.
    */
-  adopt(taskId: string, from: string, files: Array<{ path: string; updatedAt: number }>): void {
+  adopt(owner: FolderOwner, from: string, files: Array<{ path: string; updatedAt: number }>): void {
     mkdirSync(this.root, { recursive: true });
     try {
-      renameSync(from, join(this.root, taskId));
+      renameSync(from, join(this.root, owner.id));
     } catch (cause) {
-      throw new StoreError(409, `task ${taskId} already has a folder here: ${String(cause)}`);
+      throw new StoreError(409, `${owner.kind} ${owner.id} already has a folder here: ${String(cause)}`);
     }
     for (const file of files) {
-      const path = join(this.root, taskId, file.path);
+      const path = join(this.root, owner.id, file.path);
       // Half a millisecond on: seconds as a double are inexact, and the folder counts modification times in whole milliseconds.
       const at = (file.updatedAt + 0.5) / 1000;
       if (lstatSync(path, { throwIfNoEntry: false })?.isFile()) utimesSync(path, at, at);
     }
   }
 
-  /** STORE-6: removes the folder of a task that is no longer in this store. */
-  delete(taskId: string): void {
-    rmSync(join(this.root, taskId), { recursive: true, force: true });
+  /** STORE-6: removes the folder of a task or an automation that is no longer in this store. */
+  delete(owner: FolderOwner): void {
+    rmSync(join(this.root, owner.id), { recursive: true, force: true });
   }
 
-  list(principal: Principal, taskId: string): FolderFile[] {
-    this.store.getTask(principal, taskId);
-    return this.sync(taskId);
+  list(principal: Principal, owner: FolderOwner): FolderFile[] {
+    this.store.folderName(principal, owner);
+    return this.sync(owner);
   }
 
   /**
@@ -251,15 +252,15 @@ export class TaskFolders {
    * directory first, so the folder never shows a partial file, and moves in only through
    * real directories of the folder, never through a link.
    */
-  async upload(principal: Principal, taskId: string, encodedPath: string, body: Readable): Promise<FolderFile> {
-    this.store.getTask(principal, taskId);
+  async upload(principal: Principal, owner: FolderOwner, encodedPath: string, body: Readable): Promise<FolderFile> {
+    this.store.folderName(principal, owner);
     const path = folderPath(encodedPath);
     const staging = join(this.root, ".uploads");
     mkdirSync(staging, { recursive: true });
     const temp = join(staging, randomUUID());
     try {
       await pipeline(body, createWriteStream(temp, { flags: "wx" }));
-      let target = realpathSync(this.dir(taskId));
+      let target = realpathSync(this.dir(owner));
       const segments = path.split("/");
       for (const segment of segments.slice(0, -1)) {
         target = join(target, segment);
@@ -271,18 +272,18 @@ export class TaskFolders {
       if (lstatSync(target, { throwIfNoEntry: false })?.isDirectory()) throw new StoreError(409, `${path} is a folder`);
       renameSync(temp, target);
       const written = lstatSync(target);
-      return this.store.addFolderFile(principal, taskId, { path, size: written.size, contentType: contentTypeOf(path), modifiedAt: Math.floor(written.mtimeMs) });
+      return this.store.addFolderFile(principal, owner, { path, size: written.size, contentType: contentTypeOf(path), modifiedAt: Math.floor(written.mtimeMs) });
     } finally {
       rmSync(temp, { force: true });
     }
   }
 
   /** FOLDER-2: one file, inline with its content type or as an attachment; a single byte range for video. */
-  async download(principal: Principal, taskId: string, encodedPath: string, range: string | undefined, attachment: boolean): Promise<FileResponse> {
-    this.store.getTask(principal, taskId);
+  async download(principal: Principal, owner: FolderOwner, encodedPath: string, range: string | undefined, attachment: boolean): Promise<FileResponse> {
+    this.store.folderName(principal, owner);
     const path = folderPath(encodedPath);
-    const handle = await openInside(this.dir(taskId), path);
-    if (handle === null) throw new StoreError(404, `the task's folder has no file ${path}`);
+    const handle = await openInside(this.dir(owner), path);
+    if (handle === null) throw new StoreError(404, `the ${owner.kind}'s folder has no file ${path}`);
     const { size } = await handle.stat();
     const headers = { ...fileHeaders(path, contentTypeOf(path), attachment), "accept-ranges": "bytes" };
     const wanted = byteRange(range, size);
@@ -300,36 +301,36 @@ export class TaskFolders {
   }
 
   /** Deletes a file, never what a link in the folder points to; answers the files left. */
-  remove(principal: Principal, taskId: string, encodedPath: string): FolderFile[] {
-    this.store.getTask(principal, taskId);
+  remove(principal: Principal, owner: FolderOwner, encodedPath: string): FolderFile[] {
+    this.store.folderName(principal, owner);
     const path = folderPath(encodedPath);
-    const dir = realpathSync(this.dir(taskId));
+    const dir = realpathSync(this.dir(owner));
     let parent: string;
     try {
       parent = realpathSync(join(dir, dirname(path)));
     } catch {
-      throw new StoreError(404, `the task's folder has no file ${path}`);
+      throw new StoreError(404, `the ${owner.kind}'s folder has no file ${path}`);
     }
     const target = join(parent, basename(path));
     if ((parent !== dir && !parent.startsWith(dir + sep)) || !lstatSync(target, { throwIfNoEntry: false })?.isFile()) {
-      throw new StoreError(404, `the task's folder has no file ${path}`);
+      throw new StoreError(404, `the ${owner.kind}'s folder has no file ${path}`);
     }
     unlinkSync(target);
-    return this.sync(taskId);
+    return this.sync(owner);
   }
 
-  /** FOLDER-2: the whole folder as a zip named after the task. */
-  zip(principal: Principal, taskId: string): FileResponse {
-    const { task } = this.store.getTask(principal, taskId);
-    const files = this.sync(taskId);
+  /** FOLDER-2: the whole folder as a zip named after its task or automation. */
+  zip(principal: Principal, owner: FolderOwner): FileResponse {
+    const title = this.store.folderName(principal, owner);
+    const files = this.sync(owner);
     // Per file: local header, data descriptor, and directory entry (30 + 16 + 46 bytes) and its name twice.
     const total = files.reduce((sum, file) => sum + 92 + 2 * Buffer.byteLength(file.path) + file.size, 22);
     if (total > ZIP_MAX_BYTES) throw new StoreError(413, "the folder is too large for one zip; download its files one by one");
-    const name = `${task.title.replace(/[^\p{L}\p{N}._-]+/gu, "-").replace(/^-|-$/g, "") || "folder"}.zip`;
+    const name = `${title.replace(/[^\p{L}\p{N}._-]+/gu, "-").replace(/^-|-$/g, "") || "folder"}.zip`;
     return new FileResponse(200, {
       "content-type": "application/zip",
       "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(name)}`,
       "cache-control": "no-store",
-    }, Readable.from(zipOf(this.dir(taskId), files)));
+    }, Readable.from(zipOf(this.dir(owner), files)));
   }
 }

@@ -20,17 +20,19 @@ export interface LaunchInput {
   sessionId: string;
   repoPath: string;
   dirs: WorkspaceDirs;
-  /** FOLDER-3: the task's folder on this machine; a container gets it at CONTAINER_FOLDER, a host session's agent uses it where it is. */
+  /** FOLDER-3, AUTO-1: the folder of the session's task or automation on this machine; a container gets it at CONTAINER_FOLDER, a host session's agent uses it where it is. */
   folder: string;
   /** omp model for the chat; null: omp's default. */
   model: string | null;
   /** omp chat (omp session id) to resume; null: a new chat. */
   resume: string | null;
+  /** AUTO-9: the new chat's first prompt, sent as it starts; null: the chat waits for a person. */
+  prompt: string | null;
   /** Origin the session's Tern web socket accepts; the gateway's Tern proxy presents it. */
   ternOrigin: string;
   /** Point Wrangler at the gateway's Cloudflare broker (the project has Cloudflare tokens). */
   cloudflare: boolean;
-  /** TASK-6: markdown the session adds to the agent's workflow context: the task as it is at launch. */
+  /** TASK-6, AUTO-9: markdown the session adds to the agent's workflow context: its task, or its automation and run, as they are at launch. */
   taskContext: string;
 }
 
@@ -55,6 +57,7 @@ export function writeLaunchFiles(input: LaunchInput, launch: Record<string, unkn
   writeFileSync(join(input.dirs.run, "launch.json"), JSON.stringify({
     model: input.model,
     resume: input.resume,
+    prompt: input.prompt,
     ternOrigin: input.ternOrigin,
     cloudflare: input.cloudflare,
     ...launch,

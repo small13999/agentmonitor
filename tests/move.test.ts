@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { after, before } from "node:test";
 import { fileURLToPath } from "node:url";
 import { chromium, type Browser } from "playwright";
-import type { Comment, FolderFile, HistoryEntry, Person, Project, Session, Task, TaskDetail, TaskSummary, Topic, TopicLink } from "../shared/api.ts";
+import type { Automation, AutomationDetail, AutomationSummary, Comment, Firing, FolderFile, HistoryEntry, Person, Project, Session, Task, TaskDetail, TaskSummary, Topic, TopicLink } from "../shared/api.ts";
 import { AUDIENCE, FakeAccess } from "./fake-access.ts";
 import { buildApp, Gateway, type AmResult } from "./harness.ts";
 import { spec } from "./spec.ts";
@@ -126,6 +126,9 @@ async function call<T>(store: Reach, method: string, path: string, body?: unknow
 async function everything(store: Reach, project: Project): Promise<unknown> {
   const tasks = await call<TaskSummary[]>(store, "GET", `/projects/${project.id}/tasks`);
   const topics = await call<Topic[]>(store, "GET", `/projects/${project.id}/topics`);
+  const automations = await call<AutomationSummary[]>(store, "GET", `/projects/${project.id}/automations`);
+  const files = async (owner: string, folder: FolderFile[]) =>
+    Promise.all(folder.map(async (file) => (await fetch(`${store.url}/api/store/${owner}/folder/${file.path}`, { headers: store.headers })).text()));
   return {
     project: (await call<Project[]>(store, "GET", "/projects")).find((found) => found.id === project.id),
     topics: await Promise.all(topics.map((topic) => call<{ topic: Topic; tasks: TopicLink[] }>(store, "GET", `/topics/${topic.id}`))),
@@ -136,13 +139,22 @@ async function everything(store: Reach, project: Project): Promise<unknown> {
         comments: await call<Comment[]>(store, "GET", `/tasks/${task.id}/comments`),
         history: await call<HistoryEntry[]>(store, "GET", `/tasks/${task.id}/history`),
         folder,
-        bytes: await Promise.all(folder.map(async (file) => (await fetch(`${store.url}/api/store/tasks/${task.id}/folder/${file.path}`, { headers: store.headers })).text())),
+        bytes: await files(`tasks/${task.id}`, folder),
+      };
+    })),
+    automations: await Promise.all(automations.map(async ({ automation }) => {
+      const folder = await call<FolderFile[]>(store, "GET", `/automations/${automation.id}/folder`);
+      return {
+        detail: await call<AutomationDetail>(store, "GET", `/automations/${automation.id}`),
+        firings: await call<Firing[]>(store, "GET", `/automations/${automation.id}/firings`),
+        folder,
+        bytes: await files(`automations/${automation.id}`, folder),
       };
     })),
   };
 }
 
-spec("STORE-6", "a project moves to another store with its topics, tasks, comments, folders, chats, and who did what, and then lives only there", async () => {
+spec("STORE-6", "a project moves to another store with its topics, tasks, automations, comments, folders, chats, and who did what, and then lives only there", async () => {
   // The source store: people, topics, tasks in several states, comments and files by the owner and an agent.
   const project = await source.data<Project>("POST", "/projects", { name: "draftcoach" });
   const sourceOwner = (await source.data<{ person: Person }>("GET", "/me")).person;
@@ -171,6 +183,14 @@ spec("STORE-6", "a project moves to another store with its topics, tasks, commen
   await source.data("PATCH", `/tasks/${notes.id}`, { state: "in_review" });
   await source.data("POST", `/tasks/${recap.id}/finish`, { state: "done" });
   await source.data("POST", `/tasks/${idea.id}/finish`, { state: "cancelled" });
+  // An automation with a trigger, a file of a person's in its folder, and a run whose agent wrote its output there.
+  const review = await source.data<Automation>("POST", `/projects/${project.id}/automations`, { name: "Patch review", instructions: "Review the notes", endMode: "review" });
+  await source.data("POST", `/automations/${review.id}/triggers`, { cron: "0 9 * * 1-5" });
+  assert.equal((await fetch(`${source.url}/api/store/automations/${review.id}/folder/memory.md`, { method: "PUT", body: "Reviewed up to 26.20\n" })).status, 200);
+  const run = await source.data<Session>("POST", `/automations/${review.id}/runs`, {});
+  writeFileSync(join(scratch, "review.md"), "# Review\n\nFine.\n");
+  assert.equal(source.am(run.id, ["folder", "add", join(scratch, "review.md"), `runs/${run.id.slice(0, 8)}/review.md`]).code, 0);
+  await source.data("POST", `/sessions/${run.id}/end`);
   await call(onHub, "PATCH", `/people/${(await call<{ person: Person }>(onHub, "GET", "/me")).person.id}`, { name: "Hub owner" });
   // The hub knows Sam by his email under another name, and another Kim Park by hers.
   const targetSam = await call<Person>(onHub, "POST", "/people", { name: "Samuel Lee", email: "sam@example.com" });
@@ -236,6 +256,7 @@ spec("STORE-6", "a project moves to another store with its topics, tasks, commen
   assert.deepEqual(await source.data<Project[]>("GET", "/projects"), []);
   assert.equal((await source.api("GET", `/tasks/${notes.id}`)).status, 404);
   assert.ok(!existsSync(join(source.stateDir, "folders", notes.id)), "the task's folder is gone");
+  assert.ok(!existsSync(join(source.stateDir, "folders", review.id)), "the automation's folder is gone");
   assert.ok(!existsSync(join(source.stateDir, "sessions", session.id)), "the session's chats are gone");
 });
 

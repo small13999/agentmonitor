@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { Actor, Comment, FolderFile, HistoryEvent, Person, Project, Session, Task, Topic, TopicLink } from "../../shared/api.ts";
+import type { Actor, Automation, Comment, Firing, FiringVerdict, FolderFile, HistoryEvent, Person, Project, Run, Session, Task, Topic, TopicLink, Trigger } from "../../shared/api.ts";
 import type { CloudflareTokens } from "../cloudflare.ts";
 
 const taskState = z.enum(["open", "in_progress", "in_review", "done", "cancelled"]);
@@ -24,6 +24,9 @@ export const historyEvent: z.ZodType<HistoryEvent> = z.discriminatedUnion("kind"
 /** STORE-6: a file of a task's folder, as the store records it. */
 export type MovedFolderFile = FolderFile & { taskId: string };
 
+/** STORE-6: a file of an automation's folder (AUTO-1), as the store records it. */
+export type MovedAutomationFile = FolderFile & { automationId: string };
+
 /** STORE-6: one entry of a task's history (TASK-14), in the order the store appended them. */
 export interface MovedEvent {
   taskId: string;
@@ -34,16 +37,21 @@ export interface MovedEvent {
 
 /** STORE-6: every record of one project, as `bundle.json` of a move's bundle holds them. */
 export interface ProjectRecords {
-  version: 2;
+  version: 3;
   project: Project;
   /** The store's owner and everyone the records name. */
   people: Person[];
   topics: Topic[];
   tasks: Task[];
   topicLinks: TopicLink[];
+  automations: Automation[];
+  triggers: Trigger[];
+  /** Sessions of tasks and runs of automations (SESSION-5). */
   sessions: Session[];
+  firings: Firing[];
   comments: Comment[];
   folderFiles: MovedFolderFile[];
+  automationFiles: MovedAutomationFile[];
   events: MovedEvent[];
   /** CLOUDFLARE-3: the project's Cloudflare tokens; null when it has none. */
   cloudflareTokens: CloudflareTokens | null;
@@ -54,8 +62,8 @@ const actor: z.ZodType<Actor> = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("person"), personId: id }),
   z.object({ kind: z.literal("agent"), sessionId: id }),
 ]);
-// A folder path as the store records it (FOLDER-1): `/`-separated segments, none empty, `.` or `..`.
-const folderPath = z.string().refine((path) => path.split("/").every((segment) => segment !== "" && segment !== "." && segment !== ".."), "not a folder path");
+/** A folder path as the store records it (FOLDER-1): `/`-separated segments, none empty, `.` or `..`. */
+export const folderPath = z.string().refine((path) => path.split("/").every((segment) => segment !== "" && segment !== "." && segment !== ".."), "not a folder path");
 
 const person: z.ZodType<Person> = z.object({
   id,
@@ -97,10 +105,17 @@ const task: z.ZodType<Task> = z.object({
   updatedAt: z.number(),
 });
 const topicLink: z.ZodType<TopicLink> = z.object({ taskId: id, topicId: id, linkedAt: z.number() });
+const run: z.ZodType<Run> = z.object({
+  startedBy: actor.nullable(),
+  triggerContext: z.string(),
+  outcome: z.enum(["finished", "review", "timed_out", "failed", "ended"]).nullable(),
+  endedBy: actor.nullable(),
+});
 const session: z.ZodType<Session> = z.object({
   id,
   projectId: id,
-  taskId: id,
+  taskId: id.nullable(),
+  automationId: id.nullable(),
   name: z.string(),
   branch: z.string().nullable(),
   baseRef: z.string().nullable(),
@@ -110,6 +125,41 @@ const session: z.ZodType<Session> = z.object({
   model: z.string().nullable(),
   startedAt: z.number(),
   endedAt: z.number().nullable(),
+  run: run.nullable(),
+});
+const automation: z.ZodType<Automation> = z.object({
+  id,
+  projectId: id,
+  name: z.string().trim().min(1),
+  slug: z.string().min(1),
+  instructions: z.string(),
+  model: z.string().nullable(),
+  endMode: z.enum(["finish", "review"]),
+  timeLimitMinutes: z.int().min(1),
+  enabled: z.boolean(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+});
+const trigger: z.ZodType<Trigger> = z.object({
+  id,
+  automationId: id,
+  cron: z.string(),
+  timezone: z.string(),
+  guardPath: folderPath.nullable(),
+  checkPath: folderPath.nullable(),
+  createdAt: z.number(),
+});
+const verdict: z.ZodType<FiringVerdict> = z.object({ passed: z.boolean(), output: z.string() });
+const firing: z.ZodType<Firing> = z.object({
+  id,
+  automationId: id,
+  triggerId: id,
+  scheduledAt: z.number(),
+  firedAt: z.number(),
+  guard: verdict.nullable(),
+  check: verdict.nullable(),
+  outcome: z.enum(["started", "off", "running", "guard", "check", "failed"]),
+  sessionId: id.nullable(),
 });
 const comment: z.ZodType<Comment> = z.object({
   id,
@@ -128,6 +178,15 @@ const folderFile: z.ZodType<MovedFolderFile> = z.object({
   addedAt: z.number(),
   updatedAt: z.number(),
 });
+const automationFile: z.ZodType<MovedAutomationFile> = z.object({
+  automationId: id,
+  path: folderPath,
+  size: z.int().min(0),
+  contentType: z.string(),
+  addedBy: actor.nullable(),
+  addedAt: z.number(),
+  updatedAt: z.number(),
+});
 const movedEvent: z.ZodType<MovedEvent> = z.object({ taskId: id, at: z.number(), actor: actor.nullable(), event: historyEvent });
 const token = z.string().min(1);
 const cloudflareTokens: z.ZodType<CloudflareTokens> = z.object({ read: token, write: token.nullable() });
@@ -138,15 +197,19 @@ const cloudflareTokens: z.ZodType<CloudflareTokens> = z.object({ read: token, wr
  * session has ended: a running one never leaves its store.
  */
 export const projectRecords: z.ZodType<ProjectRecords> = z.object({
-  version: z.literal(2),
+  version: z.literal(3),
   project,
   people: z.array(person),
   topics: z.array(topic),
   tasks: z.array(task),
   topicLinks: z.array(topicLink),
+  automations: z.array(automation),
+  triggers: z.array(trigger),
   sessions: z.array(session),
+  firings: z.array(firing),
   comments: z.array(comment),
   folderFiles: z.array(folderFile),
+  automationFiles: z.array(automationFile),
   events: z.array(movedEvent),
   cloudflareTokens: cloudflareTokens.nullable(),
 }).superRefine((records, context) => {
@@ -154,19 +217,23 @@ export const projectRecords: z.ZodType<ProjectRecords> = z.object({
   const people = new Set(records.people.map((person) => person.id));
   const topics = new Set(records.topics.map((found) => found.id));
   const tasks = new Set(records.tasks.map((found) => found.id));
+  const automations = new Set(records.automations.map((found) => found.id));
   const sessions = new Set(records.sessions.map((found) => found.id));
   for (const [kind, ids] of Object.entries({
     person: records.people.map((person) => person.id),
     topic: records.topics.map((found) => found.id),
     task: records.tasks.map((found) => found.id),
+    automation: records.automations.map((found) => found.id),
+    trigger: records.triggers.map((found) => found.id),
     session: records.sessions.map((found) => found.id),
+    firing: records.firings.map((found) => found.id),
     comment: records.comments.map((found) => found.id),
   })) {
     const twice = ids.find((value, index) => ids.indexOf(value) !== index);
     if (twice !== undefined) problem(`${kind} ${twice} is in the bundle twice`);
   }
   if (records.people.filter((person) => person.owner).length !== 1) problem("the bundle names no owner of its store, or more than one");
-  for (const owned of [...records.topics, ...records.tasks, ...records.sessions]) {
+  for (const owned of [...records.topics, ...records.tasks, ...records.automations, ...records.sessions]) {
     if (owned.projectId !== records.project.id) problem(`${owned.id} belongs to another project`);
   }
   const knownActor = (who: Actor | null) => who === null || (who.kind === "person" ? people.has(who.personId) : sessions.has(who.sessionId));
@@ -176,15 +243,30 @@ export const projectRecords: z.ZodType<ProjectRecords> = z.object({
   for (const found of records.tasks) {
     if (found.assigneeId !== null && !people.has(found.assigneeId)) problem(`task ${found.id} is assigned to a person not in the bundle`);
   }
+  for (const found of records.triggers) {
+    if (!automations.has(found.automationId)) problem(`trigger ${found.id} belongs to an automation not in the bundle`);
+  }
   for (const found of records.sessions) {
-    if (!tasks.has(found.taskId)) problem(`session ${found.id} belongs to a task not in the bundle`);
+    // SESSION-5: one task or one automation; a run's fields only on a run.
+    const owned = found.taskId !== null ? tasks.has(found.taskId) && found.automationId === null : found.automationId !== null && automations.has(found.automationId);
+    if (!owned) problem(`session ${found.id} belongs to no task or automation of the bundle, or to both`);
+    if ((found.run !== null) !== (found.automationId !== null)) problem(`session ${found.id} is a run of no automation, or an automation's session that is no run`);
+    if (found.run !== null && (!knownActor(found.run.startedBy) || !knownActor(found.run.endedBy))) problem(`run ${found.id} names a record not in the bundle`);
     if (found.endedAt === null) problem(`session ${found.name} (${found.id}) has not ended`);
+  }
+  for (const found of records.firings) {
+    if (!automations.has(found.automationId) || (found.sessionId !== null && !sessions.has(found.sessionId))) problem(`firing ${found.id} names a record not in the bundle`);
   }
   for (const found of records.comments) {
     if (!tasks.has(found.taskId) || !knownActor(found.author)) problem(`comment ${found.id} names a record not in the bundle`);
   }
   for (const file of records.folderFiles) {
     if (!tasks.has(file.taskId) || !knownActor(file.addedBy)) problem(`folder file ${file.path} of task ${file.taskId} names a record not in the bundle`);
+  }
+  for (const file of records.automationFiles) {
+    if (!automations.has(file.automationId) || !knownActor(file.addedBy)) {
+      problem(`folder file ${file.path} of automation ${file.automationId} names a record not in the bundle`);
+    }
   }
   for (const entry of records.events) {
     const assignee = entry.event.kind === "assignee" ? entry.event.personId : null;

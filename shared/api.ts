@@ -137,18 +137,22 @@ export interface FolderFile {
 export type SessionRuntime = "container" | "host";
 
 /**
- * One agent run on a task: it keeps every chat started in it after it ends; while it runs it
- * has a workspace, a worktree of the task's branch and its agent's processes (a container,
- * or the host) on `machine`.
+ * One agent run on a task or an automation (SESSION-5: exactly one of `taskId` and
+ * `automationId` is set): it keeps every chat started in it after it ends; while it runs it
+ * has a workspace, a worktree of its branch and its agent's processes (a container, or the
+ * host) on `machine`.
  */
 export interface Session {
   id: string;
   projectId: string;
-  taskId: string;
-  /** The task's title when the session started. */
+  /** The task it works on; null for a run of an automation. */
+  taskId: string | null;
+  /** AUTO-9: the automation it is a run of; null for a task's session. */
+  automationId: string | null;
+  /** The task's title, or the automation's name, when the session started. */
   name: string;
   branch: string | null;
-  /** The ref the branch was created from; its merge base with the branch is where the task's work starts. */
+  /** The ref the branch was created from; its merge base with the branch is where the session's work starts. */
   baseRef: string | null;
   machine: string | null;
   runtime: SessionRuntime;
@@ -158,6 +162,110 @@ export interface Session {
   model: string | null;
   startedAt: number;
   endedAt: number | null;
+  /** What a run of an automation has besides a session's fields; null for a task's session. */
+  run: Run | null;
+}
+
+/** AUTO-1: how a run ends: `finish` (the default) or `review`, waiting for a person (AUTO-10). */
+export type EndMode = "finish" | "review";
+
+/**
+ * AUTO-1: what an automation runs (its instructions, with `model`), when (its triggers), and
+ * how its runs end. `slug` names its runs' branches, `am/<slug>-<run>` (AUTO-9); an automation
+ * that is off (`enabled` false) starts no runs.
+ */
+export interface Automation {
+  id: string;
+  projectId: string;
+  name: string;
+  slug: string;
+  instructions: string;
+  /** omp model of its runs; null: omp's default. */
+  model: string | null;
+  endMode: EndMode;
+  /** AUTO-14: a run that reaches it is stopped. */
+  timeLimitMinutes: number;
+  enabled: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * AUTO-2, AUTO-8: when an automation fires: a cron schedule in `timezone`, optionally with a
+ * guard (code) and a check (a prompt), each a file of the automation's folder.
+ */
+export interface Trigger {
+  id: string;
+  automationId: string;
+  /** Five fields: minute, hour, day of month, month, day of week. */
+  cron: string;
+  /** IANA time zone the schedule is read in, e.g. Europe/Budapest. */
+  timezone: string;
+  guardPath: string | null;
+  checkPath: string | null;
+  createdAt: number;
+}
+
+/**
+ * How a run ended; null on a run that has not. `ended`: a person ended its session before
+ * anything else said how it went.
+ */
+export type RunOutcome = "finished" | "review" | "timed_out" | "failed" | "ended";
+
+/** AUTO-9: a session of an automation is one of its runs. */
+export interface Run {
+  /** Who started it: a person or an agent ("run now"); null: one of its triggers fired. */
+  startedBy: Actor | null;
+  /** What its trigger's guard and check found, which its prompt holds (AUTO-13); empty for "run now". */
+  triggerContext: string;
+  outcome: RunOutcome | null;
+  /** PERSON-1: who ended its session; null while it runs, or when it ended on its own. */
+  endedBy: Actor | null;
+}
+
+/** What a trigger's guard or check said at a firing (AUTO-8). */
+export interface FiringVerdict {
+  passed: boolean;
+  /** The guard's output, or the check's answer and why. */
+  output: string;
+}
+
+/**
+ * AUTO-8: what became of a trigger's scheduled time: a run started, or why not (the
+ * automation was off, a run was still going, the guard or the check said no, or the run's
+ * start failed).
+ */
+export type FiringOutcome = "started" | "off" | "running" | "guard" | "check" | "failed";
+
+/** AUTO-2, AUTO-8: one scheduled time of a trigger, fired at most once (unique per trigger and time). */
+export interface Firing {
+  id: string;
+  automationId: string;
+  /** The trigger that fired; it may have been removed since. */
+  triggerId: string;
+  scheduledAt: number;
+  firedAt: number;
+  /** Null: the trigger has no guard, or did not get to it. */
+  guard: FiringVerdict | null;
+  check: FiringVerdict | null;
+  outcome: FiringOutcome;
+  /** The run it started (a session id). */
+  sessionId: string | null;
+}
+
+/** An automation as its project's list shows it. */
+export interface AutomationSummary {
+  automation: Automation;
+  triggers: Trigger[];
+  /** Its running run (AUTO-9: a firing while one goes is skipped). */
+  sessionId: string | null;
+}
+
+/** An automation's page: the automation, its triggers, and its runs, newest first. */
+export interface AutomationDetail {
+  automation: Automation;
+  triggers: Trigger[];
+  runs: Session[];
 }
 
 export interface TopicLink {
@@ -229,12 +337,15 @@ export interface EndedSession {
 }
 
 /**
- * STORE-6: a task's work that moving its project would leave on the source machine: its
- * snapshot (SESSION-9) and a stopped session's uncommitted files, which the move deletes, and
- * commits of its branch no remote has, which stay on that machine's branch.
+ * STORE-6: a task's or a run's work that moving its project would leave on the source machine:
+ * its snapshot (SESSION-9) and a stopped session's uncommitted files, which the move deletes,
+ * and commits of its branch no remote has, which stay on that machine's branch.
  */
 export interface MoveLeftBehind {
-  taskId: string;
+  /** The task whose work it is; null for a run's. */
+  taskId: string | null;
+  /** The run (a session of an automation) whose work it is; null for a task's. */
+  runId: string | null;
   title: string;
   snapshot: boolean;
   uncommitted: string[];
@@ -248,5 +359,5 @@ export interface MoveReceipt {
   digest: string;
   /** People this store did not have, added for the records that name them. */
   added: Person[];
-  counts: { topics: number; tasks: number; comments: number; sessions: number; files: number; chats: number };
+  counts: { topics: number; tasks: number; automations: number; comments: number; sessions: number; files: number; chats: number };
 }

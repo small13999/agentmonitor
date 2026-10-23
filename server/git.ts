@@ -111,12 +111,12 @@ export async function branchChanges(repo: string, ref: string, baseRef: string):
   return { commits, files };
 }
 
-/** SESSION-9: where a task's latest snapshot lives; a ref outside refs/heads and refs/tags, so pushes leave it behind. */
+/** SESSION-9: where a task's latest snapshot lives, or a run's (AUTO-9), by its session's id; a ref outside refs/heads and refs/tags, so pushes leave it behind. */
 export function snapshotRef(taskId: string): string {
   return `refs/agentmonitor/snapshots/${taskId}`;
 }
 
-/** SESSION-9, STORE-6: the task's snapshot refs, its latest and those kept beside it when they did not apply cleanly. */
+/** SESSION-9, STORE-6: a task's or a run's snapshot refs, its latest and those kept beside it when they did not apply cleanly. */
 export async function taskSnapshots(repo: string, taskId: string): Promise<string[]> {
   return (await git(repo, ["for-each-ref", "--format=%(refname)", `${snapshotRef(taskId)}*`])).split("\n").filter(Boolean);
 }

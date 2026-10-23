@@ -38,7 +38,9 @@ export async function taskChanges(
   const mine = new Set([...(committed?.files.map((file) => file.path) ?? []), ...(uncommitted ?? [])]);
   const overlaps = otherChanges.flatMap(({ session, git }) => {
     const files = (git?.changedFiles ?? []).filter((file) => mine.has(file));
-    return files.length === 0 ? [] : [{ taskId: session.taskId, title: store.getTask(principal, session.taskId).task.title, files }];
+    // An automation's run (AUTO-9) is no task to point to.
+    if (files.length === 0 || session.taskId === null) return [];
+    return [{ taskId: session.taskId, title: store.getTask(principal, session.taskId).task.title, files }];
   });
   return { branch: task.branch, baseRef: task.baseRef, committed, uncommitted, pullRequests, overlaps };
 }

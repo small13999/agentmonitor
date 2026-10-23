@@ -16,6 +16,8 @@ export interface Launch {
   model: string | null;
   /** omp session id to resume (`tern acp --resume`); null: a new session. */
   resume: string | null;
+  /** The new chat's first prompt (`tern acp --prompt`), for an automation's run (AUTO-9); null: none. */
+  prompt: string | null;
   /** Origin allowed to open Tern's web socket; the gateway's Tern proxy presents it. */
   ternOrigin: string;
   /** Where Tern's web client listens. */
@@ -138,6 +140,7 @@ export async function startSession(paths: SessionPaths): Promise<void> {
   const chat = ["env", ...chatEnv, "tern", "acp", AGENT_ID];
   if (launch.model !== null) chat.push("--model", launch.model);
   if (launch.resume !== null) chat.push("--resume", launch.resume);
+  else if (launch.prompt !== null) chat.push("--prompt", launch.prompt);
   execFileSync("tern", ["new", "session", "workspace", "--cwd", launch.cwd, "--keep-open", "--", ...chat], { stdio: "inherit" });
 
   const web = spawn("tern", [

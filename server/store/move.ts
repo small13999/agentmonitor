@@ -9,14 +9,14 @@ import { branchExists, git, taskSnapshots, uncommittedFiles, unpushedCommits } f
 import type { WorkspaceDirs } from "../runtime/runtime.ts";
 import { chatCwd } from "../transcript.ts";
 import { projectRecords, type ProjectRecords } from "./bundle.ts";
-import type { TaskFolders } from "./folders.ts";
+import type { Folders } from "./folders.ts";
 import { FileResponse } from "./http.ts";
-import { StoreError, type Principal, type Session, type Store } from "./store.ts";
+import { runShortId, StoreError, type FolderOwner, type Principal, type Session, type Store } from "./store.ts";
 
 /** What moving a project needs of its gateway. */
 export interface MoveHost {
   store: Store;
-  folders: TaskFolders;
+  folders: Folders;
   dirs(sessionId: string): WorkspaceDirs;
   /** Whether the session's agent runs; where sessions have no workspaces, every session not ended does. */
   running(session: Session): Promise<boolean>;
@@ -54,10 +54,11 @@ function place(from: string, to: string): void {
 
 /**
  * STORE-6: moving a project to another store. The source exports the project as one bundle, a
- * .tar.gz of `bundle.json` (its records, ProjectRecords), `folders/<task id>/…` (its tasks'
- * folders), and `chats/<session id>/{sessions,blobs}/…` (its sessions' chats). The target
- * receives the bundle in parts, which pass any proxy's request size limit, and imports it.
- * The source deletes the project only once the target confirms it holds what was exported.
+ * .tar.gz of `bundle.json` (its records, ProjectRecords), `folders/<task or automation id>/…`
+ * (its tasks' and automations' folders), and `chats/<session id>/{sessions,blobs}/…` (its
+ * sessions' chats, runs' too). The target receives the bundle in parts, which pass any proxy's
+ * request size limit, and imports it. The source deletes the project only once the target
+ * confirms it holds what was exported.
  */
 export class ProjectMoves {
   private readonly host: MoveHost;
@@ -71,26 +72,46 @@ export class ProjectMoves {
 
   /** The project's records as a bundle holds them, its folders read first (FOLDER-3: the directory is what counts). */
   private records(principal: Principal, projectId: string): { records: ProjectRecords; json: string } {
-    for (const { task } of this.host.store.listTasks(principal, projectId)) this.host.folders.sync(task.id);
+    for (const { task } of this.host.store.listTasks(principal, projectId)) this.host.folders.sync({ kind: "task", id: task.id });
+    for (const { automation } of this.host.store.listAutomations(principal, projectId)) this.host.folders.sync({ kind: "automation", id: automation.id });
     const records = this.host.store.projectRecords(principal, projectId);
     return { records, json: `${JSON.stringify(records, null, 1)}\n` };
   }
 
-  /** The work of each task that a move leaves behind on this machine; see MoveLeftBehind. */
+  /** The work of each task and each automation's run that a move leaves behind on this machine; see MoveLeftBehind. */
   private async leftBehind(principal: Principal, repo: string, projectId: string, stopped: Session[]): Promise<MoveLeftBehind[]> {
+    const { store } = this.host;
+    const owners = [
+      ...store.listTasks(principal, projectId).map(({ task }) => ({
+        taskId: task.id,
+        runId: null,
+        // SESSION-9: a task's snapshots go by its id, a run's by its session's (AUTO-9).
+        snapshots: task.id,
+        title: task.title,
+        branch: task.branch,
+        baseRef: task.baseRef,
+        session: stopped.find((candidate) => candidate.taskId === task.id && !candidate.checkout),
+      })),
+      ...store.listAutomations(principal, projectId).flatMap(({ automation }) => store.listRuns(principal, automation.id).map((run) => ({
+        taskId: null,
+        runId: run.id,
+        snapshots: run.id,
+        title: `${automation.name}, run ${runShortId(run.id)}`,
+        branch: run.branch,
+        baseRef: run.baseRef,
+        session: run.endedAt === null ? run : undefined,
+      }))),
+    ];
     const found: MoveLeftBehind[] = [];
-    for (const { task } of this.host.store.listTasks(principal, projectId)) {
-      const session = stopped.find((candidate) => candidate.taskId === task.id && !candidate.checkout);
+    for (const { taskId, runId, snapshots, title, branch, baseRef, session } of owners) {
       const worktree = session === undefined ? null : this.host.dirs(session.id).worktree;
       try {
         const uncommitted = worktree !== null && existsSync(worktree) ? await uncommittedFiles(worktree) : [];
-        const snapshot = (await taskSnapshots(repo, task.id)).length > 0;
-        const unpushed = task.branch !== null && task.baseRef !== null && (await branchExists(repo, task.branch))
-          ? await unpushedCommits(repo, task.branch, task.baseRef)
-          : [];
-        if (snapshot || uncommitted.length > 0 || unpushed.length > 0) found.push({ taskId: task.id, title: task.title, snapshot, uncommitted, unpushed });
+        const snapshot = (await taskSnapshots(repo, snapshots)).length > 0;
+        const unpushed = branch !== null && baseRef !== null && (await branchExists(repo, branch)) ? await unpushedCommits(repo, branch, baseRef) : [];
+        if (snapshot || uncommitted.length > 0 || unpushed.length > 0) found.push({ taskId, runId, title, snapshot, uncommitted, unpushed });
       } catch (cause) {
-        throw new StoreError(500, `could not read the work of ${task.title}: ${String(cause)}`);
+        throw new StoreError(500, `could not read the work of ${title}: ${String(cause)}`);
       }
     }
     return found;
@@ -134,7 +155,7 @@ export class ProjectMoves {
     if (repo !== null && existsSync(repo) && !confirm) {
       const leftBehind = await this.leftBehind(principal, repo, projectId, open);
       if (leftBehind.length > 0) {
-        throw new StoreError(409, `tasks of ${project.name} have work that does not move: ${leftBehind.map((task) => task.title).join(", ")}; move with confirm to leave it behind`, {
+        throw new StoreError(409, `tasks and runs of ${project.name} have work that does not move: ${leftBehind.map((left) => left.title).join(", ")}; move with confirm to leave it behind`, {
           leftBehind,
         });
       }
@@ -146,7 +167,11 @@ export class ProjectMoves {
       mkdirSync(join(staging, "folders"), { recursive: true });
       mkdirSync(join(staging, "chats"));
       writeFileSync(join(staging, "bundle.json"), json);
-      for (const file of records.folderFiles) place(join(folders.dir(file.taskId), file.path), join(staging, "folders", file.taskId, file.path));
+      const files = [
+        ...records.folderFiles.map((file): [FolderOwner, string] => [{ kind: "task", id: file.taskId }, file.path]),
+        ...records.automationFiles.map((file): [FolderOwner, string] => [{ kind: "automation", id: file.automationId }, file.path]),
+      ];
+      for (const [owner, path] of files) place(join(folders.dir(owner), path), join(staging, "folders", owner.id, path));
       for (const session of records.sessions) {
         for (const { from, to } of this.chats(session, project)) place(from, join(staging, "chats", session.id, to));
       }
@@ -227,7 +252,7 @@ export class ProjectMoves {
       const listed = (path: string) => (existsSync(join(staging, path)) ? readdirSync(join(staging, path)) : []);
       const unknown = [
         ...listed("").filter((name) => !["bundle.json", "folders", "chats"].includes(name)),
-        ...listed("folders").filter((id) => !records.tasks.some((task) => task.id === id)).map((id) => `folders/${id}`),
+        ...listed("folders").filter((id) => !records.tasks.some((task) => task.id === id) && !records.automations.some((found) => found.id === id)).map((id) => `folders/${id}`),
         ...listed("chats").flatMap((id) => records.sessions.some((session) => session.id === id)
           ? listed(`chats/${id}`).filter((name) => !CHAT_DIRS.includes(name)).map((name) => `chats/${id}/${name}`)
           : [`chats/${id}`]),
@@ -238,11 +263,13 @@ export class ProjectMoves {
       }
 
       const { project, added } = store.importProject(principal, records, repoPath);
-      const placed: string[] = [];
+      const placed: FolderOwner[] = [];
       try {
-        for (const taskId of listed("folders")) {
-          folders.adopt(taskId, join(staging, "folders", taskId), records.folderFiles.filter((found) => found.taskId === taskId));
-          placed.push(taskId);
+        for (const id of listed("folders")) {
+          const owner: FolderOwner = records.tasks.some((task) => task.id === id) ? { kind: "task", id } : { kind: "automation", id };
+          const files = owner.kind === "task" ? records.folderFiles.filter((found) => found.taskId === id) : records.automationFiles.filter((found) => found.automationId === id);
+          folders.adopt(owner, join(staging, "folders", id), files);
+          placed.push(owner);
         }
         for (const id of listed("chats")) {
           const agent = join(this.host.dirs(id).ompHome, "agent");
@@ -251,7 +278,7 @@ export class ProjectMoves {
         }
       } catch (cause) {
         store.deleteProject(principal, project.id);
-        for (const taskId of placed) folders.delete(taskId);
+        for (const owner of placed) folders.delete(owner);
         for (const id of listed("chats")) rmSync(this.host.dirs(id).root, { recursive: true, force: true });
         throw cause;
       }
@@ -262,9 +289,10 @@ export class ProjectMoves {
         counts: {
           topics: records.topics.length,
           tasks: records.tasks.length,
+          automations: records.automations.length,
           comments: records.comments.length,
           sessions: records.sessions.length,
-          files: records.folderFiles.length,
+          files: records.folderFiles.length + records.automationFiles.length,
           chats: listed("chats").length,
         },
       };
@@ -288,12 +316,14 @@ export class ProjectMoves {
       throw new StoreError(409, `${project.name} changed here since it was exported, so it stays here; the other store holds it as it was exported`);
     }
     store.deleteProject(principal, projectId);
-    for (const task of records.tasks) folders.delete(task.id);
+    for (const task of records.tasks) folders.delete({ kind: "task", id: task.id });
+    for (const automation of records.automations) folders.delete({ kind: "automation", id: automation.id });
     for (const session of records.sessions) rmSync(this.host.dirs(session.id).root, { recursive: true, force: true });
     const repo = this.host.repo(project);
     if (repo !== null && existsSync(repo)) {
-      for (const task of records.tasks) {
-        for (const ref of await taskSnapshots(repo, task.id)) await git(repo, ["update-ref", "-d", ref]);
+      // SESSION-9: a task's snapshots go by its id, a run's by its session's (AUTO-9).
+      for (const id of [...records.tasks.map((task) => task.id), ...records.sessions.filter((session) => session.taskId === null).map((session) => session.id)]) {
+        for (const ref of await taskSnapshots(repo, id)) await git(repo, ["update-ref", "-d", ref]);
       }
     }
     return { project };

@@ -2,7 +2,8 @@
 // or on the host. Talks to the session's store socket; the socket identifies the session, so
 // no credentials. STORE-5: what the UI shows, `am` shows, from the same store routes; what only
 // people may do (start or end sessions, finish tasks, add people, project settings, Cloudflare
-// writes) has no command.
+// writes, deleting automations) has no command. AUTO-15: agents create, change, and run
+// automations, so they can set one up with a person.
 import { execFileSync } from "node:child_process";
 import { createReadStream, createWriteStream, readFileSync, statSync } from "node:fs";
 import { request, type IncomingMessage } from "node:http";
@@ -14,7 +15,8 @@ import type { Actor, Card, ChangedFile, HistoryEntry, Person, Project, PullReque
 
 const USAGE = `usage: am [--json] COMMAND [--task ID]
 
-  whoami                              this session, its task, and its project
+  whoami                              this session, its task (or automation and run), and its
+                                      project
   task show                           the task: description, state, assignee, topics, status,
                                       and its sessions
   task status                         print the task's status; first line is its revision
@@ -50,8 +52,10 @@ const USAGE = `usage: am [--json] COMMAND [--task ID]
                                       REV is the revision you read; a stale REV is refused
   topic link NAME...                  link the task to topics
   topic unlink NAME...                unlink the task from topics
-  session show [ID]                   a session, its task, and its state (default: this one)
-  folder                              the files in the task's folder: who added each, when
+  session show [ID]                   a session, its task or automation, and its state
+                                      (default: this one)
+  folder                              the files in the task's folder (a run's: its
+                                      automation's), who added each, when
   folder add FILE [PATH]              put FILE into the folder as PATH (default: its name),
                                       replacing a file there
   folder get PATH [FILE]              write the folder's file PATH to FILE (default: stdout)
@@ -60,12 +64,35 @@ const USAGE = `usage: am [--json] COMMAND [--task ID]
   project show                        the project's settings: name, repository, and whether
                                       it allows host sessions
 
+  automation list                     the project's automations: on or off, triggers, and
+                                      whether a run is going
+  automation show [NAME]              an automation: its fields, triggers, instructions, and
+                                      runs (default: the one this run serves)
+  automation create NAME [FIELDS]     create an automation (stdin: its instructions)
+  automation set NAME [FIELDS] [--name NEW] [--instructions]
+                                      change an automation's fields; --instructions replaces
+                                      its instructions with stdin
+      FIELDS: --model MODEL|default --end-mode finish|review --time-limit MINUTES
+              --on|--off --slug SLUG (its runs' branches: am/SLUG-RUN)
+  automation trigger add NAME --cron "M H D MON WD" [--timezone TZ] [--guard PATH]
+                     [--check PATH]   add a schedule (default timezone Europe/Budapest);
+                                      guard and check are files of its folder
+  automation trigger set NAME TRIGGER [--cron C] [--timezone TZ] [--guard PATH|none]
+                     [--check PATH|none]
+                                      change a trigger (TRIGGER: its id, from show)
+  automation trigger remove NAME TRIGGER
+  automation run NAME                 run it now: a new session of the automation on its
+                                      own branch, its instructions as the first prompt
+  automation folder NAME [add FILE [PATH] | get PATH [FILE] | rm PATH]
+                                      the automation's folder, as folder above
+
   --task ID                           act on another task of this project instead of this
                                       session's (task, comments, comment, topic link/unlink,
-                                      folder)
+                                      folder); a run of an automation has no task of its own
 
-People start and end sessions, finish tasks, add people, change the project's settings, and
-allow Cloudflare writes in the app; ask them on the task (am comment) when that is needed.
+People start and end sessions, finish tasks, add people, change the project's settings,
+delete automations, and allow Cloudflare writes in the app; ask them on the task (am comment)
+when that is needed.
 
 environment: AM_SOCKET (default /run/agentmonitor/am.sock)`;
 
@@ -121,9 +148,14 @@ function envelopeOf(text: string): unknown {
   return envelope.data;
 }
 
-/** A file in the task's folder, as the store's routes name it. */
-function folderRoute(taskId: string, path: string): string {
-  return `/tasks/${taskId}/folder/${path.split("/").map(encodeURIComponent).join("/")}`;
+/** FOLDER-1: a file of the folder at `base` (`/tasks/<id>` or `/automations/<id>`), as the store's routes name it. */
+function folderRoute(base: string, path: string): string {
+  return `${base}/folder/${path.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+/** AUTO-9: how a run is named in its branch, `am/<slug>-<run>`: the start of its session's id. */
+function runShortId(sessionId: string): string {
+  return sessionId.slice(0, 8);
 }
 
 /**
@@ -419,18 +451,79 @@ function cardsOf(value: unknown): CardView[] {
   });
 }
 
+/** AUTO-1: an automation as am shows it. */
+interface Automation {
+  id: string;
+  name: string;
+  slug: string;
+  instructions: string;
+  model: string | null;
+  endMode: string;
+  timeLimitMinutes: number;
+  enabled: boolean;
+}
+
+function automationOf(value: unknown): Automation {
+  if (!isRecord(value) || typeof value.id !== "string" || typeof value.name !== "string" || typeof value.slug !== "string"
+    || typeof value.instructions !== "string" || (value.model !== null && typeof value.model !== "string") || typeof value.endMode !== "string"
+    || typeof value.timeLimitMinutes !== "number" || typeof value.enabled !== "boolean") {
+    throw unexpected("an automation");
+  }
+  return {
+    id: value.id,
+    name: value.name,
+    slug: value.slug,
+    instructions: value.instructions,
+    model: value.model,
+    endMode: value.endMode,
+    timeLimitMinutes: value.timeLimitMinutes,
+    enabled: value.enabled,
+  };
+}
+
+/** AUTO-8: a trigger of an automation: a schedule, with an optional guard and check in its folder. */
+interface Trigger {
+  id: string;
+  cron: string;
+  timezone: string;
+  guardPath: string | null;
+  checkPath: string | null;
+}
+
+function triggerOf(value: unknown): Trigger {
+  if (!isRecord(value) || typeof value.id !== "string" || typeof value.cron !== "string" || typeof value.timezone !== "string"
+    || (value.guardPath !== null && typeof value.guardPath !== "string") || (value.checkPath !== null && typeof value.checkPath !== "string")) {
+    throw unexpected("a trigger");
+  }
+  return { id: value.id, cron: value.cron, timezone: value.timezone, guardPath: value.guardPath, checkPath: value.checkPath };
+}
+
+function triggerLine(trigger: Trigger): string {
+  const guard = trigger.guardPath === null ? "" : `, guard ${trigger.guardPath}`;
+  const check = trigger.checkPath === null ? "" : `, check ${trigger.checkPath}`;
+  return `${trigger.id}\t${trigger.cron} (${trigger.timezone})${guard}${check}`;
+}
+
 interface Me {
   kind: string;
   project: { id: string; name: string };
   session: Session;
-  task: Task;
+  /** SESSION-5: the session's task, or for a run of an automation, its automation; the other is null. */
+  task: Task | null;
+  automation: Automation | null;
 }
 
 async function whoami(): Promise<Me> {
   const me = await call("GET", "/me");
   if (!isRecord(me) || me.kind !== "agent") throw new CliError("am must run inside a session's container");
   if (!isRecord(me.project) || typeof me.project.id !== "string" || typeof me.project.name !== "string") throw unexpected("a project");
-  return { kind: me.kind, project: { id: me.project.id, name: me.project.name }, session: sessionOf(me.session), task: taskOf(me.task) };
+  return {
+    kind: me.kind,
+    project: { id: me.project.id, name: me.project.name },
+    session: sessionOf(me.session),
+    task: me.task === null ? null : taskOf(me.task),
+    automation: me.automation === null ? null : automationOf(me.automation),
+  };
 }
 
 interface Comment {
@@ -568,6 +661,237 @@ function taskOption(args: string[]): { task: string | null; rest: string[] } {
   return { task, rest: args.toSpliced(at, 2) };
 }
 
+/** `--option VALUE` options and `--switch` switches among a command's arguments; the other arguments stay in order. */
+function optionsOf(args: string[], valued: string[], switches: string[]): { values: Map<string, string>; switches: Set<string>; rest: string[] } {
+  const values = new Map<string, string>();
+  const on = new Set<string>();
+  const rest: string[] = [];
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index];
+    if (valued.includes(arg)) {
+      const value = args[index + 1];
+      if (value === undefined) throw new CliError(`${arg} needs a value`);
+      values.set(arg, value);
+      index++;
+    } else if (switches.includes(arg)) {
+      on.add(arg);
+    } else if (arg.startsWith("--")) {
+      throw new CliError(`unknown option ${arg}`);
+    } else {
+      rest.push(arg);
+    }
+  }
+  return { values, switches: on, rest };
+}
+
+/** FOLDER-1, AUTO-1: `am folder` and `am automation folder NAME`, on the folder at `base`; false for no folder command. */
+async function folderCommand(json: boolean, me: Me, base: string, command: string | undefined, rest: string[]): Promise<boolean> {
+  if (command === undefined) {
+    const files = folderFilesOf(await call("GET", `${base}/folder`));
+    const people = peopleOf(await call("GET", "/people"));
+    const lines = files.map((file) => {
+      const who = file.addedBy === null ? "unknown" : actorName(file.addedBy, people, me);
+      return `${file.path}\t${file.size} bytes\tadded by ${who}\t${new Date(file.addedAt).toISOString()}`;
+    });
+    print(json, files, () => lines.length === 0 ? "the folder is empty" : lines.join("\n"));
+    return true;
+  }
+  if (command === "add" && (rest.length === 1 || rest.length === 2)) {
+    if (!statSync(rest[0], { throwIfNoEntry: false })?.isFile()) throw new CliError(`${rest[0]} is not a file`);
+    const added = folderFileOf(await transfer("PUT", folderRoute(base, rest[1] ?? basename(rest[0])), rest[0], null));
+    print(json, added, () => `added ${added.path} (${added.size} bytes)`);
+    return true;
+  }
+  if (command === "get" && (rest.length === 1 || rest.length === 2)) {
+    const target = rest[1];
+    await transfer("GET", folderRoute(base, rest[0]), null, () => target === undefined ? process.stdout : createWriteStream(target));
+    return true;
+  }
+  if (command === "rm" && rest.length === 1) {
+    const left = folderFilesOf(await call("DELETE", folderRoute(base, rest[0])));
+    print(json, left, () => `deleted ${rest[0]}; ${left.length} file(s) left`);
+    return true;
+  }
+  return false;
+}
+
+/** AUTO-15: the automation a name, slug, or id stands for, among the project's. */
+async function automationByName(me: Me, name: string): Promise<Automation> {
+  const listed = listOf(await call("GET", `/projects/${me.project.id}/automations`), "a list of automations", (item) => automationOf(isRecord(item) ? item.automation : undefined));
+  const found = listed.find((candidate) => candidate.id === name || candidate.name === name || candidate.slug === name);
+  if (found !== undefined) return found;
+  const known = listed.map((candidate) => `"${candidate.name}"`).join(", ") || "none";
+  throw new CliError(`no automation "${name}" in ${me.project.name} (automations: ${known}); create one with: am automation create NAME`);
+}
+
+/**
+ * AUTO-1: the fields `create` and `set` take as options, as the store's automation routes name
+ * them; `set` also renames (`--name`) and replaces the instructions with stdin (`--instructions`).
+ */
+function automationFields(args: string[], setting: boolean): { fields: Record<string, unknown>; rest: string[] } {
+  const options = optionsOf(
+    args,
+    ["--model", "--end-mode", "--time-limit", "--slug", ...(setting ? ["--name"] : [])],
+    ["--on", "--off", ...(setting ? ["--instructions"] : [])],
+  );
+  const fields: Record<string, unknown> = {};
+  const name = options.values.get("--name");
+  if (name !== undefined) fields.name = name;
+  const model = options.values.get("--model");
+  if (model !== undefined) fields.model = model === "default" ? null : model;
+  const endMode = options.values.get("--end-mode");
+  if (endMode !== undefined) fields.endMode = endMode;
+  const limit = options.values.get("--time-limit");
+  if (limit !== undefined) {
+    const minutes = Number(limit);
+    if (!Number.isInteger(minutes) || minutes < 1) throw new CliError("--time-limit is a number of whole minutes");
+    fields.timeLimitMinutes = minutes;
+  }
+  const slug = options.values.get("--slug");
+  if (slug !== undefined) fields.slug = slug;
+  if (options.switches.has("--on") && options.switches.has("--off")) throw new CliError("--on and --off contradict each other");
+  if (options.switches.has("--on")) fields.enabled = true;
+  if (options.switches.has("--off")) fields.enabled = false;
+  if (options.switches.has("--instructions")) fields.instructions = readFileSync(0, "utf8");
+  return { fields, rest: options.rest };
+}
+
+/** AUTO-8: a trigger's fields as options; `none` removes a guard or a check. */
+function triggerFields(args: string[]): { fields: Record<string, unknown>; rest: string[] } {
+  const options = optionsOf(args, ["--cron", "--timezone", "--guard", "--check"], []);
+  const fields: Record<string, unknown> = {};
+  const cron = options.values.get("--cron");
+  if (cron !== undefined) fields.cron = cron;
+  const timezone = options.values.get("--timezone");
+  if (timezone !== undefined) fields.timezone = timezone;
+  const guard = options.values.get("--guard");
+  if (guard !== undefined) fields.guardPath = guard === "none" ? null : guard;
+  const check = options.values.get("--check");
+  if (check !== undefined) fields.checkPath = check === "none" ? null : check;
+  return { fields, rest: options.rest };
+}
+
+function automationText(automation: Automation): string {
+  return [
+    `automation ${automation.name} (${automation.id})`,
+    `state      ${automation.enabled ? "on" : "off: it starts no runs"}`,
+    `model      ${automation.model ?? "default"}`,
+    `end mode   ${automation.endMode}`,
+    `time limit ${automation.timeLimitMinutes} minutes`,
+    `branches   am/${automation.slug}-<run>`,
+  ].join("\n");
+}
+
+/** AUTO-15: `am automation …`; false for no automation command. */
+async function automationCommand(json: boolean, me: Me, command: string | undefined, args: string[]): Promise<boolean> {
+  if (command === "list" && args.length === 0) {
+    const listed = await call("GET", `/projects/${me.project.id}/automations`);
+    const summaries = listOf(listed, "a list of automations", (item) => {
+      if (!isRecord(item) || (item.sessionId !== null && typeof item.sessionId !== "string")) throw unexpected("an automation");
+      return { automation: automationOf(item.automation), triggers: listOf(item.triggers, "a list of triggers", triggerOf), sessionId: item.sessionId };
+    });
+    print(json, listed, () => summaries.map(({ automation, triggers, sessionId }) => [
+      automation.id,
+      automation.enabled ? "on " : "off",
+      automation.name,
+      `${triggers.length} trigger(s)`,
+      sessionId === null ? "no run going" : `run ${runShortId(sessionId)} going (session ${sessionId})`,
+    ].join("\t")).join("\n") || "no automations");
+    return true;
+  }
+  if (command === "show" && args.length <= 1) {
+    const automation = args[0] === undefined ? me.automation : await automationByName(me, args[0]);
+    if (automation === null) throw new CliError("name the automation: am automation show NAME (am automation list)");
+    const detail = await call("GET", `/automations/${automation.id}`);
+    if (!isRecord(detail)) throw unexpected("an automation");
+    const shown = automationOf(detail.automation);
+    const triggers = listOf(detail.triggers, "a list of triggers", triggerOf);
+    const runs = listOf(detail.runs, "a list of runs", (item) => {
+      const outcome = isRecord(item) && isRecord(item.run) && typeof item.run.outcome === "string" ? item.run.outcome : null;
+      return { session: sessionOf(item), outcome };
+    });
+    print(json, detail, () => [
+      automationText(shown),
+      "",
+      "triggers:",
+      ...(triggers.length === 0 ? ["  (none: it runs only when someone runs it now)"] : triggers.map((trigger) => `  ${triggerLine(trigger)}`)),
+      "",
+      "instructions:",
+      shown.instructions.trimEnd() || "(none)",
+      "",
+      "runs:",
+      ...(runs.length === 0 ? ["  (none)"] : runs.map(({ session, outcome }) => [
+        `  ${session.id}`,
+        session.endedAt === null ? "going" : `ended ${new Date(session.endedAt).toISOString()}${outcome === null ? "" : ` (${outcome})`}`,
+        `started ${new Date(session.startedAt).toISOString()}`,
+        session.branch ?? "no branch",
+      ].join("\t"))),
+    ].join("\n"));
+    return true;
+  }
+  if (command === "create") {
+    const { fields, rest } = automationFields(args, false);
+    if (rest.length !== 1) return false;
+    const instructions = process.stdin.isTTY ? "" : readFileSync(0, "utf8");
+    const created = await call("POST", `/projects/${me.project.id}/automations`, { name: rest[0], instructions, ...fields });
+    const automation = automationOf(created);
+    print(json, created, () => `created automation "${automation.name}" (${automation.id}); add a schedule with: am automation trigger add "${automation.name}" --cron "…"`);
+    return true;
+  }
+  if (command === "set") {
+    const { fields, rest } = automationFields(args, true);
+    if (rest.length !== 1) return false;
+    if (Object.keys(fields).length === 0) throw new CliError("nothing to change: name a field to set (am help)");
+    const automation = await automationByName(me, rest[0]);
+    const updated = await call("PATCH", `/automations/${automation.id}`, fields);
+    print(json, updated, () => automationText(automationOf(updated)));
+    return true;
+  }
+  if (command === "trigger") {
+    const [action, ...more] = args;
+    const { fields, rest } = triggerFields(more);
+    if (action === "add" && rest.length === 1) {
+      if (fields.cron === undefined) throw new CliError("a trigger needs --cron \"MINUTE HOUR DAY MONTH WEEKDAY\"");
+      const automation = await automationByName(me, rest[0]);
+      const added = await call("POST", `/automations/${automation.id}/triggers`, fields);
+      print(json, added, () => `added trigger ${triggerLine(triggerOf(added))}`);
+      return true;
+    }
+    // A trigger's id names it in the store; the automation's name keeps it from changing another's.
+    const ownTrigger = async (name: string, triggerId: string): Promise<string> => {
+      const automation = await automationByName(me, name);
+      const detail = await call("GET", `/automations/${automation.id}`);
+      const triggers = listOf(isRecord(detail) ? detail.triggers : undefined, "a list of triggers", triggerOf);
+      if (!triggers.some((trigger) => trigger.id === triggerId)) throw new CliError(`automation "${automation.name}" has no trigger ${triggerId} (am automation show "${automation.name}")`);
+      return triggerId;
+    };
+    if (action === "set" && rest.length === 2) {
+      const updated = await call("PATCH", `/triggers/${await ownTrigger(rest[0], rest[1])}`, fields);
+      print(json, updated, () => `trigger ${triggerLine(triggerOf(updated))}`);
+      return true;
+    }
+    if (action === "remove" && rest.length === 2 && Object.keys(fields).length === 0) {
+      const removed = await call("DELETE", `/triggers/${await ownTrigger(rest[0], rest[1])}`);
+      print(json, removed, () => `removed trigger ${triggerOf(removed).id}`);
+      return true;
+    }
+    return false;
+  }
+  if (command === "run" && args.length === 1) {
+    const automation = await automationByName(me, args[0]);
+    const started = await call("POST", `/automations/${automation.id}/runs`, {});
+    const session = sessionOf(started);
+    print(json, started, () => `started run ${runShortId(session.id)} of "${automation.name}" (session ${session.id}) on ${session.branch ?? "no branch"}`);
+    return true;
+  }
+  if (command === "folder" && args.length >= 1) {
+    const automation = await automationByName(me, args[0]);
+    const [action, ...rest] = args.slice(1);
+    return folderCommand(json, me, `/automations/${automation.id}`, action, rest);
+  }
+  return false;
+}
+
 async function main(args: string[]): Promise<void> {
   const json = args[0] === "--json";
   const option = taskOption(json ? args.slice(1) : args);
@@ -577,12 +901,19 @@ async function main(args: string[]): Promise<void> {
     return;
   }
   const me = await whoami();
-  const taskId = option.task ?? me.task.id;
+  const ownTask = option.task ?? me.task?.id ?? null;
+  // SESSION-5: a run of an automation belongs to no task; task commands then name one.
+  const taskId = (): string => {
+    if (ownTask === null) throw new CliError("this session is a run of an automation and belongs to no task: name one with --task ID (am task search finds it)");
+    return ownTask;
+  };
 
   if (group === "whoami") {
     print(json, me, () => [
       `project ${me.project.name}`,
-      `task    ${me.task.title} (${me.task.id}, ${me.task.state})`,
+      me.task !== null
+        ? `task    ${me.task.title} (${me.task.id}, ${me.task.state})`
+        : `automation ${me.automation?.name ?? "unknown"} (${me.automation?.id ?? "unknown"}), run ${runShortId(me.session.id)}`,
       `session ${me.session.id}`,
       `branch  ${me.session.branch ?? "none"}`,
     ].join("\n"));
@@ -590,7 +921,7 @@ async function main(args: string[]): Promise<void> {
   }
 
   if (group === "task" && command === "show" && rest.length === 0) {
-    const detail = await call("GET", `/tasks/${taskId}`);
+    const detail = await call("GET", `/tasks/${taskId()}`);
     const { task, topics, sessions } = taskDetailOf(detail);
     const people = peopleOf(await call("GET", "/people"));
     const assignee = task.assigneeId === null ? "nobody" : people.find((person) => person.id === task.assigneeId)?.name ?? "someone no longer in the store";
@@ -618,46 +949,46 @@ async function main(args: string[]): Promise<void> {
     return;
   }
   if (group === "task" && command === "status" && rest.length === 0) {
-    const { task } = taskDetailOf(await call("GET", `/tasks/${taskId}`));
+    const { task } = taskDetailOf(await call("GET", `/tasks/${taskId()}`));
     print(json, task, () => `# revision ${task.statusRevision}\n${task.status}`.trimEnd());
     return;
   }
   if (group === "task" && command === "set-status" && rest.length === 2 && rest[0] === "--base") {
     const baseRevision = revisionOf(rest[1]);
     const status = readFileSync(0, "utf8");
-    const updated = taskOf(await call("PUT", `/tasks/${taskId}/status`, { status, baseRevision }));
+    const updated = taskOf(await call("PUT", `/tasks/${taskId()}/status`, { status, baseRevision }));
     print(json, updated, () => `the task's status is now revision ${updated.statusRevision}`);
     return;
   }
   if (group === "task" && command === "set-state" && rest.length === 1) {
-    const updated = taskOf(await call("PATCH", `/tasks/${taskId}`, { state: rest[0] }));
+    const updated = taskOf(await call("PATCH", `/tasks/${taskId()}`, { state: rest[0] }));
     print(json, updated, () => `the task is now ${updated.state}`);
     return;
   }
   if (group === "task" && command === "set-title" && rest.length === 1) {
-    const updated = taskOf(await call("PATCH", `/tasks/${taskId}`, { title: rest[0] }));
+    const updated = taskOf(await call("PATCH", `/tasks/${taskId()}`, { title: rest[0] }));
     print(json, updated, () => `the task is now titled "${updated.title}"`);
     return;
   }
   if (group === "task" && command === "set-description" && rest.length === 0) {
-    const updated = taskOf(await call("PATCH", `/tasks/${taskId}`, { description: readFileSync(0, "utf8") }));
+    const updated = taskOf(await call("PATCH", `/tasks/${taskId()}`, { description: readFileSync(0, "utf8") }));
     print(json, updated, () => "the task's description is replaced");
     return;
   }
   if (group === "task" && command === "assign" && rest.length === 1) {
     const people = peopleOf(await call("GET", "/people"));
     const assigneeId = assigneeOf(people, rest[0]);
-    const updated = taskOf(await call("PATCH", `/tasks/${taskId}`, { assigneeId }));
+    const updated = taskOf(await call("PATCH", `/tasks/${taskId()}`, { assigneeId }));
     const name = people.find((person) => person.id === updated.assigneeId)?.name;
     print(json, updated, () => name === undefined ? "the task is assigned to nobody" : `the task is assigned to ${name}`);
     return;
   }
   if (group === "task" && command === "history" && rest.length === 0) {
-    const listed = await call("GET", `/tasks/${taskId}/history`);
+    const listed = await call("GET", `/tasks/${taskId()}/history`);
     const history = listOf(listed, "a task's history", historyEntryOf);
     const [people, comments] = await Promise.all([
       call("GET", "/people").then(peopleOf),
-      call("GET", `/tasks/${taskId}/comments`).then((value) => listOf(value, "a comment list", commentOf)),
+      call("GET", `/tasks/${taskId()}/comments`).then((value) => listOf(value, "a comment list", commentOf)),
     ]);
     print(json, listed, () => history.map((entry) => [
       new Date(entry.at).toISOString(),
@@ -667,7 +998,7 @@ async function main(args: string[]): Promise<void> {
     return;
   }
   if (group === "task" && command === "changes" && rest.length === 0) {
-    const answered = await call("GET", `/tasks/${taskId}/changes`);
+    const answered = await call("GET", `/tasks/${taskId()}/changes`);
     const { branch, baseRef, committed, uncommitted, pullRequests, overlaps } = changesOf(answered);
     const indent = (lines: string[]) => lines.map((line) => `  ${line}`);
     print(json, answered, () => {
@@ -815,7 +1146,7 @@ async function main(args: string[]): Promise<void> {
     let topics: Topic[] = [];
     for (const name of rest) {
       const topic = await topicByName(me, name);
-      topics = topicsOf(await call(command === "link" ? "PUT" : "DELETE", `/tasks/${taskId}/topics/${topic.id}`));
+      topics = topicsOf(await call(command === "link" ? "PUT" : "DELETE", `/tasks/${taskId()}/topics/${topic.id}`));
     }
     print(json, topics, () => `task topics:\n${topicNames(topics)}`);
     return;
@@ -824,13 +1155,14 @@ async function main(args: string[]): Promise<void> {
   if (group === "session" && command === "show" && rest.length <= 1) {
     const detail = await call("GET", `/sessions/${rest[0] ?? me.session.id}`);
     const session = sessionOf(isRecord(detail) ? detail.session : undefined);
-    const task = taskOf(isRecord(detail) ? detail.task : undefined);
+    const task = isRecord(detail) && detail.task !== null ? taskOf(detail.task) : null;
+    const automation = isRecord(detail) && detail.automation !== null ? automationOf(detail.automation) : null;
     const card = session.endedAt === null
       ? cardsOf(await call("GET", `/projects/${session.projectId}/cards`)).find((candidate) => candidate.session.id === session.id)
       : undefined;
     print(json, { ...(isRecord(detail) ? detail : {}), card: card ?? null }, () => [
       `session ${session.id}`,
-      `task ${task.title} (${task.id}, ${task.state})`,
+      task !== null ? `task ${task.title} (${task.id}, ${task.state})` : `automation ${automation?.name ?? "unknown"} (${automation?.id ?? "unknown"}), run ${runShortId(session.id)}`,
       `branch ${session.branch ?? "none"}`,
       `machine ${session.machine ?? "unknown"} (${runsIn(session)})`,
       session.endedAt === null ? `running${card === undefined ? "" : `: ${LIGHT_LABEL[card.turn]}`}` : `ended ${new Date(session.endedAt).toISOString()}`,
@@ -839,35 +1171,17 @@ async function main(args: string[]): Promise<void> {
     return;
   }
 
-  if (group === "folder" && command === undefined) {
-    const files = folderFilesOf(await call("GET", `/tasks/${taskId}/folder`));
-    const people = peopleOf(await call("GET", "/people"));
-    const lines = files.map((file) => {
-      const who = file.addedBy === null ? "unknown" : actorName(file.addedBy, people, me);
-      return `${file.path}\t${file.size} bytes\tadded by ${who}\t${new Date(file.addedAt).toISOString()}`;
-    });
-    print(json, files, () => lines.length === 0 ? "the folder is empty" : lines.join("\n"));
-    return;
-  }
-  if (group === "folder" && command === "add" && (rest.length === 1 || rest.length === 2)) {
-    if (!statSync(rest[0], { throwIfNoEntry: false })?.isFile()) throw new CliError(`${rest[0]} is not a file`);
-    const added = folderFileOf(await transfer("PUT", folderRoute(taskId, rest[1] ?? basename(rest[0])), rest[0], null));
-    print(json, added, () => `added ${added.path} (${added.size} bytes)`);
-    return;
-  }
-  if (group === "folder" && command === "get" && (rest.length === 1 || rest.length === 2)) {
-    const target = rest[1];
-    await transfer("GET", folderRoute(taskId, rest[0]), null, () => target === undefined ? process.stdout : createWriteStream(target));
-    return;
-  }
-  if (group === "folder" && command === "rm" && rest.length === 1) {
-    const left = folderFilesOf(await call("DELETE", folderRoute(taskId, rest[0])));
-    print(json, left, () => `deleted ${rest[0]}; ${left.length} file(s) left`);
-    return;
+  if (group === "folder") {
+    // FOLDER-1, AUTO-1: the task's folder, or for a run its automation's.
+    const base = ownTask !== null ? `/tasks/${ownTask}` : me.automation !== null ? `/automations/${me.automation.id}` : null;
+    if (base === null) throw new CliError("this session has no folder");
+    if (await folderCommand(json, me, base, command, rest)) return;
   }
 
+  if (group === "automation" && await automationCommand(json, me, command, rest)) return;
+
   if (group === "comments" && command === undefined) {
-    const listed = await call("GET", `/tasks/${taskId}/comments`);
+    const listed = await call("GET", `/tasks/${taskId()}/comments`);
     const comments = listOf(listed, "a comment list", commentOf);
     const people = peopleOf(await call("GET", "/people"));
     print(json, listed, () => comments.length === 0 ? "no comments" : comments.map((comment) => [
@@ -877,7 +1191,7 @@ async function main(args: string[]): Promise<void> {
     return;
   }
   if (group === "comment" && command === undefined) {
-    const created = commentOf(await call("POST", `/tasks/${taskId}/comments`, { body: readFileSync(0, "utf8") }));
+    const created = commentOf(await call("POST", `/tasks/${taskId()}/comments`, { body: readFileSync(0, "utf8") }));
     print(json, created, () => `commented on the task (comment ${created.id})`);
     return;
   }

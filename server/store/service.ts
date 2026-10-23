@@ -5,7 +5,7 @@ import { userInfo } from "node:os";
 import { basename, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
-import type { Card, EndedSession, HistoryEntry, TaskChanges, UnpushedWork } from "../../shared/api.ts";
+import type { Automation, Card, EndedSession, HistoryEntry, TaskChanges, UnpushedWork } from "../../shared/api.ts";
 import { gatewayZone, hostOrigin } from "../../shared/hosts.ts";
 import { projectCards } from "../cards.ts";
 import { taskChanges } from "../changes.ts";
@@ -27,12 +27,12 @@ import {
 import { branchPullRequests } from "../github.ts";
 import { HostRuntime } from "../runtime/host.ts";
 import { CONTAINER_FOLDER, PodmanRuntime } from "../runtime/podman.ts";
-import type { Runtime, WorkspaceDirs } from "../runtime/runtime.ts";
+import type { LaunchInput, Runtime, WorkspaceDirs } from "../runtime/runtime.ts";
 import { newestTranscript } from "../transcript.ts";
-import { TaskFolders } from "./folders.ts";
+import { Folders } from "./folders.ts";
 import { ProjectMoves } from "./move.ts";
-import { handleStoreApi, type SessionInput, type StoreContext } from "./http.ts";
-import { Store, StoreError, type Principal, type Project, type Session, type SessionRuntime, type Task } from "./store.ts";
+import { handleStoreApi, type RunInput, type SessionInput, type StoreContext } from "./http.ts";
+import { folderOwnerOf, runShortId, Store, StoreError, type Principal, type Project, type Session, type SessionRuntime, type Task } from "./store.ts";
 
 type ServiceConfig = Pick<
   GatewayConfig,
@@ -67,7 +67,7 @@ function failure(cause: unknown): string {
  */
 export class StoreService implements StoreContext {
   readonly store: Store;
-  readonly folders: TaskFolders;
+  readonly folders: Folders;
   readonly moves: ProjectMoves;
   private readonly servers = new Map<string, Server>();
   /** Asking podman for a container's port takes a quarter second, so each page load would wait on it. */
@@ -83,7 +83,7 @@ export class StoreService implements StoreContext {
   constructor(stateDir: string, config: ServiceConfig) {
     this.store = new Store(join(stateDir, "store.sqlite"), userInfo().username);
     if (config.ownerEmail !== null) this.store.setOwnerEmail(config.ownerEmail);
-    this.folders = new TaskFolders(this.store, join(stateDir, "folders"));
+    this.folders = new Folders(this.store, join(stateDir, "folders"));
     this.root = join(stateDir, "sessions");
     this.runtimes = config.workspaceRuntime === "podman"
       ? {
@@ -199,23 +199,40 @@ export class StoreService implements StoreContext {
     const resume = newest === null ? null : /_([0-9a-f-]{36})\.jsonl$/.exec(basename(newest))?.[1] ?? null;
     this.forgetTernUpstream(session.id);
     try {
-      await runtime.launch({
-        checkout: session.checkout,
-        sessionId: session.id,
-        repoPath: project.repoPath,
-        dirs,
-        folder: this.folders.dir(session.taskId),
+      await this.launch(runtime, project.repoPath, project, session, {
         // A resumed chat keeps the model it last ran.
         model: resume === null ? session.model : null,
         resume,
-        ternOrigin: hostOrigin(gatewayZone(this.config.publicOrigin), { kind: "chat", sessionId: session.id }),
-        cloudflare: project.cloudflare.read,
-        taskContext: this.taskContext(session.taskId, { kind: "none" }, session.checkout ? project.repoPath : null, session.runtime),
+        // A run's instructions start its first chat only (AUTO-9): starting again goes on from where it was.
+        prompt: null,
+        taskContext: session.taskId === null
+          ? this.runContext(session)
+          : this.taskContext(session.taskId, { kind: "none" }, session.checkout ? project.repoPath : null, session.runtime),
       });
-      await this.ternAnswers(runtime, session.id);
     } catch (cause) {
       throw new StoreError(500, `could not start session ${session.name} again: ${failure(cause)}`);
     }
+  }
+
+  /** Launches the session's agent with the folder of its task or automation (FOLDER-3, AUTO-1) and waits until Tern answers. */
+  private async launch(
+    runtime: Runtime,
+    repoPath: string,
+    project: Project,
+    session: Session,
+    chat: Pick<LaunchInput, "model" | "resume" | "prompt" | "taskContext">,
+  ): Promise<void> {
+    await runtime.launch({
+      checkout: session.checkout,
+      sessionId: session.id,
+      repoPath,
+      dirs: this.dirs(session.id),
+      folder: this.folders.dir(folderOwnerOf(session)),
+      ternOrigin: hostOrigin(gatewayZone(this.config.publicOrigin), { kind: "chat", sessionId: session.id }),
+      cloudflare: project.cloudflare.read,
+      ...chat,
+    });
+    await this.ternAnswers(runtime, session.id);
   }
 
   /** Waits until the session's Tern web client answers; fails once the session stops or the time is up. */
@@ -279,7 +296,7 @@ export class StoreService implements StoreContext {
     const { task, topics } = this.store.getTask(human, taskId);
     const comments = this.store.listComments(human, taskId);
     const people = this.store.listPeople(human);
-    const folder = runtime === "container" ? CONTAINER_FOLDER : this.folders.dir(taskId);
+    const folder = runtime === "container" ? CONTAINER_FOLDER : this.folders.dir({ kind: "task", id: taskId });
     const sections = [
       "# Your task",
       checkout === null
@@ -314,6 +331,28 @@ export class StoreService implements StoreContext {
           `Conflicts are marked in the files where git could merge; the whole snapshot is kept at \`${restored.kept}\` (\`git diff ${restored.kept}^ ${restored.kept}\`).`,
       );
     }
+    return `${sections.join("\n\n")}\n`;
+  }
+
+  /**
+   * AUTO-9: what a run's agent is told besides its first prompt: the automation and the run it
+   * serves, the run's own branch, and the automation's folder, which all its runs share.
+   */
+  private runContext(run: Session): string {
+    const owner = folderOwnerOf(run);
+    const { automation } = this.store.getAutomation(this.store.ownerPrincipal(), owner.id);
+    const folder = run.runtime === "container" ? CONTAINER_FOLDER : this.folders.dir(owner);
+    const sections = [
+      "# Your automation",
+      `You serve the automation "${automation.name}" (id ${automation.id}): this session is its run ${runShortId(run.id)} (session id ${run.id}), ` +
+        `started ${run.run?.startedBy == null ? "by one of its triggers" : "by hand"}. It belongs to no task.`,
+      run.branch === null
+        ? "The run works on no branch."
+        : `The run works on its own branch \`${run.branch}\`, made for it from \`${run.baseRef ?? "the default branch"}\`; only what is committed and pushed to it outlives the run.`,
+      "The automation's instructions are this chat's first prompt. `am automation show` prints the automation as it is now.",
+      "## Folder",
+      `The automation's folder is the directory \`${folder}\`, outside the worktree and outside git. Every run of the automation shares it.`,
+    ];
     return `${sections.join("\n\n")}\n`;
   }
 
@@ -363,19 +402,12 @@ export class StoreService implements StoreContext {
         restored = await restoreSnapshot(repo, dirs.worktree, snapshotRef(task.id));
         started = { ...created, branch, baseRef };
       }
-      await runtime.launch({
-        checkout: created.checkout,
-        sessionId: created.id,
-        repoPath: repo,
-        dirs,
-        folder: this.folders.dir(task.id),
+      await this.launch(runtime, repo, project, started, {
         model: input.model ?? null,
         resume: null,
-        ternOrigin: hostOrigin(gatewayZone(this.config.publicOrigin), { kind: "chat", sessionId: created.id }),
-        cloudflare: project.cloudflare.read,
+        prompt: null,
         taskContext: this.taskContext(task.id, restored, created.checkout ? repo : null, kind),
       });
-      await this.ternAnswers(runtime, created.id);
       return started;
     } catch (cause) {
       this.unlisten(created.id);
@@ -398,13 +430,78 @@ export class StoreService implements StoreContext {
   }
 
   /**
-   * SESSION-8/SESSION-9: removes the session's workspace and keeps its chats (omp-home) and the
-   * task's branch. Uncommitted work becomes the task's snapshot first, so ending never loses
-   * it; `kept` lists those files. A checkout session (HOST-6) only stops: the main checkout
-   * and its uncommitted work stay as they are.
+   * AUTO-9: starts a run of the automation: a session of it, of no task, on a branch of its own,
+   * `am/<slug>-<run short id>`, made from the default branch, in a container or on the host by
+   * the project's rules (HOST-1), whose chat starts on the automation's instructions.
+   * `principal` started it by hand ("run now"); null: one of its triggers did. Undone if the
+   * launch fails. Every run starts here, whatever started it.
+   */
+  async startRun(principal: Principal | null, automationId: string, input: RunInput): Promise<Session> {
+    const system = this.store.ownerPrincipal();
+    const { automation } = this.store.getAutomation(principal ?? system, automationId);
+    const project = this.store.getProject(system, automation.projectId);
+    const kind = input.runtime ?? "container";
+    const runtime = this.runtimes?.[kind] ?? null;
+    if (runtime !== null && project.repoPath === null) {
+      throw new StoreError(400, `project ${project.name} has no repository to create a worktree from`);
+    }
+    const repo = runtime === null ? null : project.repoPath;
+    const created = this.store.createRun(principal, automationId, { machine: this.config.machineName, runtime: kind, triggerContext: input.triggerContext });
+    const dirs = this.dirs(created.id);
+    const starting = Promise.withResolvers<void>();
+    this.starts.set(created.id, starting.promise);
+    const branch = `am/${automation.slug}-${runShortId(created.id)}`;
+    let worktreeAdded = false;
+    try {
+      await this.listen(created.id);
+      if (runtime === null || repo === null) return created;
+      const baseRef = await defaultBaseRef(repo, await fetchOrigin(repo));
+      await addWorktree(repo, branch, dirs.worktree, baseRef);
+      worktreeAdded = true;
+      this.store.setSessionBranch(created.id, branch, baseRef);
+      const started = { ...created, branch, baseRef };
+      await this.launch(runtime, repo, project, started, {
+        model: automation.model,
+        resume: null,
+        prompt: automation.instructions,
+        taskContext: this.runContext(started),
+      });
+      return started;
+    } catch (cause) {
+      this.unlisten(created.id);
+      let workspaceGone = true;
+      if (runtime !== null && repo !== null) {
+        await runtime.remove(created.id).catch(() => undefined);
+        // The branch was made for this run a moment ago: nothing else has it.
+        workspaceGone = !worktreeAdded || await removeWorktree(repo, dirs.worktree)
+          .then(() => deleteBranch(repo, branch))
+          .then(() => true, () => false);
+      }
+      if (workspaceGone) rmSync(dirs.root, { recursive: true, force: true });
+      this.store.discardSession(created.id);
+      throw new StoreError(500, `could not launch the run: ${failure(cause)}`);
+    } finally {
+      this.starts.delete(created.id);
+      starting.resolve();
+    }
+  }
+
+  /** AUTO-1: deletes an automation with its runs' records and chats, and its folder; its runs' branches stay in the repository. */
+  deleteAutomation(principal: Principal, automationId: string): Automation {
+    const { automation, runIds } = this.store.deleteAutomation(principal, automationId);
+    for (const id of runIds) rmSync(this.dirs(id).root, { recursive: true, force: true });
+    this.folders.delete({ kind: "automation", id: automationId });
+    return automation;
+  }
+
+  /**
+   * SESSION-8/SESSION-9: removes the session's workspace and keeps its chats (omp-home) and its
+   * branch. Uncommitted work becomes the task's snapshot first, or the run's (AUTO-9), so ending
+   * never loses it; `kept` lists those files. A checkout session (HOST-6) only stops: the main
+   * checkout and its uncommitted work stay as they are.
    */
   async endSession(principal: Principal, sessionId: string): Promise<EndedSession> {
-    const { session, task } = this.store.getSession(principal, sessionId);
+    const { session } = this.store.getSession(principal, sessionId);
     if (principal.kind !== "human") throw new StoreError(403, "only a human can do this");
     if (session.endedAt !== null) throw new StoreError(409, `session ${session.name} has already ended`);
     const project = this.store.getProject(principal, session.projectId);
@@ -416,13 +513,13 @@ export class StoreService implements StoreContext {
       try {
         // Stopped first, so the snapshot holds the agent's last writes.
         await runtime.remove(sessionId);
-        if (repo !== null && existsSync(dirs.worktree)) kept = await saveSnapshot(repo, dirs.worktree, snapshotRef(task.id));
+        if (repo !== null && existsSync(dirs.worktree)) kept = await saveSnapshot(repo, dirs.worktree, snapshotRef(session.taskId ?? session.id));
       } catch (cause) {
         throw new StoreError(500, `could not keep the uncommitted work of ${session.name}, so it has not ended: ${failure(cause)}`);
       }
     }
     // Recorded now, what its agent wrote into the folder is the agent's; after the session, no one is known to write there (FOLDER-3).
-    this.folders.sync(task.id);
+    this.folders.sync(folderOwnerOf(session));
     const ended = this.store.endSession(principal, sessionId);
     this.unlisten(sessionId);
     if (repo !== null) {

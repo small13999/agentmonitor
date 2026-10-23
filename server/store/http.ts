@@ -2,21 +2,26 @@ import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from "node:
 import type { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { z } from "zod";
-import type { Card, EndedSession, HistoryEntry, TaskChanges } from "../../shared/api.ts";
+import type { Automation, Card, EndedSession, HistoryEntry, TaskChanges } from "../../shared/api.ts";
 import { email } from "../config.ts";
-import type { TaskFolders } from "./folders.ts";
+import { folderPath } from "./bundle.ts";
+import type { Folders } from "./folders.ts";
 import type { ProjectMoves } from "./move.ts";
-import { StoreError, type Principal, type Session, type Store, type Task } from "./store.ts";
+import { StoreError, type FolderOwner, type Principal, type Session, type Store, type Task } from "./store.ts";
 
 /** What a store route can touch: the database plus the session lifecycle owned by the gateway. */
 export interface StoreContext {
   store: Store;
-  /** FOLDER-1..3: every task's folder, files outside git. */
-  folders: TaskFolders;
+  /** FOLDER-1..3, AUTO-1: every task's and automation's folder, files outside git. */
+  folders: Folders;
   /** STORE-6: moving a project to another store, from either end. */
   moves: ProjectMoves;
   /** Records a session of the task and launches its worktree and container; undone if the launch fails. */
   startSession(principal: Principal, taskId: string, input: SessionInput): Promise<Session>;
+  /** AUTO-9: "run now": records a run of the automation and launches it on its own branch; undone if the launch fails. */
+  startRun(principal: Principal | null, automationId: string, input: RunInput): Promise<Session>;
+  /** Deletes an automation with its runs' records and chats, and its folder. */
+  deleteAutomation(principal: Principal, automationId: string): Automation;
   /** Ends the session and removes its workspace; its uncommitted work becomes the task's snapshot. */
   endSession(principal: Principal, sessionId: string): Promise<EndedSession>;
   /** Ends the task's session and deletes its branch; commits no remote has need `confirm`. */
@@ -63,6 +68,39 @@ const sessionBody = z.strictObject({
   checkout: z.boolean().optional(),
 });
 export type SessionInput = z.infer<typeof sessionBody>;
+// AUTO-9: "run now"; HOST-1: on the host only where the project allows it, for its owner.
+const runBody = z.strictObject({ runtime: z.enum(["container", "host"]).optional() });
+export type RunInput = z.infer<typeof runBody> & {
+  /** AUTO-13: what the trigger's guard and check found; the scheduler's, never a request's. */
+  triggerContext?: string;
+};
+// AUTO-1: a slug names the automation's runs' branches, `am/<slug>-<run>` (AUTO-9).
+const slug = z.string().max(40).regex(/^[a-z0-9]+(?:[.-][a-z0-9]+)*$/, "a slug is lowercase letters and digits, joined by single dots or dashes");
+const automationFields = {
+  slug: slug.optional(),
+  instructions: description.optional(),
+  // Null: omp's default model.
+  model: z.string().trim().min(1).nullable().optional(),
+  endMode: z.enum(["finish", "review"]).optional(),
+  timeLimitMinutes: z.int().min(1).max(24 * 60).optional(),
+  enabled: z.boolean().optional(),
+};
+const automationBody = z.strictObject({ name, ...automationFields });
+const automationUpdateBody = z.strictObject({ name: name.optional(), ...automationFields });
+// AUTO-2: five cron fields; the scheduler reads them, this only keeps out what is no schedule.
+const cron = z.string().trim().refine((value) => /^[0-9A-Za-z*,/-]+( +[0-9A-Za-z*,/-]+){4}$/.test(value), "a cron schedule has five fields: minute hour day month weekday");
+const timezone = z.string().refine((value) => {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}, "not a time zone (an IANA name such as Europe/Budapest)");
+// AUTO-8: a guard or check is a file of the automation's folder; null removes it.
+const triggerFields = { timezone: timezone.optional(), guardPath: folderPath.nullable().optional(), checkPath: folderPath.nullable().optional() };
+const triggerBody = z.strictObject({ cron, ...triggerFields });
+const triggerUpdateBody = z.strictObject({ cron: cron.optional(), ...triggerFields });
 const statusBody = z.strictObject({ status: z.string().max(64 * 1024), baseRevision: z.int().min(0) });
 const commentBody = z.strictObject({ body: z.string().trim().min(1).max(64 * 1024) });
 // STORE-6: `confirm` leaves behind the work a move cannot take along (MoveLeftBehind).
@@ -104,6 +142,26 @@ interface Route {
 }
 
 const id = "([0-9a-f-]{36})";
+
+/** FOLDER-1, FOLDER-2, AUTO-1: a task's and an automation's folder answer the same routes, under `/tasks/<id>` and `/automations/<id>`. */
+function folderRoutes(kind: FolderOwner["kind"]): Route[] {
+  const base = `^/${kind}s/${id}/folder`;
+  const owner = (ownerId: string): FolderOwner => ({ kind, id: ownerId });
+  return [
+    { method: "GET", pattern: new RegExp(`${base}$`), handler: (c, p, [ownerId]) => c.folders.list(p, owner(ownerId)) },
+    { method: "GET", pattern: new RegExp(`${base}\\.zip$`), handler: (c, p, [ownerId]) => c.folders.zip(p, owner(ownerId)) },
+    {
+      method: "GET",
+      pattern: new RegExp(`${base}/(.+)$`),
+      // `?download` asks for an attachment instead of the file shown inline.
+      handler: (c, p, [ownerId, path], _, request, query) => c.folders.download(p, owner(ownerId), path, request.headers.range, query.has("download")),
+    },
+    // The body is the file's bytes, streamed into the folder: no JSON and no JSON size limit.
+    { method: "PUT", pattern: new RegExp(`${base}/(.+)$`), handler: (c, p, [ownerId, path], _, request) => c.folders.upload(p, owner(ownerId), path, request) },
+    { method: "DELETE", pattern: new RegExp(`${base}/(.+)$`), handler: (c, p, [ownerId, path]) => c.folders.remove(p, owner(ownerId), path) },
+  ];
+}
+
 const routes: Route[] = [
   { method: "GET", pattern: /^\/me$/, handler: (c, p) => c.store.whoami(p) },
   { method: "GET", pattern: /^\/people$/, handler: (c, p) => c.store.listPeople(p) },
@@ -207,7 +265,7 @@ const routes: Route[] = [
     pattern: new RegExp(`^/tasks/${id}/history$`),
     // Files an agent wrote into the folder are history too (FOLDER-3).
     handler: (c, p, [taskId]) => {
-      c.folders.list(p, taskId);
+      c.folders.list(p, { kind: "task", id: taskId });
       return c.taskHistory(p, taskId);
     },
   },
@@ -224,17 +282,45 @@ const routes: Route[] = [
     handler: async (c, p, [commentId], body) => c.store.updateComment(p, commentId, commentBody.parse(await body()).body),
   },
   { method: "DELETE", pattern: new RegExp(`^/comments/${id}$`), handler: (c, p, [commentId]) => c.store.deleteComment(p, commentId) },
-  { method: "GET", pattern: new RegExp(`^/tasks/${id}/folder$`), handler: (c, p, [taskId]) => c.folders.list(p, taskId) },
-  { method: "GET", pattern: new RegExp(`^/tasks/${id}/folder\\.zip$`), handler: (c, p, [taskId]) => c.folders.zip(p, taskId) },
+  ...folderRoutes("task"),
+  // AUTO-1, AUTO-15: a project's automations, for people and agents alike.
   {
     method: "GET",
-    pattern: new RegExp(`^/tasks/${id}/folder/(.+)$`),
-    // `?download` asks for an attachment instead of the file shown inline.
-    handler: (c, p, [taskId, path], _, request, query) => c.folders.download(p, taskId, path, request.headers.range, query.has("download")),
+    pattern: new RegExp(`^/projects/${id}/automations$`),
+    handler: (c, p, [projectId]) => c.store.listAutomations(p, projectId),
   },
-  // The body is the file's bytes, streamed into the folder: no JSON and no JSON size limit.
-  { method: "PUT", pattern: new RegExp(`^/tasks/${id}/folder/(.+)$`), handler: (c, p, [taskId, path], _, request) => c.folders.upload(p, taskId, path, request) },
-  { method: "DELETE", pattern: new RegExp(`^/tasks/${id}/folder/(.+)$`), handler: (c, p, [taskId, path]) => c.folders.remove(p, taskId, path) },
+  {
+    method: "POST",
+    pattern: new RegExp(`^/projects/${id}/automations$`),
+    handler: async (c, p, [projectId], body) => c.store.createAutomation(p, projectId, automationBody.parse(await body())),
+  },
+  { method: "GET", pattern: new RegExp(`^/automations/${id}$`), handler: (c, p, [automationId]) => c.store.getAutomation(p, automationId) },
+  {
+    method: "PATCH",
+    pattern: new RegExp(`^/automations/${id}$`),
+    handler: async (c, p, [automationId], body) => c.store.updateAutomation(p, automationId, automationUpdateBody.parse(await body())),
+  },
+  { method: "DELETE", pattern: new RegExp(`^/automations/${id}$`), handler: (c, p, [automationId]) => c.deleteAutomation(p, automationId) },
+  {
+    method: "POST",
+    pattern: new RegExp(`^/automations/${id}/triggers$`),
+    handler: async (c, p, [automationId], body) => c.store.addTrigger(p, automationId, triggerBody.parse(await body())),
+  },
+  {
+    method: "PATCH",
+    pattern: new RegExp(`^/triggers/${id}$`),
+    handler: async (c, p, [triggerId], body) => c.store.updateTrigger(p, triggerId, triggerUpdateBody.parse(await body())),
+  },
+  { method: "DELETE", pattern: new RegExp(`^/triggers/${id}$`), handler: (c, p, [triggerId]) => c.store.removeTrigger(p, triggerId) },
+  // AUTO-9: its runs, newest first; POST is "run now".
+  { method: "GET", pattern: new RegExp(`^/automations/${id}/runs$`), handler: (c, p, [automationId]) => c.store.listRuns(p, automationId) },
+  {
+    method: "POST",
+    pattern: new RegExp(`^/automations/${id}/runs$`),
+    handler: async (c, p, [automationId], body) => c.startRun(p, automationId, runBody.parse(await body())),
+  },
+  { method: "GET", pattern: new RegExp(`^/automations/${id}/firings$`), handler: (c, p, [automationId]) => c.store.listFirings(p, automationId) },
+  ...folderRoutes("automation"),
   {
     method: "POST",
     pattern: new RegExp(`^/tasks/${id}/finish$`),

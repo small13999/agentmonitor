@@ -3,12 +3,16 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type {
-  Actor, Comment, FolderFile, HistoryEntry, HistoryEvent, Person, Project, PullRequest, Session, SessionRuntime, Task, TaskDetail, TaskState, TaskSummary, Topic, TopicLink,
+  Actor, Automation, AutomationDetail, AutomationSummary, Comment, EndMode, Firing, FiringOutcome, FiringVerdict, FolderFile, HistoryEntry, HistoryEvent, Person, Project, PullRequest,
+  RunOutcome, Session, SessionRuntime, Task, TaskDetail, TaskState, TaskSummary, Topic, TopicLink, Trigger,
 } from "../../shared/api.ts";
 import type { CloudflareTokens } from "../cloudflare.ts";
 import { historyEvent, matchPeople, type ProjectRecords } from "./bundle.ts";
 
-export type { Actor, Comment, FolderFile, HistoryEntry, HistoryEvent, Person, Project, Session, SessionRuntime, Task, TaskDetail, TaskState, TaskSummary, Topic, TopicLink };
+export type {
+  Actor, Automation, AutomationDetail, AutomationSummary, Comment, EndMode, Firing, FiringOutcome, FiringVerdict, FolderFile, HistoryEntry, HistoryEvent, Person, Project,
+  RunOutcome, Session, SessionRuntime, Task, TaskDetail, TaskState, TaskSummary, Topic, TopicLink, Trigger,
+};
 
 /** TOPIC-2 and TASK-7: a status is a short current-state note, not a document. */
 export const STATUS_MAX_LINES = 50;
@@ -36,6 +40,35 @@ const TASK_STATES: readonly TaskState[] = ["open", "in_progress", "in_review", "
 function isTaskState(value: unknown): value is TaskState {
   return TASK_STATES.some((state) => state === value);
 }
+
+/** SESSION-5: a session belongs to one task or one automation; AUTO-9: a session of an automation is one of its runs. */
+function sessionsTable(name: string): string {
+  return `CREATE TABLE ${name} (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  task_id TEXT REFERENCES tasks(id),
+  automation_id TEXT REFERENCES automations(id),
+  name TEXT NOT NULL,
+  branch TEXT,
+  base_ref TEXT,
+  machine TEXT,
+  runtime TEXT NOT NULL DEFAULT 'container',
+  checkout INTEGER NOT NULL DEFAULT 0,
+  model TEXT,
+  started_at INTEGER NOT NULL,
+  ended_at INTEGER,
+  run_started_by_kind TEXT,
+  run_started_by_id TEXT,
+  run_trigger_context TEXT,
+  run_outcome TEXT,
+  run_ended_by_kind TEXT,
+  run_ended_by_id TEXT,
+  CHECK ((task_id IS NULL) != (automation_id IS NULL))
+);`;
+}
+
+/** The columns every store's sessions had before automations (SESSION-5), which the migration copies. */
+const TASK_SESSION_COLUMNS = "id, project_id, task_id, name, branch, base_ref, machine, runtime, checkout, model, started_at, ended_at";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS projects (
@@ -75,20 +108,7 @@ CREATE TABLE IF NOT EXISTS task_topics (
   linked_at INTEGER NOT NULL,
   PRIMARY KEY (task_id, topic_id)
 );
-CREATE TABLE IF NOT EXISTS sessions (
-  id TEXT PRIMARY KEY,
-  project_id TEXT NOT NULL REFERENCES projects(id),
-  task_id TEXT NOT NULL REFERENCES tasks(id),
-  name TEXT NOT NULL,
-  branch TEXT,
-  base_ref TEXT,
-  machine TEXT,
-  runtime TEXT NOT NULL DEFAULT 'container',
-  checkout INTEGER NOT NULL DEFAULT 0,
-  model TEXT,
-  started_at INTEGER NOT NULL,
-  ended_at INTEGER
-);
+${sessionsTable("IF NOT EXISTS sessions")}
 CREATE TABLE IF NOT EXISTS people (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -125,6 +145,58 @@ CREATE TABLE IF NOT EXISTS cloudflare_tokens (
   write_token TEXT,
   updated_at INTEGER NOT NULL
 );
+-- AUTO-1: a project's automations; \`slug\` names their runs' branches (AUTO-9).
+CREATE TABLE IF NOT EXISTS automations (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  name TEXT NOT NULL,
+  slug TEXT NOT NULL,
+  instructions TEXT NOT NULL DEFAULT '',
+  model TEXT,
+  end_mode TEXT NOT NULL DEFAULT 'finish',
+  time_limit_minutes INTEGER NOT NULL DEFAULT 120,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE (project_id, name),
+  UNIQUE (project_id, slug)
+);
+-- AUTO-2, AUTO-8: an automation's schedules, each with an optional guard and check in its folder.
+CREATE TABLE IF NOT EXISTS automation_triggers (
+  id TEXT PRIMARY KEY,
+  automation_id TEXT NOT NULL REFERENCES automations(id),
+  cron TEXT NOT NULL,
+  timezone TEXT NOT NULL DEFAULT 'Europe/Budapest',
+  guard_path TEXT,
+  check_path TEXT,
+  created_at INTEGER NOT NULL
+);
+-- AUTO-2, AUTO-8: each scheduled time of a trigger, once; a firing outlives its trigger, so no reference to it.
+CREATE TABLE IF NOT EXISTS automation_firings (
+  id TEXT PRIMARY KEY,
+  automation_id TEXT NOT NULL REFERENCES automations(id),
+  trigger_id TEXT NOT NULL,
+  scheduled_at INTEGER NOT NULL,
+  fired_at INTEGER NOT NULL,
+  guard_verdict TEXT,
+  check_verdict TEXT,
+  outcome TEXT NOT NULL,
+  session_id TEXT REFERENCES sessions(id),
+  UNIQUE (trigger_id, scheduled_at)
+);
+CREATE INDEX IF NOT EXISTS automation_firings_automation ON automation_firings (automation_id, scheduled_at);
+-- AUTO-1: an automation's folder, kept as a task's (folder_files).
+CREATE TABLE IF NOT EXISTS automation_files (
+  automation_id TEXT NOT NULL REFERENCES automations(id),
+  path TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  content_type TEXT NOT NULL,
+  added_by_kind TEXT,
+  added_by_id TEXT,
+  added_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (automation_id, path)
+);
 `;
 
 /** TASK-14: what happened to a task, appended as it happens; created on its own so old stores can be backfilled. */
@@ -142,12 +214,47 @@ CREATE INDEX task_events_task ON task_events (task_id, at);
 
 type Row = Record<string, unknown>;
 
-/** FOLDER-1: a file as its task's folder holds it now; `modifiedAt` is its modification time. */
+/** FOLDER-1: a file as its folder holds it now; `modifiedAt` is its modification time. */
 export interface FolderEntry {
   path: string;
   size: number;
   contentType: string;
   modifiedAt: number;
+}
+
+/** FOLDER-1, AUTO-1: whose folder: a task's, or an automation's (shared by all its runs). */
+export interface FolderOwner {
+  kind: "task" | "automation";
+  id: string;
+}
+
+/** SESSION-5: the folder a session works with: its task's, or its automation's for a run. */
+export function folderOwnerOf(found: Session): FolderOwner {
+  if (found.taskId !== null) return { kind: "task", id: found.taskId };
+  if (found.automationId !== null) return { kind: "automation", id: found.automationId };
+  throw new Error(`session ${found.id} belongs to no task and no automation`);
+}
+
+/** The table that records an owner's folder files, and its column naming the owner. */
+function folderTable(owner: FolderOwner): { table: string; column: string } {
+  return owner.kind === "task" ? { table: "folder_files", column: "task_id" } : { table: "automation_files", column: "automation_id" };
+}
+
+/** AUTO-1, AUTO-15: an automation's fields as people and agents set them; an absent one keeps its value, or its default. */
+export interface AutomationInput {
+  slug?: string;
+  instructions?: string;
+  model?: string | null;
+  endMode?: EndMode;
+  timeLimitMinutes?: number;
+  enabled?: boolean;
+}
+
+/** AUTO-8: a trigger's fields besides its cron; a null guard or check path is none. */
+export interface TriggerInput {
+  timezone?: string;
+  guardPath?: string | null;
+  checkPath?: string | null;
 }
 
 function folderFile(row: Row): FolderFile {
@@ -250,11 +357,14 @@ function sessionEvent(found: Session, event: "started" | "ended"): HistoryEvent 
   return { kind: "session", sessionId: found.id, event, machine: found.machine, runtime: found.runtime };
 }
 
+const RUN_OUTCOMES: readonly RunOutcome[] = ["finished", "review", "timed_out", "failed", "ended"];
+
 function session(row: Row): Session {
   return {
     id: String(row.id),
     projectId: String(row.project_id),
-    taskId: String(row.task_id),
+    taskId: row.task_id === null ? null : String(row.task_id),
+    automationId: row.automation_id === null ? null : String(row.automation_id),
     name: String(row.name),
     branch: row.branch === null ? null : String(row.branch),
     baseRef: row.base_ref === null ? null : String(row.base_ref),
@@ -264,7 +374,76 @@ function session(row: Row): Session {
     model: row.model === null ? null : String(row.model),
     startedAt: Number(row.started_at),
     endedAt: row.ended_at === null ? null : Number(row.ended_at),
+    run: row.automation_id === null ? null : {
+      startedBy: actorOfRow(row.run_started_by_kind, row.run_started_by_id),
+      triggerContext: row.run_trigger_context === null ? "" : String(row.run_trigger_context),
+      outcome: RUN_OUTCOMES.find((outcome) => outcome === row.run_outcome) ?? null,
+      endedBy: actorOfRow(row.run_ended_by_kind, row.run_ended_by_id),
+    },
   };
+}
+
+function automation(row: Row): Automation {
+  return {
+    id: String(row.id),
+    projectId: String(row.project_id),
+    name: String(row.name),
+    slug: String(row.slug),
+    instructions: String(row.instructions),
+    model: row.model === null ? null : String(row.model),
+    endMode: row.end_mode === "review" ? "review" : "finish",
+    timeLimitMinutes: Number(row.time_limit_minutes),
+    enabled: Number(row.enabled) === 1,
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+  };
+}
+
+function trigger(row: Row): Trigger {
+  return {
+    id: String(row.id),
+    automationId: String(row.automation_id),
+    cron: String(row.cron),
+    timezone: String(row.timezone),
+    guardPath: row.guard_path === null ? null : String(row.guard_path),
+    checkPath: row.check_path === null ? null : String(row.check_path),
+    createdAt: Number(row.created_at),
+  };
+}
+
+const FIRING_OUTCOMES: readonly FiringOutcome[] = ["started", "off", "running", "guard", "check", "failed"];
+
+function verdictOf(value: unknown): FiringVerdict | null {
+  if (value === null) return null;
+  const parsed: unknown = JSON.parse(String(value));
+  if (typeof parsed !== "object" || parsed === null || !("passed" in parsed) || !("output" in parsed)) return null;
+  return { passed: parsed.passed === true, output: String(parsed.output) };
+}
+
+function firing(row: Row): Firing {
+  const outcome = FIRING_OUTCOMES.find((known) => known === row.outcome);
+  if (outcome === undefined) throw new Error(`firing ${String(row.id)} has unknown outcome ${String(row.outcome)}`);
+  return {
+    id: String(row.id),
+    automationId: String(row.automation_id),
+    triggerId: String(row.trigger_id),
+    scheduledAt: Number(row.scheduled_at),
+    firedAt: Number(row.fired_at),
+    guard: verdictOf(row.guard_verdict),
+    check: verdictOf(row.check_verdict),
+    outcome,
+    sessionId: row.session_id === null ? null : String(row.session_id),
+  };
+}
+
+/** AUTO-9: the part of a run's branch, `am/<automation slug>-<run>`, that names the run: the start of its session's id. */
+export function runShortId(sessionId: string): string {
+  return sessionId.slice(0, 8);
+}
+
+/** AUTO-1: a slug for branch names from an automation's name. */
+export function slugOf(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9.]+/g, "-").replace(/^[-.]+|[-.]+$/g, "").slice(0, 40).replace(/[-.]+$/, "") || "automation";
 }
 
 /** TOPIC-2/TASK-7: a status longer than the limit is refused with its length. */
@@ -293,6 +472,7 @@ export class Store {
     this.addColumn("projects", "host_sessions", "INTEGER NOT NULL DEFAULT 0");
     this.addColumn("sessions", "runtime", "TEXT NOT NULL DEFAULT 'container'");
     this.addColumn("sessions", "checkout", "INTEGER NOT NULL DEFAULT 0");
+    this.migrateSessionOwners();
     // PERSON-1: every store has its owner; TASK-13 and UI-4 on stores from before people.
     if (this.db.prepare("SELECT 1 FROM people WHERE owner = 1").get() === undefined) {
       this.db.prepare("INSERT INTO people (id, name, color, owner, created_at) VALUES (?, ?, ?, 1, ?)").run(randomUUID(), ownerName, PALETTE[5], Date.now());
@@ -339,8 +519,10 @@ export class Store {
         this.recordTaskEvent(String(row.id), owner, { kind: "created" }, Number(row.created_at));
       }
       for (const found of this.db.prepare("SELECT * FROM sessions").all().map(session)) {
-        this.recordTaskEvent(found.taskId, owner, sessionEvent(found, "started"), found.startedAt);
-        if (found.endedAt !== null) this.recordTaskEvent(found.taskId, owner, sessionEvent(found, "ended"), found.endedAt);
+        const { taskId } = found;
+        if (taskId === null) continue;
+        this.recordTaskEvent(taskId, owner, sessionEvent(found, "started"), found.startedAt);
+        if (found.endedAt !== null) this.recordTaskEvent(taskId, owner, sessionEvent(found, "ended"), found.endedAt);
       }
     });
   }
@@ -396,6 +578,30 @@ export class Store {
       }
       if (hasTable("session_notes")) this.db.exec("DROP TABLE session_notes");
     });
+  }
+
+  /**
+   * SESSION-5: a store from before automations has sessions that must have a task. Their table
+   * is rebuilt so a session belongs to a task or an automation, with a run's fields (AUTO-9);
+   * every session keeps its row. SQLite changes a column's constraints only by a rebuild, and
+   * foreign keys are checked once it is done.
+   */
+  private migrateSessionOwners(): void {
+    const columns = this.db.prepare("SELECT name FROM pragma_table_info('sessions')").all().map((row) => String(row.name));
+    if (columns.includes("automation_id")) return;
+    this.db.exec("PRAGMA foreign_keys = OFF");
+    try {
+      this.transaction(() => {
+        this.db.exec(sessionsTable("sessions_owned"));
+        this.db.exec(`INSERT INTO sessions_owned (${TASK_SESSION_COLUMNS}) SELECT ${TASK_SESSION_COLUMNS} FROM sessions`);
+        this.db.exec("DROP TABLE sessions");
+        this.db.exec("ALTER TABLE sessions_owned RENAME TO sessions");
+        const broken = this.db.prepare("PRAGMA foreign_key_check").all();
+        if (broken.length > 0) throw new Error(`the sessions migration breaks references: ${JSON.stringify(broken)}`);
+      });
+    } finally {
+      this.db.exec("PRAGMA foreign_keys = ON");
+    }
   }
 
   private transaction<T>(fn: () => T): T {
@@ -548,6 +754,34 @@ export class Store {
     return session(row);
   }
 
+  private visibleAutomation(principal: Principal, automationId: string): Automation {
+    const row = this.db.prepare("SELECT * FROM automations WHERE id = ?").get(automationId);
+    const scope = this.scope(principal);
+    if (row === undefined || (scope !== null && scope !== row.project_id)) {
+      throw new StoreError(404, `automation ${automationId} not found`);
+    }
+    return automation(row);
+  }
+
+  private visibleTrigger(principal: Principal, triggerId: string): { trigger: Trigger; automation: Automation } {
+    const row = this.db.prepare("SELECT * FROM automation_triggers WHERE id = ?").get(triggerId);
+    if (row === undefined) throw new StoreError(404, `trigger ${triggerId} not found`);
+    const found = trigger(row);
+    try {
+      return { trigger: found, automation: this.visibleAutomation(principal, found.automationId) };
+    } catch {
+      throw new StoreError(404, `trigger ${triggerId} not found`);
+    }
+  }
+
+  /** SESSION-5: the task or the automation a session belongs to; the other is null. */
+  private ownerOf(principal: Principal, found: Session): { task: Task | null; automation: Automation | null } {
+    return {
+      task: found.taskId === null ? null : this.visibleTask(principal, found.taskId),
+      automation: found.automationId === null ? null : this.visibleAutomation(principal, found.automationId),
+    };
+  }
+
   private topicsOf(taskId: string): Topic[] {
     return this.db.prepare(
       "SELECT t.* FROM topics t JOIN task_topics tt ON tt.topic_id = t.id WHERE tt.task_id = ? ORDER BY tt.linked_at",
@@ -559,14 +793,16 @@ export class Store {
     return row === undefined ? null : session(row);
   }
 
-  whoami(principal: Principal): { kind: "human"; person: Person } | { kind: "agent"; project: Project; session: Session; task: Task } {
+  whoami(principal: Principal):
+    | { kind: "human"; person: Person }
+    | { kind: "agent"; project: Project; session: Session; task: Task | null; automation: Automation | null } {
     if (principal.kind === "human") {
       const row = this.db.prepare("SELECT * FROM people WHERE id = ?").get(principal.personId);
       if (row === undefined) throw new StoreError(403, "this person no longer exists");
       return { kind: "human", person: person(row) };
     }
     const own = this.visibleSession(principal, principal.sessionId);
-    return { kind: "agent", project: this.visibleProject(principal, own.projectId), session: own, task: this.visibleTask(principal, own.taskId) };
+    return { kind: "agent", project: this.visibleProject(principal, own.projectId), session: own, ...this.ownerOf(principal, own) };
   }
 
   listProjects(principal: Principal): Project[] {
@@ -581,9 +817,10 @@ export class Store {
     return this.visibleProject(principal, projectId);
   }
 
-  getSession(principal: Principal, sessionId: string): { session: Session; task: Task } {
+  /** A session with the task or the automation it belongs to (SESSION-5). */
+  getSession(principal: Principal, sessionId: string): { session: Session; task: Task | null; automation: Automation | null } {
     const found = this.visibleSession(principal, sessionId);
-    return { session: found, task: this.visibleTask(principal, found.taskId) };
+    return { session: found, ...this.ownerOf(principal, found) };
   }
 
   createProject(principal: Principal, input: { name: string; repoPath?: string; hostSessions?: boolean }): Project {
@@ -930,6 +1167,7 @@ export class Store {
         id: randomUUID(),
         projectId: owner.projectId,
         taskId,
+        automationId: null,
         name: owner.title,
         branch: checkout ? null : owner.branch,
         baseRef: checkout ? null : owner.baseRef,
@@ -939,6 +1177,7 @@ export class Store {
         model: input.model ?? null,
         startedAt: Date.now(),
         endedAt: null,
+        run: null,
       };
       this.db.prepare(
         "INSERT INTO sessions (id, project_id, task_id, name, branch, base_ref, machine, runtime, checkout, model, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -957,13 +1196,17 @@ export class Store {
     this.db.prepare("UPDATE sessions SET branch = ?, base_ref = ? WHERE id = ?").run(branch, baseRef, sessionId);
   }
 
-  /** Removes a session whose launch failed, and its start from the task's history. */
+  /** Removes a session whose launch failed, and its start from its task's history. */
   discardSession(sessionId: string): void {
     this.db.prepare("DELETE FROM task_events WHERE json_extract(data, '$.sessionId') = ?").run(sessionId);
     this.db.prepare("DELETE FROM sessions WHERE id = ?").run(sessionId);
   }
 
-  /** SESSION-8: an ended session keeps its record; its workspace is the caller's job. */
+  /**
+   * SESSION-8: an ended session keeps its record; its workspace is the caller's job. Its task's
+   * history records who ended it (TASK-14); a run records them as who ended it, and as its
+   * outcome that it was ended unless it already had one (PERSON-1).
+   */
   endSession(principal: Principal, sessionId: string): Session {
     this.requireHuman(principal);
     return this.transaction(() => {
@@ -971,8 +1214,13 @@ export class Store {
       if (found.endedAt !== null) throw new StoreError(409, `session ${found.name} has already ended`);
       const endedAt = Date.now();
       this.db.prepare("UPDATE sessions SET ended_at = ? WHERE id = ?").run(endedAt, sessionId);
-      this.recordTaskEvent(found.taskId, principal, sessionEvent(found, "ended"), endedAt);
-      return { ...found, endedAt };
+      if (found.taskId !== null) this.recordTaskEvent(found.taskId, principal, sessionEvent(found, "ended"), endedAt);
+      if (found.run === null) return { ...found, endedAt };
+      const endedBy = actorOf(principal);
+      const outcome = found.run.outcome ?? "ended";
+      const [kind, id] = actorColumns(endedBy);
+      this.db.prepare("UPDATE sessions SET run_outcome = ?, run_ended_by_kind = ?, run_ended_by_id = ? WHERE id = ?").run(outcome, kind, id, sessionId);
+      return { ...found, endedAt, run: { ...found.run, outcome, endedBy } };
     });
   }
 
@@ -989,55 +1237,308 @@ export class Store {
   }
 
   /**
-   * FOLDER-1, FOLDER-3: brings the task's recorded files in line with what its folder's
+   * FOLDER-1, FOLDER-3: brings an owner's recorded files in line with what its folder's
    * directory holds, `entries`. A file that appeared there was written by the agent of the
-   * task's running session, the only one with the directory; with none running, by no one
-   * known. New files go into the task's history (TASK-14) as added when they were written.
+   * task's running session, or of the automation's running run, the only one with the
+   * directory; with none running, by no one known. New files of a task go into its history
+   * (TASK-14) as added when they were written.
    */
-  syncFolder(taskId: string, entries: FolderEntry[]): FolderFile[] {
+  syncFolder(owner: FolderOwner, entries: FolderEntry[]): FolderFile[] {
+    const { table, column } = folderTable(owner);
     return this.transaction(() => {
-      const recorded = new Map(this.db.prepare("SELECT * FROM folder_files WHERE task_id = ?").all(taskId).map((row) => [String(row.path), folderFile(row)]));
-      const running = this.runningSessionOf(taskId);
+      const recorded = new Map(this.db.prepare(`SELECT * FROM ${table} WHERE ${column} = ?`).all(owner.id).map((row) => [String(row.path), folderFile(row)]));
+      const running = owner.kind === "task" ? this.runningSessionOf(owner.id) : this.runningRunOf(owner.id);
       const writer: Principal | null = running === null ? null : { kind: "agent", sessionId: running.id };
       for (const entry of entries) {
         const known = recorded.get(entry.path);
         recorded.delete(entry.path);
         if (known === undefined) {
-          this.insertFolderFile(taskId, entry, writer, entry.modifiedAt);
+          this.insertFolderFile(owner, entry, writer, entry.modifiedAt);
         } else if (known.size !== entry.size || known.updatedAt !== entry.modifiedAt || known.contentType !== entry.contentType) {
-          this.db.prepare("UPDATE folder_files SET size = ?, content_type = ?, updated_at = ? WHERE task_id = ? AND path = ?")
-            .run(entry.size, entry.contentType, entry.modifiedAt, taskId, entry.path);
+          this.db.prepare(`UPDATE ${table} SET size = ?, content_type = ?, updated_at = ? WHERE ${column} = ? AND path = ?`)
+            .run(entry.size, entry.contentType, entry.modifiedAt, owner.id, entry.path);
         }
       }
-      for (const gone of recorded.keys()) this.db.prepare("DELETE FROM folder_files WHERE task_id = ? AND path = ?").run(taskId, gone);
-      return this.db.prepare("SELECT * FROM folder_files WHERE task_id = ? ORDER BY path").all(taskId).map(folderFile);
+      for (const gone of recorded.keys()) this.db.prepare(`DELETE FROM ${table} WHERE ${column} = ? AND path = ?`).run(owner.id, gone);
+      return this.db.prepare(`SELECT * FROM ${table} WHERE ${column} = ? ORDER BY path`).all(owner.id).map(folderFile);
     });
   }
 
-  /** FOLDER-1: a file someone put into the task's folder, replacing any of the same path; added now, by them. */
-  addFolderFile(principal: Principal, taskId: string, entry: FolderEntry): FolderFile {
+  /**
+   * FOLDER-1, AUTO-1: the name of a task's or an automation's folder (its title or name), when
+   * the principal may see it; a folder of another project is not found.
+   */
+  folderName(principal: Principal, owner: FolderOwner): string {
+    return owner.kind === "task" ? this.visibleTask(principal, owner.id).title : this.visibleAutomation(principal, owner.id).name;
+  }
+
+  /** FOLDER-1: a file someone put into a folder, replacing any of the same path; added now, by them. */
+  addFolderFile(principal: Principal, owner: FolderOwner, entry: FolderEntry): FolderFile {
+    const { table, column } = folderTable(owner);
     return this.transaction(() => {
-      this.visibleTask(principal, taskId);
-      this.db.prepare("DELETE FROM folder_files WHERE task_id = ? AND path = ?").run(taskId, entry.path);
-      return this.insertFolderFile(taskId, entry, principal, Date.now());
+      this.folderName(principal, owner);
+      this.db.prepare(`DELETE FROM ${table} WHERE ${column} = ? AND path = ?`).run(owner.id, entry.path);
+      return this.insertFolderFile(owner, entry, principal, Date.now());
     });
   }
 
-  private insertFolderFile(taskId: string, entry: FolderEntry, principal: Principal | null, addedAt: number): FolderFile {
+  private insertFolderFile(owner: FolderOwner, entry: FolderEntry, principal: Principal | null, addedAt: number): FolderFile {
+    const { table, column } = folderTable(owner);
     const addedBy = principal === null ? null : actorOf(principal);
+    const [kind, id] = actorColumns(addedBy);
     this.db.prepare(
-      "INSERT INTO folder_files (task_id, path, size, content_type, added_by_kind, added_by_id, added_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-    ).run(
-      taskId, entry.path, entry.size, entry.contentType, addedBy?.kind ?? null,
-      addedBy === null ? null : addedBy.kind === "person" ? addedBy.personId : addedBy.sessionId, addedAt, entry.modifiedAt,
-    );
-    this.recordTaskEvent(taskId, principal, { kind: "file", path: entry.path }, addedAt);
+      `INSERT INTO ${table} (${column}, path, size, content_type, added_by_kind, added_by_id, added_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(owner.id, entry.path, entry.size, entry.contentType, kind, id, addedAt, entry.modifiedAt);
+    if (owner.kind === "task") this.recordTaskEvent(owner.id, principal, { kind: "file", path: entry.path }, addedAt);
     return { path: entry.path, size: entry.size, contentType: entry.contentType, addedBy, addedAt, updatedAt: entry.modifiedAt };
   }
 
-  /** FOLDER-1: forgets a file deleted from the task's folder. */
-  removeFolderFile(taskId: string, path: string): void {
-    this.db.prepare("DELETE FROM folder_files WHERE task_id = ? AND path = ?").run(taskId, path);
+  /** FOLDER-1: forgets a file deleted from a folder. */
+  removeFolderFile(owner: FolderOwner, path: string): void {
+    const { table, column } = folderTable(owner);
+    this.db.prepare(`DELETE FROM ${table} WHERE ${column} = ? AND path = ?`).run(owner.id, path);
+  }
+
+  /** AUTO-9: the automation's run that is still going, if any. */
+  private runningRunOf(automationId: string): Session | null {
+    const row = this.db.prepare("SELECT * FROM sessions WHERE automation_id = ? AND ended_at IS NULL").get(automationId);
+    return row === undefined ? null : session(row);
+  }
+
+  private triggersOf(automationId: string): Trigger[] {
+    return this.db.prepare("SELECT * FROM automation_triggers WHERE automation_id = ? ORDER BY created_at, id").all(automationId).map(trigger);
+  }
+
+  /** AUTO-1: a project's automations, by name, each with its triggers and its running run. */
+  listAutomations(principal: Principal, projectId: string): AutomationSummary[] {
+    this.visibleProject(principal, projectId);
+    return this.db.prepare("SELECT * FROM automations WHERE project_id = ? ORDER BY name").all(projectId).map((row) => {
+      const found = automation(row);
+      return { automation: found, triggers: this.triggersOf(found.id), sessionId: this.runningRunOf(found.id)?.id ?? null };
+    });
+  }
+
+  /** AUTO-1, AUTO-7: an automation with its triggers and its runs, newest first. */
+  getAutomation(principal: Principal, automationId: string): AutomationDetail {
+    const found = this.visibleAutomation(principal, automationId);
+    return { automation: found, triggers: this.triggersOf(automationId), runs: this.listRuns(principal, automationId) };
+  }
+
+  /** AUTO-1, AUTO-15: names and slugs are unique in a project; a slug is the name's unless given. */
+  private checkAutomationNames(projectId: string, name: string, slug: string, except: string | null): void {
+    const taken = (column: string, value: string) =>
+      this.db.prepare(`SELECT 1 FROM automations WHERE project_id = ? AND ${column} = ? AND id IS NOT ?`).get(projectId, value, except) !== undefined;
+    if (taken("name", name)) throw new StoreError(409, `automation "${name}" already exists in this project`);
+    if (taken("slug", slug)) throw new StoreError(409, `another automation of this project names its branches am/${slug}-…; give this one another slug`);
+  }
+
+  /** AUTO-1, AUTO-15: people and agents create automations; one starts on, ending its runs with `finish`, in 120 minutes. */
+  createAutomation(principal: Principal, projectId: string, input: AutomationInput & { name: string }): Automation {
+    return this.transaction(() => {
+      this.visibleProject(principal, projectId);
+      const now = Date.now();
+      const created: Automation = {
+        id: randomUUID(),
+        projectId,
+        name: input.name,
+        slug: input.slug ?? slugOf(input.name),
+        instructions: input.instructions ?? "",
+        model: input.model ?? null,
+        endMode: input.endMode ?? "finish",
+        timeLimitMinutes: input.timeLimitMinutes ?? 120,
+        enabled: input.enabled ?? true,
+        createdAt: now,
+        updatedAt: now,
+      };
+      this.checkAutomationNames(projectId, created.name, created.slug, null);
+      this.db.prepare(
+        "INSERT INTO automations (id, project_id, name, slug, instructions, model, end_mode, time_limit_minutes, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run(
+        created.id, projectId, created.name, created.slug, created.instructions, created.model, created.endMode, created.timeLimitMinutes,
+        created.enabled ? 1 : 0, now, now,
+      );
+      return created;
+    });
+  }
+
+  /** AUTO-1, AUTO-15: any of an automation's fields; a null model is omp's default. */
+  updateAutomation(principal: Principal, automationId: string, input: AutomationInput & { name?: string }): Automation {
+    return this.transaction(() => {
+      const current = this.visibleAutomation(principal, automationId);
+      const next: Automation = {
+        ...current,
+        name: input.name ?? current.name,
+        slug: input.slug ?? current.slug,
+        instructions: input.instructions ?? current.instructions,
+        model: input.model === undefined ? current.model : input.model,
+        endMode: input.endMode ?? current.endMode,
+        timeLimitMinutes: input.timeLimitMinutes ?? current.timeLimitMinutes,
+        enabled: input.enabled ?? current.enabled,
+        updatedAt: Date.now(),
+      };
+      this.checkAutomationNames(current.projectId, next.name, next.slug, automationId);
+      this.db.prepare(
+        "UPDATE automations SET name = ?, slug = ?, instructions = ?, model = ?, end_mode = ?, time_limit_minutes = ?, enabled = ?, updated_at = ? WHERE id = ?",
+      ).run(next.name, next.slug, next.instructions, next.model, next.endMode, next.timeLimitMinutes, next.enabled ? 1 : 0, next.updatedAt, automationId);
+      return next;
+    });
+  }
+
+  /**
+   * Deletes an automation with its triggers, firings, folder records, and runs; refused while a
+   * run goes. People only. The ids of its runs are returned, whose chats and workspaces, and
+   * the folder's directory, are the caller's to remove.
+   */
+  deleteAutomation(principal: Principal, automationId: string): { automation: Automation; runIds: string[] } {
+    this.requireHuman(principal);
+    return this.transaction(() => {
+      const found = this.visibleAutomation(principal, automationId);
+      const running = this.runningRunOf(automationId);
+      if (running !== null) throw new StoreError(409, `automation "${found.name}" has a run going; end it first`, { sessionId: running.id });
+      const runIds = this.db.prepare("SELECT id FROM sessions WHERE automation_id = ?").all(automationId).map((row) => String(row.id));
+      for (const table of ["automation_firings", "automation_triggers", "automation_files", "sessions"]) {
+        this.db.prepare(`DELETE FROM ${table} WHERE automation_id = ?`).run(automationId);
+      }
+      this.db.prepare("DELETE FROM automations WHERE id = ?").run(automationId);
+      return { automation: found, runIds };
+    });
+  }
+
+  /** AUTO-8: a trigger of the automation; its schedule's timezone is Europe/Budapest unless given. */
+  addTrigger(principal: Principal, automationId: string, input: TriggerInput & { cron: string }): Trigger {
+    return this.transaction(() => {
+      this.visibleAutomation(principal, automationId);
+      const created: Trigger = {
+        id: randomUUID(),
+        automationId,
+        cron: input.cron,
+        timezone: input.timezone ?? "Europe/Budapest",
+        guardPath: input.guardPath ?? null,
+        checkPath: input.checkPath ?? null,
+        createdAt: Date.now(),
+      };
+      this.db.prepare("INSERT INTO automation_triggers (id, automation_id, cron, timezone, guard_path, check_path, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .run(created.id, automationId, created.cron, created.timezone, created.guardPath, created.checkPath, created.createdAt);
+      return created;
+    });
+  }
+
+  /** AUTO-8: changes a trigger; a null guard or check path removes it. */
+  updateTrigger(principal: Principal, triggerId: string, input: TriggerInput & { cron?: string }): Trigger {
+    return this.transaction(() => {
+      const current = this.visibleTrigger(principal, triggerId).trigger;
+      const next: Trigger = {
+        ...current,
+        cron: input.cron ?? current.cron,
+        timezone: input.timezone ?? current.timezone,
+        guardPath: input.guardPath === undefined ? current.guardPath : input.guardPath,
+        checkPath: input.checkPath === undefined ? current.checkPath : input.checkPath,
+      };
+      this.db.prepare("UPDATE automation_triggers SET cron = ?, timezone = ?, guard_path = ?, check_path = ? WHERE id = ?")
+        .run(next.cron, next.timezone, next.guardPath, next.checkPath, triggerId);
+      return next;
+    });
+  }
+
+  /** AUTO-8: removes a trigger; its firings stay in the automation's log. */
+  removeTrigger(principal: Principal, triggerId: string): Trigger {
+    return this.transaction(() => {
+      const { trigger: found } = this.visibleTrigger(principal, triggerId);
+      this.db.prepare("DELETE FROM automation_triggers WHERE id = ?").run(triggerId);
+      return found;
+    });
+  }
+
+  /** AUTO-7, AUTO-9: the automation's runs, newest first. */
+  listRuns(principal: Principal, automationId: string): Session[] {
+    this.visibleAutomation(principal, automationId);
+    return this.db.prepare("SELECT * FROM sessions WHERE automation_id = ? ORDER BY started_at DESC").all(automationId).map(session);
+  }
+
+  /** AUTO-7, AUTO-8: the automation's firings, newest first. */
+  listFirings(principal: Principal, automationId: string): Firing[] {
+    this.visibleAutomation(principal, automationId);
+    return this.db.prepare("SELECT * FROM automation_firings WHERE automation_id = ? ORDER BY scheduled_at DESC, fired_at DESC").all(automationId).map(firing);
+  }
+
+  /**
+   * AUTO-2, AUTO-8: records what became of a trigger's scheduled time; the store's own doing, so
+   * no principal. Each scheduled time of a trigger is recorded once: a second is refused (409).
+   */
+  recordFiring(input: Omit<Firing, "id" | "automationId">): Firing {
+    return this.transaction(() => {
+      const row = this.db.prepare("SELECT automation_id FROM automation_triggers WHERE id = ?").get(input.triggerId);
+      if (row === undefined) throw new StoreError(404, `trigger ${input.triggerId} not found`);
+      const created: Firing = { ...input, id: randomUUID(), automationId: String(row.automation_id) };
+      try {
+        this.db.prepare(
+          "INSERT INTO automation_firings (id, automation_id, trigger_id, scheduled_at, fired_at, guard_verdict, check_verdict, outcome, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ).run(
+          created.id, created.automationId, created.triggerId, created.scheduledAt, created.firedAt,
+          created.guard === null ? null : JSON.stringify(created.guard), created.check === null ? null : JSON.stringify(created.check),
+          created.outcome, created.sessionId,
+        );
+      } catch (cause) {
+        if (cause instanceof Error && /UNIQUE constraint failed/.test(cause.message)) {
+          throw new StoreError(409, `trigger ${input.triggerId} already fired for ${new Date(input.scheduledAt).toISOString()}`);
+        }
+        throw cause;
+      }
+      return created;
+    });
+  }
+
+  /**
+   * AUTO-1, AUTO-9: records a run of the automation, a session that belongs to it and to no
+   * task. Refused while the automation is off or a run of it goes. `principal` is who started
+   * it ("run now"); null when one of its triggers did. A host run follows HOST-1 and AUTH-3 as a
+   * task's host session does: only the owner starts one, in a project that allows them. Its
+   * worktree and container are the caller's job.
+   */
+  createRun(
+    principal: Principal | null,
+    automationId: string,
+    input: { machine?: string; runtime: SessionRuntime; triggerContext?: string },
+  ): Session {
+    const system = this.ownerPrincipal();
+    if (input.runtime === "host" && (principal === null || !this.isOwner(principal))) throw new StoreError(403, "only the store's owner starts host runs");
+    return this.transaction(() => {
+      const owner = this.visibleAutomation(principal ?? system, automationId);
+      if (!owner.enabled) throw new StoreError(409, `automation "${owner.name}" is off; it starts no runs`);
+      const running = this.runningRunOf(automationId);
+      if (running !== null) throw new StoreError(409, `automation "${owner.name}" has a run going`, { sessionId: running.id });
+      if (input.runtime === "host" && !this.visibleProject(system, owner.projectId).hostSessions) {
+        throw new StoreError(403, "this project does not allow host sessions");
+      }
+      const startedBy = principal === null ? null : actorOf(principal);
+      const created: Session = {
+        id: randomUUID(),
+        projectId: owner.projectId,
+        taskId: null,
+        automationId,
+        name: owner.name,
+        branch: null,
+        baseRef: null,
+        machine: input.machine ?? null,
+        runtime: input.runtime,
+        checkout: false,
+        model: owner.model,
+        startedAt: Date.now(),
+        endedAt: null,
+        run: { startedBy, triggerContext: input.triggerContext ?? "", outcome: null, endedBy: null },
+      };
+      const [kind, id] = actorColumns(startedBy);
+      this.db.prepare(
+        "INSERT INTO sessions (id, project_id, automation_id, name, machine, runtime, checkout, model, started_at, run_started_by_kind, run_started_by_id, run_trigger_context) " +
+          "VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)",
+      ).run(created.id, created.projectId, automationId, created.name, created.machine, created.runtime, created.model, created.startedAt, kind, id, created.run?.triggerContext ?? "");
+      return created;
+    });
+  }
+
+  /** AUTO-10, AUTO-14: how a run ended, or ends: its end mode's outcome, or that it timed out. */
+  setRunOutcome(sessionId: string, outcome: RunOutcome): void {
+    this.db.prepare("UPDATE sessions SET run_outcome = ? WHERE id = ? AND automation_id IS NOT NULL").run(outcome, sessionId);
   }
 
   /**
@@ -1050,9 +1551,13 @@ export class Store {
     const ofProject = (sql: string) => this.db.prepare(sql).all(projectId);
     const ofTasks = (table: string, order: string) =>
       ofProject(`SELECT r.* FROM ${table} r JOIN tasks t ON t.id = r.task_id WHERE t.project_id = ? ORDER BY ${order}`);
+    const ofAutomations = (table: string, order: string) =>
+      ofProject(`SELECT r.* FROM ${table} r JOIN automations a ON a.id = r.automation_id WHERE a.project_id = ? ORDER BY ${order}`);
     const tasks = ofProject("SELECT * FROM tasks WHERE project_id = ? ORDER BY created_at, id").map(task);
+    const sessions = ofProject("SELECT * FROM sessions WHERE project_id = ? ORDER BY started_at, id").map(session);
     const comments = ofTasks("comments", "r.rowid").map(comment);
     const folderFiles = ofTasks("folder_files", "r.task_id, r.path").map((row) => ({ taskId: String(row.task_id), ...folderFile(row) }));
+    const automationFiles = ofAutomations("automation_files", "r.automation_id, r.path").map((row) => ({ automationId: String(row.automation_id), ...folderFile(row) }));
     const events = ofTasks("task_events", "r.id").map((row) => ({
       taskId: String(row.task_id),
       at: Number(row.at),
@@ -1060,22 +1565,32 @@ export class Store {
       event: historyEvent.parse(JSON.parse(String(row.data))),
     }));
     const named = new Set<string>();
-    for (const who of [...comments.map((found) => found.author), ...folderFiles.map((file) => file.addedBy), ...events.map((entry) => entry.actor)]) {
+    for (const who of [
+      ...comments.map((found) => found.author),
+      ...folderFiles.map((file) => file.addedBy),
+      ...automationFiles.map((file) => file.addedBy),
+      ...events.map((entry) => entry.actor),
+      ...sessions.flatMap((found) => (found.run === null ? [] : [found.run.startedBy, found.run.endedBy])),
+    ]) {
       if (who?.kind === "person") named.add(who.personId);
     }
     for (const id of [...tasks.map((found) => found.assigneeId), ...events.map(({ event }) => (event.kind === "assignee" ? event.personId : null))]) {
       if (id !== null) named.add(id);
     }
     return {
-      version: 2,
+      version: 3,
       project: found,
       people: this.db.prepare("SELECT * FROM people ORDER BY owner DESC, created_at, id").all().map(person).filter((found) => found.owner || named.has(found.id)),
       topics: ofProject("SELECT * FROM topics WHERE project_id = ? ORDER BY created_at, id").map(topic),
       tasks,
       topicLinks: ofTasks("task_topics", "r.rowid").map((row) => ({ taskId: String(row.task_id), topicId: String(row.topic_id), linkedAt: Number(row.linked_at) })),
-      sessions: ofProject("SELECT * FROM sessions WHERE project_id = ? ORDER BY started_at, id").map(session),
+      automations: ofProject("SELECT * FROM automations WHERE project_id = ? ORDER BY created_at, id").map(automation),
+      triggers: ofAutomations("automation_triggers", "r.created_at, r.id").map(trigger),
+      sessions,
+      firings: ofAutomations("automation_firings", "r.scheduled_at, r.id").map(firing),
       comments,
       folderFiles,
+      automationFiles,
       events,
       cloudflareTokens: this.cloudflareTokens(projectId),
     };
@@ -1098,11 +1613,14 @@ export class Store {
       for (const [table, ids] of Object.entries({
         topics: records.topics.map((found) => found.id),
         tasks: records.tasks.map((found) => found.id),
+        automations: records.automations.map((found) => found.id),
+        automation_triggers: records.triggers.map((found) => found.id),
+        automation_firings: records.firings.map((found) => found.id),
         sessions: records.sessions.map((found) => found.id),
         comments: records.comments.map((found) => found.id),
       })) {
         const taken = ids.find((id) => this.db.prepare(`SELECT 1 FROM ${table} WHERE id = ?`).get(id) !== undefined);
-        if (taken !== undefined) throw new StoreError(409, `this store already has ${table.slice(0, -1)} ${taken}`);
+        if (taken !== undefined) throw new StoreError(409, `this store already has a record ${taken} of ${table}`);
       }
       const match = matchPeople(records.people, this.db.prepare("SELECT * FROM people").all().map(person));
       const added: Person[] = [];
@@ -1139,12 +1657,35 @@ export class Store {
       for (const link of records.topicLinks) {
         this.db.prepare("INSERT INTO task_topics (task_id, topic_id, linked_at) VALUES (?, ?, ?)").run(link.taskId, link.topicId, link.linkedAt);
       }
-      for (const found of records.sessions) {
+      for (const found of records.automations) {
         this.db.prepare(
-          "INSERT INTO sessions (id, project_id, task_id, name, branch, base_ref, machine, runtime, checkout, model, started_at, ended_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO automations (id, project_id, name, slug, instructions, model, end_mode, time_limit_minutes, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         ).run(
-          found.id, moved.id, found.taskId, found.name, found.branch, found.baseRef, found.machine, found.runtime, found.checkout ? 1 : 0,
-          found.model, found.startedAt, found.endedAt,
+          found.id, moved.id, found.name, found.slug, found.instructions, found.model, found.endMode, found.timeLimitMinutes, found.enabled ? 1 : 0,
+          found.createdAt, found.updatedAt,
+        );
+      }
+      for (const found of records.triggers) {
+        this.db.prepare("INSERT INTO automation_triggers (id, automation_id, cron, timezone, guard_path, check_path, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+          .run(found.id, found.automationId, found.cron, found.timezone, found.guardPath, found.checkPath, found.createdAt);
+      }
+      for (const found of records.sessions) {
+        const [startedKind, startedId] = actorColumns(actorHere(found.run?.startedBy ?? null));
+        const [endedKind, endedId] = actorColumns(actorHere(found.run?.endedBy ?? null));
+        this.db.prepare(
+          "INSERT INTO sessions (id, project_id, task_id, automation_id, name, branch, base_ref, machine, runtime, checkout, model, started_at, ended_at, " +
+            "run_started_by_kind, run_started_by_id, run_trigger_context, run_outcome, run_ended_by_kind, run_ended_by_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ).run(
+          found.id, moved.id, found.taskId, found.automationId, found.name, found.branch, found.baseRef, found.machine, found.runtime, found.checkout ? 1 : 0,
+          found.model, found.startedAt, found.endedAt, startedKind, startedId, found.run?.triggerContext ?? null, found.run?.outcome ?? null, endedKind, endedId,
+        );
+      }
+      for (const found of records.firings) {
+        this.db.prepare(
+          "INSERT INTO automation_firings (id, automation_id, trigger_id, scheduled_at, fired_at, guard_verdict, check_verdict, outcome, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ).run(
+          found.id, found.automationId, found.triggerId, found.scheduledAt, found.firedAt, found.guard === null ? null : JSON.stringify(found.guard),
+          found.check === null ? null : JSON.stringify(found.check), found.outcome, found.sessionId,
         );
       }
       for (const found of records.comments) {
@@ -1157,6 +1698,12 @@ export class Store {
         this.db.prepare(
           "INSERT INTO folder_files (task_id, path, size, content_type, added_by_kind, added_by_id, added_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         ).run(file.taskId, file.path, file.size, file.contentType, kind, id, file.addedAt, file.updatedAt);
+      }
+      for (const file of records.automationFiles) {
+        const [kind, id] = actorColumns(actorHere(file.addedBy));
+        this.db.prepare(
+          "INSERT INTO automation_files (automation_id, path, size, content_type, added_by_kind, added_by_id, added_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ).run(file.automationId, file.path, file.size, file.contentType, kind, id, file.addedAt, file.updatedAt);
       }
       for (const entry of records.events) {
         const [kind, id] = actorColumns(actorHere(entry.actor));
@@ -1175,7 +1722,10 @@ export class Store {
       for (const table of ["task_events", "comments", "folder_files", "task_topics"]) {
         this.db.prepare(`DELETE FROM ${table} WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)`).run(projectId);
       }
-      for (const table of ["sessions", "tasks", "topics", "cloudflare_tokens"]) this.db.prepare(`DELETE FROM ${table} WHERE project_id = ?`).run(projectId);
+      for (const table of ["automation_firings", "automation_triggers", "automation_files"]) {
+        this.db.prepare(`DELETE FROM ${table} WHERE automation_id IN (SELECT id FROM automations WHERE project_id = ?)`).run(projectId);
+      }
+      for (const table of ["sessions", "tasks", "automations", "topics", "cloudflare_tokens"]) this.db.prepare(`DELETE FROM ${table} WHERE project_id = ?`).run(projectId);
       this.db.prepare("DELETE FROM projects WHERE id = ?").run(projectId);
     });
   }
