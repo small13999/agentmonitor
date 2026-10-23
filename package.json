@@ -14,6 +14,8 @@
     "spec:lock": "node scripts/spec-check.ts --update"
   },
   "dependencies": {
+    "@fontsource-variable/bricolage-grotesque": "^5.3.0",
+    "@fontsource/dm-mono": "^5.3.0",
     "http-proxy": "^1.18.1",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",

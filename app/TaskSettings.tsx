@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api, usePolled, type Card, type ChangedFile, type EndedSession, type TaskChanges, type TaskSummary } from "./api.ts";
-import { HostMark, Light } from "./Board.tsx";
+import { HostMark, TurnPill } from "./Board.tsx";
 
 type Subtab = "changes" | "cloudflare" | "end";
 
@@ -143,8 +143,8 @@ export function TaskSettings({ summary, card, onChanged }: { summary: TaskSummar
   return (
     <section className="workspace-page task-settings" aria-label="Settings">
       <header className="settings-head">
-        {card !== null && <Light turn={card.turn} />}
         <h2>{summary.task.title}</h2>
+        {card !== null && <TurnPill turn={card.turn} />}
         <HostMark card={card} />
       </header>
       <nav role="tablist" aria-label="Settings" className="subtabs">

@@ -56,7 +56,10 @@ through Agent Monitor (dogfooding).
   working, a clear "needs you"). Picked from three prototypes: Studio (Bricolage
   Grotesque, violet, compact and high signal), toned down: no offset 3D shadows, no
   tilted elements or stickers. Console was too intimidating for non-technical users,
-  Paper too drawn out (half the tasks per screen).
+  Paper too drawn out (half the tasks per screen). Built in `app/app.css`: fonts
+  self-hosted from npm (fontsource: Bricolage Grotesque, DM Mono for ids and files),
+  light and dark follow the system, violet for selection and actions, yellow only for
+  "waiting on you", pills for topics, states, tabs, and buttons.
 - People: the user and the teammate as named users; the assignee is a person.
 
 ### Automations (step 7)

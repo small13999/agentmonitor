@@ -257,7 +257,7 @@ function SessionsField({ task, detail, card, directory }: { task: Task; detail: 
               {session.endedAt === null ? "" : `, ended ${when(session.endedAt)}`}
             </span>
             {session.endedAt === null && card?.session.id === session.id && (
-              <span className="session-state"><Light turn={card.turn} />{LIGHT_LABEL[card.turn]}</span>
+              <span className={`session-state turn turn-${card.turn}`}><Light turn={card.turn} />{LIGHT_LABEL[card.turn]}</span>
             )}
             {session.endedAt === null && <HostMark card={card?.session.id === session.id ? card : null} />}
           </li>
@@ -446,7 +446,7 @@ export function TaskPage({ summary, card, topics, onChanged }: { summary: TaskSu
       <header className="page-head">
         <TitleField task={task} onSaved={changed} />
         {card !== null && (
-          <span className="session-state" role="status" aria-label="Session state">
+          <span className={`session-state turn turn-${card.turn}`} role="status" aria-label="Session state">
             <Light turn={card.turn} />{LIGHT_LABEL[card.turn]}
           </span>
         )}
