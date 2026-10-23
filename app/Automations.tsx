@@ -409,7 +409,8 @@ function RunOutputs({ automation, group, onChanged }: { automation: Automation; 
       <div className="outputs">
         {group.files.map((file) => <OutputFile key={file.path} owner={owner} file={file} dir={group.dir} />)}
       </div>
-      {group.run !== null && <RunActions automation={automation} run={group.run} onChanged={onChanged} />}
+      {/* A run waiting for review has them in its row above. */}
+      {group.run !== null && !waitsForReview(group.run) && <RunActions automation={automation} run={group.run} onChanged={onChanged} />}
     </article>
   );
 }
