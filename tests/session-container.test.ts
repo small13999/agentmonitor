@@ -10,6 +10,7 @@ import { WebSocket } from "ws";
 import { buildImage } from "../scripts/build-image.ts";
 import { FakeModel } from "./fake-model.ts";
 import { buildApp, Gateway, type OmpChannel } from "./harness.ts";
+import type { HistoryEntry, TaskChanges } from "../shared/api.ts";
 import { spec } from "./spec.ts";
 
 // Every claim in this file runs against one gateway and its session containers, in order.
@@ -32,7 +33,7 @@ const PULL_REQUEST = { number: 7, title: "Patch notes JP", url: "https://github.
 const TASK_A = {
   description: "Translate the JP patch notes 9c1e.",
   status: "Done: glossary 4b7d\n",
-  notes: "Ask Jogi before publishing 2e8f.",
+  comment: "Ask Jogi before publishing 2e8f.",
 };
 
 let scratch: string;
@@ -69,7 +70,9 @@ before(async () => {
   mkdirSync(agentDir);
   fake.writeAgentDir(agentDir);
   const gh = join(scratch, "gh");
-  writeFileSync(gh, `#!/bin/sh\necho '${JSON.stringify([PULL_REQUEST])}'\n`);
+  // Each listing says the pull request was opened now, so it is recorded when GitHub is first asked (TASK-14).
+  const listing = JSON.stringify([{ ...PULL_REQUEST, createdAt: "OPENED" }]);
+  writeFileSync(gh, `#!/bin/sh\necho '${listing}' | sed "s/OPENED/$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)/"\n`);
   chmodSync(gh, 0o755);
 
   // The user's git credentials and the project's Cloudflare tokens, which the gateway keeps.
@@ -107,7 +110,7 @@ before(async () => {
   projectId = (await gateway.data<{ id: string }>("POST", "/projects", { name: "fixture", repoPath: repo })).id;
   const taskA = await gateway.data<Task>("POST", `/projects/${projectId}/tasks`, { title: "Patch Notes JP", description: TASK_A.description });
   await gateway.data("PUT", `/tasks/${taskA.id}/status`, { status: TASK_A.status, baseRevision: 0 });
-  await gateway.data("PUT", `/tasks/${taskA.id}/notes`, { text: TASK_A.notes, baseRevision: 0 });
+  await gateway.data("POST", `/tasks/${taskA.id}/comments`, { body: TASK_A.comment });
   a = await gateway.data<Session>("POST", `/tasks/${taskA.id}/sessions`, { model: "fake/scripted" });
   channelA = await gateway.omp(a.id);
 }, { timeout: 60_000 });
@@ -184,7 +187,7 @@ interface Chat {
  * web client in a new one costs seconds. The client draws with WebGPU; without a GPU,
  * Chromium runs it on Mesa's llvmpipe Vulkan driver.
  */
-async function sessionPage(target: Session): Promise<Page> {
+async function sessionPage(target: Session, tab: "page" | "chat" | "settings" = "chat"): Promise<Page> {
   await closePages();
   chrome ??= await chromium.launch({
     args: ["--enable-unsafe-webgpu", "--ignore-gpu-blocklist", "--enable-features=Vulkan,VulkanFromANGLE", "--use-vulkan=native", "--use-angle=vulkan"],
@@ -192,7 +195,7 @@ async function sessionPage(target: Session): Promise<Page> {
   const page = await chrome.newPage();
   openPages.add(page);
   page.setDefaultTimeout(15_000);
-  await page.goto(`${gateway.url}/#/t/${target.taskId}`);
+  await page.goto(`${gateway.url}/#/t/${target.taskId}${tab === "page" ? "" : `/${tab}`}`);
   return page;
 }
 
@@ -260,11 +263,21 @@ spec("SESSION-4", "a chat starts with the workflow context and the repository's 
   assert.ok(String(systemPrompt).includes("am topic link NAME"), "workflow RULES.md is a sticky rule");
 });
 
-spec("TASK-6", "a session's first chat starts with its task's title, description, status, and notes", async () => {
+spec("TASK-6", "a session's first chat starts with its task's title, description, status, and comments", async () => {
   const { systemPrompt } = await channelA.request("system_prompt");
-  for (const part of ['"Patch Notes JP"', TASK_A.description, TASK_A.status.trim(), TASK_A.notes]) {
+  for (const part of ['"Patch Notes JP"', TASK_A.description, TASK_A.status.trim(), `> ${TASK_A.comment}`]) {
     assert.ok(String(systemPrompt).includes(part), `the context holds ${part}`);
   }
+});
+
+spec("COMMENT-3", "comments never reach a running session's chat; its agent reads them when its session starts and with am comments", async () => {
+  const before = String((await channelA.request("system_prompt")).systemPrompt);
+  const posted = "Hold the release until Friday 5d2a.";
+  await gateway.data("POST", `/tasks/${a.taskId}/comments`, { body: posted });
+  assert.equal(String((await channelA.request("system_prompt")).systemPrompt), before, "the running chat's context stays as it started");
+  assert.ok(!chats(a).some((path) => readFileSync(path, "utf8").includes(posted)), "no chat of the session got the comment");
+  const asked = exec(a, ["am", "comments"]);
+  assert.ok(asked.includes(TASK_A.comment) && asked.includes(posted), `am comments lists both:\n${asked}`);
 });
 
 spec("CARD-2", "a card shows the last user message and the agent's last reply", async () => {
@@ -274,7 +287,7 @@ spec("CARD-2", "a card shows the last user message and the agent's last reply", 
   assert.equal(shown.lastReply, "hello");
 });
 
-spec("CARD-3", "a card shows uncommitted changes, unpushed commits, and open pull requests", async () => {
+spec("CARD-3", "a task's Changes view shows what its branch changed against the default branch, its uncommitted files, and its open pull requests", async () => {
   exec(a, ["sh", "-c", [
     "cd /workspace/fixture",
     "echo note > notes.txt",
@@ -282,15 +295,38 @@ spec("CARD-3", "a card shows uncommitted changes, unpushed commits, and open pul
     "git -c user.name=a -c user.email=a@a commit -qam 'Translate patch notes'",
     "echo draft > draft.md",
   ].join(" && ")]);
-  const shown = await card(a);
-  assert.deepEqual(shown.git?.uncommitted.sort(), ["draft.md", "notes.txt"]);
-  assert.equal(shown.git?.unpushed, 1);
-  assert.deepEqual(shown.pullRequests, [PULL_REQUEST]);
+  const changes = await gateway.data<TaskChanges>("GET", `/tasks/${a.taskId}/changes`);
+  assert.equal(changes.branch, a.branch);
+  assert.match(changes.committed?.commits.join("\n") ?? "", /^[0-9a-f]+ Translate patch notes$/);
+  assert.deepEqual(changes.committed?.files, [{ path: "AGENTS.md", status: "modified" }]);
+  assert.deepEqual(changes.uncommitted?.sort(), ["draft.md", "notes.txt"]);
+  assert.deepEqual(changes.pullRequests, [PULL_REQUEST]);
+
+  // The Settings tab opens on it.
+  const page = await sessionPage(a, "settings");
+  const view = page.getByRole("region", { name: "Settings" }).getByRole("region", { name: "Changes" });
+  await view.locator(".changed-files li", { hasText: "AGENTS.md" }).waitFor();
+  await view.locator(".commits li", { hasText: "Translate patch notes" }).waitFor();
+  assert.deepEqual((await view.locator(".uncommitted code").allTextContents()).sort(), ["draft.md", "notes.txt"]);
+  await view.getByRole("link", { name: "PR #7" }).waitFor();
+});
+
+spec("TASK-14", "a task's history lists the pull requests of its branch, which no one in the store did", async () => {
+  const history = await gateway.data<HistoryEntry[]>("GET", `/tasks/${a.taskId}/history`);
+  const prs = history.filter((entry) => entry.kind === "pull_request");
+  assert.deepEqual(prs.map(({ at: _at, ...entry }) => entry), [{ kind: "pull_request", ...PULL_REQUEST, actor: null }]);
+  assert.ok(history.every((entry, index) => index === 0 || entry.at >= history[index - 1].at), "in time order");
+  assert.ok(prs[0].at > history[0].at, "opened after the task was created");
+  const page = await sessionPage(a, "page");
+  const entry = page.getByRole("region", { name: "History" }).locator("li", { hasText: "pull request #7 Patch notes JP opened" });
+  await entry.waitFor();
+  assert.equal(await entry.locator(".actor-name").textContent(), "GitHub");
+  assert.equal(await entry.getByRole("link", { name: "#7" }).getAttribute("href"), PULL_REQUEST.url);
 });
 
 let b: Session;
 
-spec("CARD-4", "a card names other sessions that changed the same files", async () => {
+spec("CARD-4", "a task's Changes view and its card name the other running tasks that changed the same files", async () => {
   b = await session("Client fixes");
   const worktreeB = join(gateway.stateDir, "sessions", b.id, "worktree");
   writeFileSync(join(worktreeB, "AGENTS.md"), "# Fixture\n\nrewritten\n");
@@ -300,6 +336,14 @@ spec("CARD-4", "a card names other sessions that changed the same files", async 
   const shownB = await card(b);
   assert.deepEqual(shownA.overlaps, [{ sessionId: b.id, name: "Client fixes", files: ["AGENTS.md"] }]);
   assert.deepEqual(shownB.overlaps, [{ sessionId: a.id, name: "Patch Notes JP", files: ["AGENTS.md"] }]);
+  const changesA = await gateway.data<TaskChanges>("GET", `/tasks/${a.taskId}/changes`);
+  const changesB = await gateway.data<TaskChanges>("GET", `/tasks/${b.taskId}/changes`);
+  assert.deepEqual(changesA.overlaps, [{ taskId: b.taskId, title: "Client fixes", files: ["AGENTS.md"] }]);
+  assert.deepEqual(changesB.overlaps, [{ taskId: a.taskId, title: "Patch Notes JP", files: ["AGENTS.md"] }]);
+  const page = await sessionPage(a, "settings");
+  const overlap = page.getByRole("region", { name: "Changes" }).locator(".overlap", { hasText: "Client fixes: AGENTS.md" });
+  await overlap.waitFor();
+  assert.equal(await overlap.getByRole("link", { name: "Client fixes" }).getAttribute("href"), `#/t/${b.taskId}`);
 });
 
 spec("CARD-5", "sessions waiting on you sort first", async () => {
@@ -332,7 +376,7 @@ spec("BOARD-1", "the board shows tasks in columns by state, each with its topics
   // b's card names a's session among its overlaps, so pick a's card by its title.
   const cardA = page.getByRole("region", { name: "In progress" }).locator(".card").filter({ has: page.locator("strong", { hasText: "Patch Notes JP" }) });
   await cardA.locator(".chip", { hasText: "Release" }).waitFor();
-  await cardA.getByLabel("Turn done").waitFor();
+  await cardA.getByLabel("Idle").waitFor();
   await cardA.getByText("say:hello").waitFor();
   await cardA.getByText("2 uncommitted · 1 unpushed").waitFor();
   await cardA.getByRole("link", { name: "PR #7" }).waitFor();
@@ -474,19 +518,29 @@ spec("AGENT-7", "text in any script, symbols and emoji show in a font that has t
   assert.equal(await fontsStatus(host, "http://elsewhere.example"), 403);
 });
 
-spec("CARD-1", "a card shows whether its session is blocked on you, working, done, or stopped", async () => {
+spec("CARD-1", "a task's card and page show its running session as waiting on you, working, idle, or stopped; working pulses", async () => {
+  const pulse = (light: Element) => getComputedStyle(light).animationName;
   assert.equal((await card(b)).turn, "blocked");
+  const pageB = await sessionPage(b, "page");
+  await pageB.getByRole("status", { name: "Session state" }).filter({ hasText: "Waiting on you" }).waitFor();
 
   await prompt(a, channelA, "hold:later", "working");
   assert.equal((await card(a)).turn, "working");
+  const page = await sessionPage(a, "page");
+  const state = page.getByRole("status", { name: "Session state" });
+  await state.filter({ hasText: "Working" }).waitFor();
+  assert.notEqual(await state.locator(".light").evaluate(pulse), "none", "working pulses");
   const done = channelA.event((event) => event.type === "turn" && event.turn === "done");
   await fake.holding();
   fake.release();
   await done;
   assert.equal((await card(a)).turn, "done");
+  await state.filter({ hasText: "Idle" }).waitFor();
+  assert.equal(await state.locator(".light").evaluate(pulse), "none");
 
   execFileSync("podman", ["stop", "-t", "0", `am-${a.id}`]);
   assert.equal((await card(a)).turn, "stopped");
+  await state.filter({ hasText: "Stopped" }).waitFor();
 });
 
 spec("SESSION-10", "opening a session whose container stopped starts it again on its last chat", async () => {
@@ -542,13 +596,13 @@ spec("SESSION-8", "ending a session removes its workspace and keeps its chats an
   gitIn(b, "push", "-q", "origin", b.branch);
   writeFileSync(join(gateway.stateDir, "sessions", b.id, "worktree", "scratch.txt"), "draft\n");
 
-  const page = await sessionPage(b);
-  await page.getByRole("button", { name: "Workspace settings" }).click();
-  const settings = page.getByRole("complementary", { name: "Workspace settings" });
-  await settings.getByRole("button", { name: "End session" }).click();
+  const page = await sessionPage(b, "settings");
+  const settings = page.getByRole("region", { name: "Settings" });
+  await settings.getByRole("tab", { name: "End session" }).click();
   await settings.getByRole("region", { name: "End session" }).getByRole("button", { name: "End session" }).click();
   await settings.getByRole("status").filter({ hasText: "Session ended. 2 uncommitted files were kept for the task's next session." }).waitFor();
   // Without a session, the task's chat tab offers to start one.
+  await page.getByRole("tab", { name: "Chat" }).click();
   await page.getByRole("region", { name: "Start session" }).getByRole("button", { name: "Start session" }).waitFor();
 
   const ended = await gateway.data<{ session: Session }>("GET", `/sessions/${b.id}`);
@@ -592,16 +646,15 @@ spec("TASK-9", "finishing a task ends its session and deletes its branch here, a
   gitIn(b2, "commit", "-qm", "Keep notes");
   const unpushed = gitIn(b2, "log", "-1", "--format=%h %s");
 
-  const page = await sessionPage(b2);
-  await page.getByRole("button", { name: "Workspace settings" }).click();
-  const finish = page.getByRole("complementary", { name: "Workspace settings" }).getByRole("region", { name: "Finish task" });
+  const page = await sessionPage(b2, "page");
+  const finish = page.getByRole("region", { name: "Finish task" });
   await finish.getByRole("button", { name: "Mark done" }).click();
   await finish.getByText("No remote has these commits; finishing deletes them with the branch:").waitFor();
   assert.deepEqual(await finish.locator(".unpushed code").allTextContents(), [unpushed]);
   assert.equal((await taskOf(b2)).task.state, "in_progress", "the refused finish changed nothing");
 
   await finish.getByRole("button", { name: "Mark done and delete them" }).click();
-  await page.getByRole("region", { name: "Start session" }).getByText("This task is done.").waitFor();
+  await page.getByRole("region", { name: "State" }).getByText("Done", { exact: true }).waitFor();
   assert.equal((await taskOf(b2)).task.state, "done");
   assert.notEqual((await gateway.data<{ session: Session }>("GET", `/sessions/${b2.id}`)).session.endedAt, null);
   assert.equal(spawnSync("git", ["-C", repo, "rev-parse", "--verify", "--quiet", `refs/heads/${b.branch}`]).status, 1, "the branch is gone here");
@@ -696,9 +749,10 @@ spec("CLOUDFLARE-2", "an agent changes Cloudflare only while the user allows it 
     const allowSelf = `require("node:http").request({ socketPath: "/run/agentmonitor/am.sock", method: "POST", path: "/api/store/sessions/${a.id}/cloudflare-writes" }, (r) => { console.log(r.statusCode); r.resume(); }).end()`;
     assert.equal(exec(a, ["node", "-e", allowSelf]), "403");
 
-    const { page } = await openChat(a);
-    await page.getByRole("button", { name: "Workspace settings" }).click();
-    const panel = page.getByRole("complementary", { name: "Workspace settings" }).getByRole("region", { name: "Cloudflare" });
+    const page = await sessionPage(a, "settings");
+    const settings = page.getByRole("region", { name: "Settings" });
+    await settings.getByRole("tab", { name: "Cloudflare" }).click();
+    const panel = settings.getByRole("region", { name: "Cloudflare" });
     await panel.getByRole("button", { name: "Allow writes for 10 min" }).click();
     await panel.getByText(/^Writes allowed until/).waitFor();
     const until = (await card(a)).cloudflare?.writesUntil ?? 0;

@@ -211,7 +211,7 @@ spec("HOST-4", "a host session's chat, task context, am, and card work as a cont
   assert.equal(shown.turn, "done");
 
   // The session page opens its chat in Tern.
-  const opened = await openPage(`#/t/${task.id}`);
+  const opened = await openPage(`#/t/${task.id}/chat`);
   await opened.frameLocator("iframe.session-frame.current").getByRole("group", { name: /^Model: Scripted/ }).waitFor();
 });
 
@@ -220,7 +220,7 @@ spec("HOST-4", "a stopped host session starts again on its last chat when its pa
   assert.equal((await card(host)).turn, "stopped");
   channel.close();
 
-  const opened = await openPage(`#/t/${task.id}`);
+  const opened = await openPage(`#/t/${task.id}/chat`);
   const frame = opened.frameLocator("iframe.session-frame.current");
   await frame.getByRole("group", { name: /^Model: Scripted/ }).waitFor({ timeout: 60_000 });
   await frame.getByText("bash:am whoami", { exact: true }).waitFor({ state: "attached" });
@@ -244,8 +244,8 @@ spec("HOST-3", "a host session is marked red on its board card, task list row, a
   assert.equal(await list.getByRole("link", { name: /No session/ }).locator(".host-mark").count(), 0);
 
   await list.getByRole("link", { name: new RegExp(TASK.title) }).click();
-  await opened.getByRole("button", { name: "Workspace settings" }).click();
-  await opened.getByRole("complementary", { name: "Workspace settings" }).locator(".host-mark", { hasText: "Host" }).waitFor();
+  await opened.getByRole("tab", { name: "Settings" }).click();
+  await opened.getByRole("region", { name: "Settings" }).locator(".host-mark", { hasText: "Host" }).waitFor();
 });
 
 spec("HOST-2", "a host session's agent works as the user in its own worktree, and ending it stops every process it started", async () => {

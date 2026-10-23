@@ -30,7 +30,7 @@ function Changes({ taskId }: { taskId: string }) {
       {branch === null
         ? <p className="muted small">The task has no branch yet; its first session creates it.</p>
         : <p className="small">Branch <code>{branch}</code>{baseRef !== null && <> against <code>{baseRef}</code></>}</p>}
-      <h3>Committed on the branch</h3>
+      {branch !== null && <h3>Committed on the branch</h3>}
       {committed === null && branch !== null && <p className="muted small">The branch cannot be read here.</p>}
       {committed !== null && committed.files.length === 0 && <p className="muted small">The branch has no changes against the default branch.</p>}
       {committed !== null && committed.files.length > 0 && (
