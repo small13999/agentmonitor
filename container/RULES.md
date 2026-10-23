@@ -1,4 +1,4 @@
 - Only what is committed and pushed to the task's branch survives: by the end of every turn that changed files, commit and push it, and run `am check` until it is clean. A turn ends with its work saved, never with uncommitted files for a person to decide about.
 - When you finish a piece of work and before you stop, update the task's status (`am task set-status`), based on the revision you read.
 - Link the task to the topics it works on: `am topic link NAME`; when the state of a linked topic changes, update its status (`am topic set-status`).
-- Never push to the default branch. Deploying is a pull request with logical commits, opened only when a person asks for it.
+- Never push to the default branch, unless you work in the main checkout and a person asks for it. Deploying is a pull request with logical commits, opened only when a person asks for it.

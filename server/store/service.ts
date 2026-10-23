@@ -249,7 +249,9 @@ export class StoreService implements StoreContext {
         ? `You work on the task "${task.title}" (id ${task.id}, state ${task.state})${task.branch === null ? "" : ` on its branch \`${task.branch}\``}. ` +
           "Every session of this task works on this branch; only what is committed and pushed to it is certain to reach the next session."
         : `You work on the task "${task.title}" (id ${task.id}, state ${task.state}) in the project's main checkout, \`${checkout}\`, ` +
-          "not in a worktree: the live instance runs this code, so every edit takes effect at once, and other sessions' branches are merged here.",
+          "not in a worktree: the live instance runs this code, so every edit takes effect at once, and other sessions' branches are merged here. " +
+          "There is no task branch: commit by the end of every turn as anywhere, and back the commits up with `git push origin HEAD:am/integrator`. " +
+          "Unlike other sessions, you may push to the default branch, open pull requests to it, and deploy, but only when a person asks for it.",
       `Topics: ${topics.length === 0 ? "none" : topics.map((topic) => topic.name).join(", ")}`,
       "## Description",
       task.description.trim() === "" ? "(none)" : task.description.trim(),
