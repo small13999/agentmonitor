@@ -228,6 +228,37 @@ file added later reaches a session when its container starts again.
 this. Tests point them at a scripted fake model (`tests/fake-model.ts`), a fake
 `gh`, fixture credentials, and a fake Cloudflare API.
 
+### Moving a project to another store
+
+`node scripts/move-project.ts <source url> <project name or id> <target url>`
+moves a project, for example from the user's PC to the hub, keeping its ids
+(so links and branch names stay valid) and who did what. Both ends need the
+store's owner. The script drives three store routes:
+
+1. `POST /projects/:id/export {confirm?}` on the source answers the bundle, a
+   `.tar.gz` of `bundle.json` (every record of the project and the people they
+   name), `folders/<task id>/…`, and `chats/<session id>/{sessions,blobs}/…`
+   (each session's omp transcripts and the blobs they refer to). It is refused
+   while a session runs, naming it; a stopped session ends first. Without
+   `confirm` (`--confirm`) it is refused when a task has work the move leaves
+   behind: a snapshot or a stopped session's uncommitted files (deleted with the
+   project) or commits no remote has (they stay on the source's branch).
+   Worktrees never move; branches are on the remote.
+2. `PUT /imports/:upload?offset=N` on the target appends a part (the script
+   sends 32 MiB, under Cloudflare's request size limit), and `POST
+   /imports/:upload {repoPath?}` imports it: refused if the target has the
+   project or any of its records. People map by email where they have one, else
+   by name; the source's owner is the target's owner, and anyone missing is
+   added (`matchPeople` in `server/store/bundle.ts`). The project arrives with
+   `--target-repo` as its checkout (else none) and host sessions off. The
+   answer carries the SHA-256 of `bundle.json`.
+3. `POST /projects/:id/moved {digest}` on the source deletes the project, its
+   folders, chats, and snapshots, only if its records still have that digest.
+
+A store not on this machine is reached with a Cloudflare Access token in
+`cf-access-token`, printed by `--source-token-command` /
+`--target-token-command` (default `cloudflared access token -app=<url>`).
+
 ## Gateway
 
 `server/` holds the gateway shared by the Vite dev plugin (`npm run dev`, port

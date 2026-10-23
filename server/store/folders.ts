@@ -230,7 +230,9 @@ export class TaskFolders {
     }
     for (const file of files) {
       const path = join(this.root, taskId, file.path);
-      if (lstatSync(path, { throwIfNoEntry: false })?.isFile()) utimesSync(path, file.updatedAt / 1000, file.updatedAt / 1000);
+      // Half a millisecond on: seconds as a double are inexact, and the folder counts modification times in whole milliseconds.
+      const at = (file.updatedAt + 0.5) / 1000;
+      if (lstatSync(path, { throwIfNoEntry: false })?.isFile()) utimesSync(path, at, at);
     }
   }
 

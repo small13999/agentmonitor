@@ -126,6 +126,7 @@
     "tests/host-session.test.ts::HOST-7::a session in the main checkout has the user's omp chats there, as omp in a terminal does": "72151c6679806619",
     "tests/host-session.test.ts::HOST-6::a host session works in the main checkout, one per project, and ending it leaves the checkout as it is": "bfd54fecda06d080",
     "tests/host-session.test.ts::HOST-5::a host session never changes the user's omp, Tern, ssh, git, or gh configuration": "8cd5da1a27ae4749",
+    "tests/move.test.ts::STORE-6::a project moves to another store with its topics, tasks, comments, folders, chats, and who did what, and then lives only there": "6588e53f813938f8",
     "tests/session-container.test.ts::SESSION-5::a session belongs to one task and works in a worktree of the task's branch on one machine": "b806d9dbd16423c1",
     "tests/session-container.test.ts::SESSION-4::a chat starts with the workflow context and the repository's AGENTS.md": "784c5cf4713acc08",
     "tests/session-container.test.ts::TASK-6::a session's first chat starts with its task's title, description, status, and comments": "e1a27b5bcb8c9d52",
