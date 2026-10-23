@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { Actor, Comment, FolderFile, HistoryEvent, Project, Session, Task, Topic, TopicLink } from "../../shared/api.ts";
+import type { Actor, Comment, FolderFile, HistoryEvent, Person, Project, Session, Task, Topic, TopicLink } from "../../shared/api.ts";
 
 const taskState = z.enum(["open", "in_progress", "in_review", "done", "cancelled"]);
 /** TASK-14: a stored event's data, as recorded. */
@@ -20,19 +20,6 @@ export const historyEvent: z.ZodType<HistoryEvent> = z.discriminatedUnion("kind"
   z.object({ kind: z.literal("pull_request"), number: z.number(), title: z.string(), url: z.string() }),
 ]);
 
-/**
- * STORE-6: a person a moved project's records name. `email` is what people log in with on a
- * hub (AUTH-2); null where the store has none.
- */
-export interface MovedPerson {
-  id: string;
-  name: string;
-  email: string | null;
-  color: string;
-  owner: boolean;
-  createdAt: number;
-}
-
 /** STORE-6: a file of a task's folder, as the store records it. */
 export type MovedFolderFile = FolderFile & { taskId: string };
 
@@ -48,7 +35,8 @@ export interface MovedEvent {
 export interface ProjectRecords {
   version: 1;
   project: Project;
-  people: MovedPerson[];
+  /** The store's owner and everyone the records name. */
+  people: Person[];
   topics: Topic[];
   tasks: Task[];
   topicLinks: TopicLink[];
@@ -66,7 +54,7 @@ const actor: z.ZodType<Actor> = z.discriminatedUnion("kind", [
 // A folder path as the store records it (FOLDER-1): `/`-separated segments, none empty, `.` or `..`.
 const folderPath = z.string().refine((path) => path.split("/").every((segment) => segment !== "" && segment !== "." && segment !== ".."), "not a folder path");
 
-const movedPerson: z.ZodType<MovedPerson> = z.object({
+const person: z.ZodType<Person> = z.object({
   id,
   name: z.string(),
   email: z.string().nullable(),
@@ -146,7 +134,7 @@ const movedEvent: z.ZodType<MovedEvent> = z.object({ taskId: id, at: z.number(),
 export const projectRecords: z.ZodType<ProjectRecords> = z.object({
   version: z.literal(1),
   project,
-  people: z.array(movedPerson),
+  people: z.array(person),
   topics: z.array(topic),
   tasks: z.array(task),
   topicLinks: z.array(topicLink),
@@ -201,22 +189,20 @@ export const projectRecords: z.ZodType<ProjectRecords> = z.object({
 
 /**
  * STORE-6: who each person of a moved project is in the store it moves to, by id; null for
- * someone the store does not have yet, who is added. The moved store's owner is this store's
- * owner. Anyone else is the person with the same id (someone an earlier move brought here),
- * else the person with the same email (AUTH-2: emails are lower-cased) when they have one,
- * else the person with the same name, ignoring case.
+ * someone the store does not have yet, who is added. A person with an email is whoever has that
+ * email here (AUTH-2: emails are lower-cased). Otherwise the moved store's owner is this
+ * store's owner, and anyone else the person with the same id (someone an earlier move brought
+ * here), else, for someone without an email, the person with the same name, ignoring case.
  */
-export function matchPeople(moved: MovedPerson[], present: MovedPerson[]): Map<string, string | null> {
-  const owner = present.find((person) => person.owner);
+export function matchPeople(moved: Person[], present: Person[]): Map<string, string | null> {
+  const owner = present.find((candidate) => candidate.owner);
   if (owner === undefined) throw new Error("the store has no owner");
-  const same = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
-  return new Map(moved.map((person): [string, string | null] => {
-    if (person.owner) return [person.id, owner.id];
-    const email = person.email;
-    const match = present.find((candidate) => candidate.id === person.id)
-      ?? (email === null
-        ? present.find((candidate) => same(candidate.name, person.name))
-        : present.find((candidate) => candidate.email !== null && same(candidate.email, email)));
-    return [person.id, match?.id ?? null];
+  return new Map(moved.map((one): [string, string | null] => {
+    const email = one.email?.toLowerCase() ?? null;
+    const match = (email === null ? undefined : present.find((candidate) => candidate.email?.toLowerCase() === email))
+      ?? (one.owner ? owner : undefined)
+      ?? present.find((candidate) => candidate.id === one.id)
+      ?? (email === null ? present.find((candidate) => candidate.name.trim().toLowerCase() === one.name.trim().toLowerCase()) : undefined);
+    return [one.id, match?.id ?? null];
   }));
 }

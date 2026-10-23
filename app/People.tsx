@@ -1,13 +1,12 @@
-import { useEffect, useState, type CSSProperties, type KeyboardEvent } from "react";
+import { useEffect, useState, type CSSProperties, type KeyboardEvent, type SubmitEvent } from "react";
 import { api, type Actor, type Person, type Session } from "./api.ts";
-import { InlineCreate } from "./InlineCreate.tsx";
 
 /** What the page knows to show who did something: the store's people and the sessions agents act for. */
 export interface Directory {
   people: Person[];
   /** Sessions by id, with the task each belongs to. */
   sessions: Map<string, Session>;
-  /** Who uses the app now; until login, the store's owner. */
+  /** Who uses the app now: in local mode the store's owner, on a hub the person who logged in. */
   me: Person | null;
 }
 
@@ -117,12 +116,40 @@ function PersonRow({ person, canRename, onChanged }: { person: Person; canRename
         ? <input value={name} aria-label={`Name of ${person.name}`} onChange={(event) => setName(event.target.value)} onBlur={save} onKeyDown={onKey} />
         : <span>{person.name}</span>}
       {person.owner && <span className="muted small">owner</span>}
+      {person.email !== null && <span className="muted small">{person.email}</span>}
       {error && <span className="error small">{error}</span>}
     </li>
   );
 }
 
-/** PERSON-1: the store's people; its owner adds them and renames anyone, a person renames themselves. */
+/** AUTH-2, AUTH-3: the owner adds a person with the email they log in with through Cloudflare Access. */
+function AddPerson({ onAdded }: { onAdded: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (!open) return <button type="button" className="ghost" onClick={() => setOpen(true)}>+ Add person</button>;
+  const submit = (event: SubmitEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    setBusy(true);
+    setError(null);
+    api<Person>("POST", "/people", { name: String(form.get("name")).trim(), email: String(form.get("email")).trim() }).then(
+      () => { setBusy(false); setOpen(false); onAdded(); },
+      (cause: Error) => { setBusy(false); setError(cause.message); },
+    );
+  };
+  return (
+    <form className="inline-create" onSubmit={submit} aria-label="Add person">
+      <input name="name" required autoFocus placeholder="Name" aria-label="Name of the new person" disabled={busy} />
+      <input name="email" type="email" required placeholder="Email" aria-label="Email of the new person" disabled={busy} />
+      <button type="submit" disabled={busy}>{busy ? "…" : "Add"}</button>
+      <button type="button" className="ghost" onClick={() => setOpen(false)} disabled={busy}>Cancel</button>
+      {error && <p className="error">{error}</p>}
+    </form>
+  );
+}
+
+/** PERSON-1, AUTH-3: the store's people; its owner adds them and renames anyone, a person renames themselves. */
 export function PeopleDialog({ people, me, onChanged, onClose }: { people: Person[]; me: Person | null; onChanged: () => void; onClose: () => void }) {
   useEffect(() => {
     const onKey = (event: globalThis.KeyboardEvent) => { if (event.key === "Escape") onClose(); };
@@ -140,16 +167,7 @@ export function PeopleDialog({ people, me, onChanged, onClose }: { people: Perso
           <PersonRow key={person.id} person={person} canRename={me !== null && (me.owner || me.id === person.id)} onChanged={onChanged} />
         ))}
       </ul>
-      {me?.owner === true && (
-        <InlineCreate
-          label="Add person"
-          placeholder="Name"
-          submit={async (name) => {
-            await api<Person>("POST", "/people", { name });
-            onChanged();
-          }}
-        />
-      )}
+      {me?.owner === true && <AddPerson onAdded={onChanged} />}
     </section>
   );
 }

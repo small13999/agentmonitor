@@ -93,8 +93,8 @@ spec("STORE-6", "a project moves to another store with its topics, tasks, commen
   // The source store: people, topics, tasks in several states, comments and files by the owner and an agent.
   const project = await source.data<Project>("POST", "/projects", { name: "draftcoach" });
   const sourceOwner = (await source.data<{ person: Person }>("GET", "/me")).person;
-  const sam = await source.data<Person>("POST", "/people", { name: "Sam Lee" });
-  const kim = await source.data<Person>("POST", "/people", { name: "Kim Park" });
+  const sam = await source.data<Person>("POST", "/people", { name: "Sam Lee", email: "sam@example.com" });
+  const kim = await source.data<Person>("POST", "/people", { name: "Kim Park", email: "kim@example.com" });
   const patchNotes = await source.data<Topic>("POST", `/projects/${project.id}/topics`, { name: "Patch notes" });
   const worlds = await source.data<Topic>("POST", `/projects/${project.id}/topics`, { name: "Worlds" });
   await source.data("PUT", `/topics/${patchNotes.id}/status`, { status: "26.21 drafted in JP and EN\n", baseRevision: 0 });
@@ -119,7 +119,9 @@ spec("STORE-6", "a project moves to another store with its topics, tasks, commen
   await source.data("POST", `/tasks/${recap.id}/finish`, { state: "done" });
   await source.data("POST", `/tasks/${idea.id}/finish`, { state: "cancelled" });
   await target.data("PATCH", `/people/${(await target.data<{ person: Person }>("GET", "/me")).person.id}`, { name: "Hub owner" });
-  const targetSam = await target.data<Person>("POST", "/people", { name: "Sam Lee" });
+  // The hub knows Sam by his email under another name, and another Kim Park by hers.
+  const targetSam = await target.data<Person>("POST", "/people", { name: "Samuel Lee", email: "sam@example.com" });
+  const otherKim = await target.data<Person>("POST", "/people", { name: "Kim Park", email: "kim.park@example.org" });
   const targetMove = ["--target-token-command", `echo ${TOKEN}`];
 
   // A running session does not move, and nothing else does then.
@@ -151,12 +153,17 @@ spec("STORE-6", "a project moves to another store with its topics, tasks, commen
   assert.equal(moved.code, 0, moved.stderr);
 
   // On the target: every record and file, with the same ids and history, and the same people:
-  // the source's owner is the target's, Sam the target's Sam, and Kim, whom it lacked, added.
+  // the source's owner is the target's, Sam the target's person with his email, and Kim, whose
+  // email it lacked, added with it beside the other Kim Park.
   const people = await target.data<Person[]>("GET", "/people");
   const targetOwner = people.find((person) => person.owner);
-  const targetKim = people.find((person) => person.name === "Kim Park");
+  const targetKim = people.find((person) => person.email === "kim@example.com");
   assert.ok(targetOwner !== undefined && targetKim !== undefined, JSON.stringify(people));
-  assert.deepEqual(people.map((person) => person.name).sort(), ["Hub owner", "Kim Park", "Sam Lee"]);
+  assert.deepEqual(
+    people.map((person) => `${person.name} <${person.email}>`).sort(),
+    [`Hub owner <${targetOwner.email}>`, "Kim Park <kim.park@example.org>", "Kim Park <kim@example.com>", "Samuel Lee <sam@example.com>"].sort(),
+  );
+  assert.notEqual(targetKim.id, otherKim.id);
   const here = new Map([[sourceOwner.id, targetOwner.id], [sam.id, targetSam.id], [kim.id, targetKim.id]]);
   const expected: unknown = JSON.parse([...here].reduce((text, [from, to]) => text.replaceAll(from, to), JSON.stringify(before)));
   assert.deepEqual(await everything(target, project), expected);

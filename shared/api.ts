@@ -26,9 +26,11 @@ export interface Topic {
 export interface Person {
   id: string;
   name: string;
+  /** AUTH-2: what the person logs in with, lower-cased; null for an owner whose gateway names none (local mode). */
+  email: string | null;
   /** Initials on this colour stand in for an avatar, `#rrggbb`. */
   color: string;
-  /** The store's owner; until login exists every request is the owner. */
+  /** The store's owner; in local mode every request is the owner. */
   owner: boolean;
   createdAt: number;
 }

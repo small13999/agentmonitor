@@ -35,7 +35,7 @@ import { Store, StoreError, type Principal, type Session, type SessionRuntime, t
 
 type ServiceConfig = Pick<
   GatewayConfig,
-  "workspaceRuntime" | "workspaceMemoryMib" | "machineName" | "ompAgentDir" | "credentialsHome" | "configDir" | "cloudflareApi"
+  "workspaceRuntime" | "workspaceMemoryMib" | "machineName" | "ompAgentDir" | "credentialsHome" | "configDir" | "cloudflareApi" | "ownerEmail"
 >;
 
 export interface TernUpstream {
@@ -81,6 +81,7 @@ export class StoreService implements StoreContext {
 
   constructor(stateDir: string, config: ServiceConfig) {
     this.store = new Store(join(stateDir, "store.sqlite"), userInfo().username);
+    if (config.ownerEmail !== null) this.store.setOwnerEmail(config.ownerEmail);
     this.folders = new TaskFolders(this.store, join(stateDir, "folders"));
     this.root = join(stateDir, "sessions");
     this.runtimes = config.workspaceRuntime === "podman"
@@ -127,9 +128,9 @@ export class StoreService implements StoreContext {
     return taskChanges(this.store, (id) => this.dirs(id), principal, taskId);
   }
 
-  /** The running session whose Cloudflare writes a human allows or revokes; its project must have a write token. */
+  /** The running session whose Cloudflare writes the owner allows or revokes (AUTH-3); its project must have a write token. */
   private cloudflareSession(principal: Principal, sessionId: string): Session {
-    if (principal.kind !== "human") throw new StoreError(403, "only a human can allow or revoke Cloudflare writes");
+    this.store.requireOwner(principal);
     const { session } = this.store.getSession(principal, sessionId);
     if (session.endedAt !== null) throw new StoreError(409, `session ${session.name} has ended`);
     const project = this.store.getProject(principal, session.projectId);

@@ -3,6 +3,7 @@ import type { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { z } from "zod";
 import type { Card, EndedSession, HistoryEntry, TaskChanges } from "../../shared/api.ts";
+import { email } from "../config.ts";
 import type { TaskFolders } from "./folders.ts";
 import type { ProjectMoves } from "./move.ts";
 import { StoreError, type Principal, type Session, type Store, type Task } from "./store.ts";
@@ -38,6 +39,7 @@ const name = z.string().trim().min(1).max(200);
 const description = z.string().max(64 * 1024);
 // Strict objects: unknown fields are rejected, e.g. a topic `parent` (TOPIC-1).
 const nameBody = z.strictObject({ name });
+const personBody = z.strictObject({ name, email });
 const projectBody = z.strictObject({ name, repoPath: z.string().startsWith("/").optional(), hostSessions: z.boolean().optional() });
 const projectUpdateBody = z.strictObject({ hostSessions: z.boolean() });
 const taskBody = z.strictObject({ title: name, description: description.optional() });
@@ -100,7 +102,7 @@ const id = "([0-9a-f-]{36})";
 const routes: Route[] = [
   { method: "GET", pattern: /^\/me$/, handler: (c, p) => c.store.whoami(p) },
   { method: "GET", pattern: /^\/people$/, handler: (c, p) => c.store.listPeople(p) },
-  { method: "POST", pattern: /^\/people$/, handler: async (c, p, _, body) => c.store.createPerson(p, nameBody.parse(await body()).name) },
+  { method: "POST", pattern: /^\/people$/, handler: async (c, p, _, body) => c.store.createPerson(p, personBody.parse(await body())) },
   {
     method: "PATCH",
     pattern: new RegExp(`^/people/${id}$`),

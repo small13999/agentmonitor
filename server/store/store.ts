@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import type {
   Actor, Comment, FolderFile, HistoryEntry, HistoryEvent, Person, Project, PullRequest, Session, SessionRuntime, Task, TaskDetail, TaskState, TaskSummary, Topic, TopicLink,
 } from "../../shared/api.ts";
-import { historyEvent, matchPeople, type MovedPerson, type ProjectRecords } from "./bundle.ts";
+import { historyEvent, matchPeople, type ProjectRecords } from "./bundle.ts";
 
 export type { Actor, Comment, FolderFile, HistoryEntry, HistoryEvent, Person, Project, Session, SessionRuntime, Task, TaskDetail, TaskState, TaskSummary, Topic, TopicLink };
 
@@ -93,7 +93,8 @@ CREATE TABLE IF NOT EXISTS people (
   name TEXT NOT NULL,
   color TEXT NOT NULL,
   owner INTEGER NOT NULL DEFAULT 0,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  email TEXT
 );
 CREATE TABLE IF NOT EXISTS comments (
   id TEXT PRIMARY KEY,
@@ -178,15 +179,11 @@ function person(row: Row): Person {
   return {
     id: String(row.id),
     name: String(row.name),
+    email: row.email === null ? null : String(row.email),
     color: String(row.color),
     owner: Number(row.owner) === 1,
     createdAt: Number(row.created_at),
   };
-}
-
-/** STORE-6: a person as a move carries them; `email` where the store has one (AUTH-2). */
-function movedPerson(row: Row): MovedPerson {
-  return { ...person(row), email: typeof row.email === "string" ? row.email : null };
 }
 
 /** An actor as the `*_kind` and `*_id` columns of a record keep it. */
@@ -288,6 +285,9 @@ export class Store {
       this.db.prepare("INSERT INTO people (id, name, color, owner, created_at) VALUES (?, ?, ?, 1, ?)").run(randomUUID(), ownerName, PALETTE[5], Date.now());
     }
     this.addColumn("tasks", "assignee_id", "TEXT REFERENCES people(id)");
+    // AUTH-2: people log in with their email, lower-cased, so unique regardless of case.
+    this.addColumn("people", "email", "TEXT");
+    this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS people_email ON people (email)");
     this.addColumn("topics", "color", "TEXT NOT NULL DEFAULT ''");
     for (const [index, row] of this.db.prepare("SELECT id FROM topics WHERE color = '' ORDER BY created_at").all().entries()) {
       this.db.prepare("UPDATE topics SET color = ? WHERE id = ?").run(PALETTE[index % PALETTE.length], String(row.id));
@@ -409,11 +409,24 @@ export class Store {
     if (principal.kind !== "human") throw new StoreError(403, "only a human can do this");
   }
 
-  /** PERSON-1: the store's owner, as whom every human request acts until login exists. */
+  /** The store's owner; every human request in local mode. */
   ownerPrincipal(): Principal {
     const row = this.db.prepare("SELECT id FROM people WHERE owner = 1").get();
     if (row === undefined) throw new Error("the store has no owner");
     return { kind: "human", personId: String(row.id) };
+  }
+
+  /** AUTH-2: the owner's email, from the gateway's configuration; no other person may have it. */
+  setOwnerEmail(email: string): void {
+    const taken = this.db.prepare("SELECT name FROM people WHERE email = ? AND owner = 0").get(email);
+    if (taken !== undefined) throw new Error(`the owner's email ${email} is already ${String(taken.name)}'s`);
+    this.db.prepare("UPDATE people SET email = ? WHERE owner = 1").run(email);
+  }
+
+  /** AUTH-2: the person who logs in with this email (lower-cased, as the store keeps them); null for anyone else. */
+  personByEmail(email: string): Principal | null {
+    const row = this.db.prepare("SELECT id FROM people WHERE email = ?").get(email.toLowerCase());
+    return row === undefined ? null : { kind: "human", personId: String(row.id) };
   }
 
   /** TASK-14: appends what happened to a task, by whom (null: no one, as a pull request seen on GitHub). */
@@ -452,12 +465,16 @@ export class Store {
     return this.db.prepare("SELECT * FROM people ORDER BY owner DESC, created_at").all().map(person);
   }
 
-  /** PERSON-1: only the owner adds people. */
-  createPerson(principal: Principal, name: string): Person {
+  /** PERSON-1, AUTH-3: only the owner adds people, each with the email they log in with. */
+  createPerson(principal: Principal, input: { name: string; email: string }): Person {
     this.requireOwner(principal);
+    if (this.db.prepare("SELECT 1 FROM people WHERE email = ?").get(input.email) !== undefined) {
+      throw new StoreError(409, `${input.email} is already a person of this store`);
+    }
     const count = Number(this.db.prepare("SELECT count(*) AS n FROM people").get()?.n ?? 0);
-    const created: Person = { id: randomUUID(), name, color: PALETTE[(5 + count) % PALETTE.length], owner: false, createdAt: Date.now() };
-    this.db.prepare("INSERT INTO people (id, name, color, owner, created_at) VALUES (?, ?, ?, 0, ?)").run(created.id, name, created.color, created.createdAt);
+    const created: Person = { id: randomUUID(), name: input.name, email: input.email, color: PALETTE[(5 + count) % PALETTE.length], owner: false, createdAt: Date.now() };
+    this.db.prepare("INSERT INTO people (id, name, email, color, owner, created_at) VALUES (?, ?, ?, ?, 0, ?)")
+      .run(created.id, created.name, created.email, created.color, created.createdAt);
     return created;
   }
 
@@ -557,7 +574,9 @@ export class Store {
   }
 
   createProject(principal: Principal, input: { name: string; repoPath?: string; hostSessions?: boolean }): Project {
-    this.requireHuman(principal);
+    // HOST-1: only the owner allows host sessions.
+    if (input.hostSessions === true) this.requireOwner(principal);
+    else this.requireHuman(principal);
     if (this.db.prepare("SELECT 1 FROM projects WHERE name = ?").get(input.name) !== undefined) {
       throw new StoreError(409, `project "${input.name}" already exists`);
     }
@@ -573,9 +592,9 @@ export class Store {
     return created;
   }
 
-  /** HOST-1: only a human allows or stops host sessions in a project. */
+  /** HOST-1: only the store's owner allows or stops host sessions in a project. */
   updateProject(principal: Principal, projectId: string, input: { hostSessions: boolean }): Project {
-    this.requireHuman(principal);
+    this.requireOwner(principal);
     this.visibleProject(principal, projectId);
     this.db.prepare("UPDATE projects SET host_sessions = ? WHERE id = ?").run(input.hostSessions ? 1 : 0, projectId);
     return this.visibleProject(principal, projectId);
@@ -821,7 +840,9 @@ export class Store {
    * session (HOST-6) is a host session, one per project, and works on no branch of the task.
    */
   createSession(principal: Principal, taskId: string, input: { machine?: string; model?: string; runtime: SessionRuntime; checkout?: boolean }): Session {
-    this.requireHuman(principal);
+    // AUTH-3: only the owner starts host sessions.
+    if (input.runtime === "host") this.requireOwner(principal);
+    else this.requireHuman(principal);
     return this.transaction(() => {
       const owner = this.visibleTask(principal, taskId);
       if (owner.state === "done" || owner.state === "cancelled") {
@@ -981,7 +1002,7 @@ export class Store {
     return {
       version: 1,
       project: found,
-      people: this.db.prepare("SELECT * FROM people ORDER BY owner DESC, created_at, id").all().map(movedPerson).filter((person) => person.owner || named.has(person.id)),
+      people: this.db.prepare("SELECT * FROM people ORDER BY owner DESC, created_at, id").all().map(person).filter((found) => found.owner || named.has(found.id)),
       topics: ofProject("SELECT * FROM topics WHERE project_id = ? ORDER BY created_at, id").map(topic),
       tasks,
       topicLinks: ofTasks("task_topics", "r.rowid").map((row) => ({ taskId: String(row.task_id), topicId: String(row.topic_id), linkedAt: Number(row.linked_at) })),
@@ -1015,12 +1036,13 @@ export class Store {
         const taken = ids.find((id) => this.db.prepare(`SELECT 1 FROM ${table} WHERE id = ?`).get(id) !== undefined);
         if (taken !== undefined) throw new StoreError(409, `this store already has ${table.slice(0, -1)} ${taken}`);
       }
-      const match = matchPeople(records.people, this.db.prepare("SELECT * FROM people").all().map(movedPerson));
+      const match = matchPeople(records.people, this.db.prepare("SELECT * FROM people").all().map(person));
       const added: Person[] = [];
-      for (const person of records.people.filter((candidate) => match.get(candidate.id) === null)) {
-        const created: Person = { id: person.id, name: person.name, color: person.color, owner: false, createdAt: Date.now() };
-        this.db.prepare("INSERT INTO people (id, name, color, owner, created_at) VALUES (?, ?, ?, 0, ?)").run(created.id, created.name, created.color, created.createdAt);
-        match.set(person.id, person.id);
+      for (const moved of records.people.filter((candidate) => match.get(candidate.id) === null)) {
+        const created: Person = { id: moved.id, name: moved.name, email: moved.email?.toLowerCase() ?? null, color: moved.color, owner: false, createdAt: Date.now() };
+        this.db.prepare("INSERT INTO people (id, name, email, color, owner, created_at) VALUES (?, ?, ?, ?, 0, ?)")
+          .run(created.id, created.name, created.email, created.color, created.createdAt);
+        match.set(moved.id, moved.id);
         added.push(created);
       }
       const here = (personId: string) => {
