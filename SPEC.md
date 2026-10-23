@@ -173,13 +173,10 @@ Unnumbered intent; not testable, so not claims.
 
 - **CARD-1** A task's card and page show its running session as waiting on you,
   working, idle, or stopped; working pulses.
-- **CARD-2** Each session card shows the last user message and the agent's last
-  reply.
 - **CARD-3** A task's Changes view shows what its branch changed against the
   default branch, its uncommitted files, and its open pull requests.
 - **CARD-4** A task's Changes view names the other running tasks of the project
   that changed any of the same files, and its card marks that it has them.
-- **CARD-5** Sessions waiting on you sort first.
 
 ## Tasks
 
@@ -196,9 +193,6 @@ Unnumbered intent; not testable, so not claims.
   status, and comments in context.
 - **TASK-7** A task has a status of at most 50 lines that its agents keep
   current; a status write based on a stale revision is rejected.
-- **TASK-8** A task has notes. The user writes them in the task's Notes tab,
-  where they save as typed; agents read and write them with `am`; a write based
-  on a stale revision is rejected.
 - **TASK-9** Marking a task done or cancelled ends its running session and
   deletes its branch from the machine; when the branch has commits no remote
   has, it requires a confirmation that lists them.

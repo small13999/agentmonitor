@@ -1,7 +1,7 @@
 # Agent Monitor
 
 A browser control surface for coding agents. Work is organized as tasks: each
-task has a branch, a status, notes, and the sessions that worked on it; a session
+task has a branch, a status, comments, and the sessions that worked on it; a session
 is a worktree and a container (or, where the project allows it, host processes)
 running omp, whose chat shows in Tern's web client.
 The monitor tracks every task's state, its topics, changes and pull requests.
@@ -39,38 +39,61 @@ project's tasks in columns by state (Open, In progress, In review, Done; Done
 shows the 20 most recently finished), waiting-on-you first, then in creation
 order; "+ New task" creates one without starting work. Tasks (`#/t`) lists the
 open, in-progress, and in-review tasks (172 px wide, in creation order) beside
-the workspace. `#/t/<id>` opens a task's workspace, a small browser with tabs:
-Chat (its running session's chat in Tern, or a Start session button) and Notes
-(`#/t/<id>/notes`, the task's notes, saved as typed; agents use `am notes`). The
-gear at the right of the tabs opens the workspace settings: the task's state,
-title and description, its status, topic links, the session's changes, pull
-requests, overlapping sessions, Cloudflare writes, ending the session, and
-finishing the task. Other tabs hide the chat's frame without unloading it; the
+the workspace. `#/t/<id>` opens a task's workspace, a small browser with tabs.
+Page (`#/t/<id>`, `app/TaskPage.tsx`) is the task's primary place: title,
+description (Markdown), state, assignee, and topics, all edited in place; its
+status, folder, comments, history, and sessions, and the running session's
+state. The folder (`TaskFolder` in `app/Folder.tsx`) takes files dropped there
+or chosen, shows each inline by kind, and downloads one or all as a zip.
+People (the store's owner adds and renames them from the assignee's
+"People…") show as initials on their colour; an agent shows as its session's
+agent on the session's avatar, linking to the session. Chat (`#/t/<id>/chat`)
+is its running session's chat in Tern, or a Start session button. Settings
+(`#/t/<id>/settings`, the gear at the right of the tabs) is for the session:
+subtabs Changes (the branch's commits and files against the default branch,
+uncommitted files, open pull requests, other running tasks that changed the
+same files), Cloudflare writes, and End session. Other tabs hide the chat's
+frame without unloading it, and a chat loads only once its Chat tab shows; the
 Tasks page stays mounted (hidden) while the board shows, for the same reason.
-`shared/api.ts` holds the wire types both sides use. Tasks, cards, topics, and
-notes poll.
+`shared/api.ts` holds the wire types both sides use. Tasks, cards, topics,
+comments, and history poll.
 
 ## Store, tasks, and sessions
 
 A task is requested work: a title, a description, a state (`open`,
 `in_progress`, `in_review`, `done`, `cancelled`), one branch, a status (≤ 50
-lines, revisioned, kept by its agents), notes (revisioned), and topic links. A
+lines, revisioned, kept by its agents), comments, an assignee, and topic links. A
 session is one agent run on a task, with every omp chat started in it (Tern's
 `/new` starts another in the same session); a task has at most one running
 session. While a session runs it has a workspace: a worktree and a container, or
 host processes for a host session (below). The
 gateway owns one SQLite store (`<state dir>/store.sqlite`) with projects, topics,
-tasks, task↔topic links, and sessions. A store from before tasks is migrated on
-start: each session becomes a task with its name, branch, topic links, and notes.
-`/api/store/*` serves it to the UI: `/projects/:id/tasks` (list, create),
-`/tasks/:id` (detail, `PATCH` title, description, unfinished state),
-`/tasks/:id/{status,notes,topics/:topic,sessions,finish}`. Each running session
+tasks, task↔topic links, sessions, people, comments, and each task's history. A
+store from before tasks is migrated on start: each session becomes a task with
+its name, branch, topic links, and notes; notes became a comment by the store's
+owner. `/api/store/*` serves it to the UI: `/projects/:id/tasks` (list, create),
+`/tasks/:id` (detail, `PATCH` title, description, unfinished state, assignee),
+`/tasks/:id/{status,topics/:topic,sessions,finish,comments,history,changes}`,
+`/comments/:id` (`PATCH`, `DELETE`; its author only). The history lists the
+pull requests GitHub has for the task's branch, by no one. Each running session
 gets a Unix socket (`<state dir>/sessions/<id>/run/am.sock`) serving the same
 routes with the agent's scope (its project only); the socket is the agent's
 identity, so no token is issued. Inside the container, `am` (`container/am.ts`)
 is the agent's client for it; `am check` lists what would not survive the
 session (uncommitted files, unpushed commits, untracked files that look like
 secrets) and fails until it is clean.
+
+Every task has a folder, `<state dir>/folders/<task id>`: files outside git. The
+store records who added each file and when (`folder_files`) and a `file` event in
+the task's history; the directory is the truth, since agents write into it
+directly, so every list (and the history) first brings the records in line with
+it, crediting new files to the task's running session's agent. Routes:
+`GET /tasks/:id/folder` (list), `GET|PUT|DELETE /tasks/:id/folder/<path>` (the
+file inline with its content type, `?download` as an attachment, single byte
+ranges; `PUT` streams the body in, past the JSON body limit), and
+`GET /tasks/:id/folder.zip`. A container session has the folder at
+`/task-folder`; a host session's agent uses the directory itself; the task
+context names it. `am folder` lists, adds, gets, and deletes files.
 
 Starting a task's first session in a project with a `repoPath` creates the
 task's `am/<title>-<hex>` branch from `origin/HEAD` (or `HEAD` without an
@@ -96,7 +119,7 @@ browsers load nothing from outside the gateway). Tern's daemon socket is
 (`tern-daemon.sock.state`); the entrypoint deletes that file on each start, so the
 chat always comes from `launch.json`. The omp extension (`container/omp-extension.ts`) answers
 the gateway's turn and system-prompt queries at `run/omp.sock`. The gateway
-writes the task (title, description, status, notes) to `run/task.md` on every
+writes the task (title, description, status, comments) to `run/task.md` on every
 container start, and the entrypoint appends it to the workflow context. The
 container gets the worktree, the repository's `.git`, the run directory, the
 session's omp home, and the omp agent directory's credentials and providers

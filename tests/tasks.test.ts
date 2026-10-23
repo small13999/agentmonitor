@@ -135,7 +135,9 @@ spec("TASK-10", "sessions from before tasks become tasks with their name, branch
       ],
     );
     const jogi = tasks[0].task.id;
-    assert.deepEqual(await migrated.data("GET", `/tasks/${jogi}/notes`), { text: "Ship after QA", revision: 3 });
+    // The notes became a comment by the store's owner (TASK-15).
+    const comments = await migrated.data<Array<{ author: { kind: string }; body: string }>>("GET", `/tasks/${jogi}/comments`);
+    assert.deepEqual(comments.map((comment) => [comment.author.kind, comment.body]), [["person", "Ship after QA"]]);
     const { session } = await migrated.data<{ session: Session }>("GET", "/sessions/00000000-0000-4000-8000-000000000011");
     assert.equal(session.taskId, jogi);
     // The running session's agent works on the task now.

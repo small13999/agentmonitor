@@ -2,9 +2,11 @@
 // or on the host. Talks to the session's store socket; the socket identifies the session, so
 // no credentials.
 import { execFileSync } from "node:child_process";
-import { request } from "node:http";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { createReadStream, createWriteStream, readFileSync, statSync } from "node:fs";
+import { request, type IncomingMessage } from "node:http";
+import { basename, dirname, join } from "node:path";
+import type { Writable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
 const USAGE = `usage: am [--json] COMMAND
 
@@ -16,9 +18,13 @@ const USAGE = `usage: am [--json] COMMAND
                                       REV is the revision you read; a stale REV is refused
   task set-state STATE                open, in_progress, or in_review
   task create TITLE                   create another task (stdin: its description)
-  notes                               the task's notes; first line is their revision
-  notes set --base REV                replace the task's notes with stdin;
-                                      REV is the revision you read; a stale REV is refused
+  task search [WORDS...]              every task of this project, done and cancelled too,
+                                      whose title, description, or comments hold all of WORDS
+  comments                            the task's comments, oldest first, with author and time
+  comment                             comment on the task (stdin: Markdown); people read it
+                                      on the task's page, never in a running chat
+  comment edit ID                     replace your comment ID with stdin
+  comment delete ID                   delete your comment ID
   check                               what would not survive this session: uncommitted
                                       files, unpushed commits, and untracked files that
                                       look like secrets; fails while there are any
@@ -31,6 +37,11 @@ const USAGE = `usage: am [--json] COMMAND
   topic link NAME...                  link this session's task to topics
   topic unlink NAME...                unlink this session's task from topics
   session show [ID]                   a session and its task (default: this one)
+  folder                              the files in the task's folder: who added each, when
+  folder add FILE [PATH]              put FILE into the folder as PATH (default: its name),
+                                      replacing a file there
+  folder get PATH [FILE]              write the folder's file PATH to FILE (default: stdout)
+  folder rm PATH                      delete the folder's file PATH
 
 environment: AM_SOCKET (default /run/agentmonitor/am.sock)`;
 
@@ -69,12 +80,66 @@ async function call(method: string, path: string, body?: unknown): Promise<unkno
   req.on("error", (error) => reject(new CliError(`cannot reach the store at ${socketPath}: ${error.message}`)));
   req.end(payload);
   const { text } = await promise;
+  return envelopeOf(text);
+}
+
+function envelopeOf(text: string): unknown {
   const envelope = JSON.parse(text) as Envelope;
   if (!envelope.ok) {
     const extra = envelope.currentRevision === undefined ? "" : ` (current revision ${envelope.currentRevision})`;
     throw new CliError(`${envelope.error ?? "request failed"}${extra}`);
   }
   return envelope.data;
+}
+
+/** A file in the task's folder, as the store's routes name it. */
+function folderRoute(taskId: string, path: string): string {
+  return `/tasks/${taskId}/folder/${path.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+/**
+ * FOLDER-1: a request whose body or answer is a file's bytes, streamed: `upload` is the file
+ * to send; `sink` opens where a successful answer goes. Refusals answer JSON, as `call`'s do.
+ */
+async function transfer(method: string, path: string, upload: string | null, sink: (() => Writable) | null): Promise<unknown> {
+  const { promise, resolve, reject } = Promise.withResolvers<IncomingMessage>();
+  const req = request({ socketPath, path: `/api/store${path}`, method }, resolve);
+  req.on("error", (error) => reject(new CliError(`cannot reach the store at ${socketPath}: ${error.message}`)));
+  if (upload === null) req.end();
+  else pipeline(createReadStream(upload), req).catch((error: unknown) => req.destroy(error instanceof Error ? error : undefined));
+  const response = await promise;
+  if (response.statusCode === 200 && sink !== null) {
+    const target = sink();
+    await pipeline(response, target, { end: target !== process.stdout });
+    return null;
+  }
+  let text = "";
+  response.setEncoding("utf8");
+  for await (const chunk of response) text += chunk;
+  return envelopeOf(text);
+}
+
+interface FolderFile {
+  path: string;
+  size: number;
+  addedBy: { kind: "person"; personId: string } | { kind: "agent"; sessionId: string } | null;
+  addedAt: number;
+}
+
+function folderFileOf(value: unknown): FolderFile {
+  if (!isRecord(value) || typeof value.path !== "string" || typeof value.size !== "number" || typeof value.addedAt !== "number") {
+    throw new CliError("the store answered with something that is not a folder file");
+  }
+  const by = value.addedBy;
+  const addedBy = isRecord(by) && by.kind === "person" && typeof by.personId === "string"
+    ? { kind: "person" as const, personId: by.personId }
+    : isRecord(by) && by.kind === "agent" && typeof by.sessionId === "string" ? { kind: "agent" as const, sessionId: by.sessionId } : null;
+  return { path: value.path, size: value.size, addedBy, addedAt: value.addedAt };
+}
+
+function folderFilesOf(value: unknown): FolderFile[] {
+  if (!Array.isArray(value)) throw new CliError("the store answered with something that is not a folder");
+  return value.map(folderFileOf);
 }
 
 interface Session {
@@ -140,17 +205,27 @@ async function whoami(): Promise<Me> {
   return me;
 }
 
-interface Notes {
-  text: string;
-  revision: number;
+interface Comment {
+  id: string;
+  author: { kind: string; personId?: string; sessionId?: string };
+  body: string;
+  createdAt: number;
+  editedAt: number | null;
 }
 
-function notesOf(value: unknown): Notes {
-  if (typeof value !== "object" || value === null || !("text" in value) || typeof value.text !== "string"
-    || !("revision" in value) || typeof value.revision !== "number") {
-    throw new CliError("the store answered with something that is not notes");
+function commentOf(value: unknown): Comment {
+  if (!isRecord(value) || typeof value.id !== "string" || typeof value.body !== "string" || typeof value.createdAt !== "number"
+    || (value.editedAt !== null && typeof value.editedAt !== "number") || !isRecord(value.author) || typeof value.author.kind !== "string") {
+    throw new CliError("the store answered with something that is not a comment");
   }
-  return { text: value.text, revision: value.revision };
+  const { kind, personId, sessionId } = value.author;
+  return {
+    id: value.id,
+    author: { kind, personId: typeof personId === "string" ? personId : undefined, sessionId: typeof sessionId === "string" ? sessionId : undefined },
+    body: value.body,
+    createdAt: value.createdAt,
+    editedAt: value.editedAt,
+  };
 }
 
 /** Untracked files with these names are credentials far more often than work. */
@@ -262,6 +337,13 @@ async function main(args: string[]): Promise<void> {
     print(json, created, () => `created task "${created.title}" (${created.id})`);
     return;
   }
+  if (group === "task" && command === "search") {
+    const found = await call("GET", `/projects/${me.project.id}/tasks?q=${encodeURIComponent(rest.join(" "))}`);
+    if (!Array.isArray(found)) throw new CliError("the store answered with something that is not a task list");
+    const tasks = found.map((summary: unknown) => taskOf(isRecord(summary) ? summary.task : undefined));
+    print(json, found, () => tasks.map((task) => `${task.id} ${task.state.padEnd(11)} ${task.title}`).join("\n") || "no tasks found");
+    return;
+  }
 
   if (group === "check" && command === undefined) {
     const found = checkWorktree(me);
@@ -344,16 +426,70 @@ async function main(args: string[]): Promise<void> {
     return;
   }
 
-  if (group === "notes" && command === undefined) {
-    const notes = notesOf(await call("GET", `/tasks/${me.task.id}/notes`));
-    print(json, notes, () => `# revision ${notes.revision}\n${notes.text}`.trimEnd());
+  if (group === "folder" && command === undefined) {
+    const files = folderFilesOf(await call("GET", `/tasks/${me.task.id}/folder`));
+    const people = await call("GET", "/people");
+    const nameOf = (personId: string) => {
+      const person = Array.isArray(people) ? people.find((candidate: unknown) => isRecord(candidate) && candidate.id === personId) : undefined;
+      return isRecord(person) && typeof person.name === "string" ? person.name : "someone";
+    };
+    const lines = files.map((file) => {
+      const by = file.addedBy;
+      const who = by === null
+        ? "unknown"
+        : by.kind === "person"
+          ? nameOf(by.personId)
+          : by.sessionId === me.session.id ? "this session's agent" : `the agent of session ${by.sessionId}`;
+      return `${file.path}\t${file.size} bytes\tadded by ${who}\t${new Date(file.addedAt).toISOString()}`;
+    });
+    print(json, files, () => lines.length === 0 ? "the folder is empty" : lines.join("\n"));
     return;
   }
-  if (group === "notes" && command === "set" && rest.length === 2 && rest[0] === "--base") {
-    const base = revisionOf(rest[1]);
-    const text = readFileSync(0, "utf8");
-    const updated = notesOf(await call("PUT", `/tasks/${me.task.id}/notes`, { text, baseRevision: base }));
-    print(json, updated, () => `notes are now revision ${updated.revision}`);
+  if (group === "folder" && command === "add" && (rest.length === 1 || rest.length === 2)) {
+    if (!statSync(rest[0], { throwIfNoEntry: false })?.isFile()) throw new CliError(`${rest[0]} is not a file`);
+    const added = folderFileOf(await transfer("PUT", folderRoute(me.task.id, rest[1] ?? basename(rest[0])), rest[0], null));
+    print(json, added, () => `added ${added.path} (${added.size} bytes)`);
+    return;
+  }
+  if (group === "folder" && command === "get" && (rest.length === 1 || rest.length === 2)) {
+    const target = rest[1];
+    await transfer("GET", folderRoute(me.task.id, rest[0]), null, () => target === undefined ? process.stdout : createWriteStream(target));
+    return;
+  }
+  if (group === "folder" && command === "rm" && rest.length === 1) {
+    const left = folderFilesOf(await call("DELETE", folderRoute(me.task.id, rest[0])));
+    print(json, left, () => `deleted ${rest[0]}; ${left.length} file(s) left`);
+    return;
+  }
+
+  if (group === "comments" && command === undefined) {
+    const listed = await call("GET", `/tasks/${me.task.id}/comments`);
+    const comments = Array.isArray(listed) ? listed.map(commentOf) : [];
+    const people = await call("GET", "/people");
+    const nameOf = (comment: Comment) => {
+      if (comment.author.kind !== "person") return comment.author.sessionId === me.session.id ? "you (this session's agent)" : `the agent of session ${comment.author.sessionId}`;
+      const person = Array.isArray(people) ? people.find((candidate: unknown) => isRecord(candidate) && candidate.id === comment.author.personId) : undefined;
+      return isRecord(person) && typeof person.name === "string" ? person.name : "someone no longer in the store";
+    };
+    print(json, listed, () => comments.length === 0 ? "no comments" : comments.map((comment) => [
+      `comment ${comment.id} by ${nameOf(comment)}, ${new Date(comment.createdAt).toISOString()}${comment.editedAt === null ? "" : " (edited)"}`,
+      comment.body.trimEnd(),
+    ].join("\n")).join("\n\n"));
+    return;
+  }
+  if (group === "comment" && command === undefined) {
+    const created = commentOf(await call("POST", `/tasks/${me.task.id}/comments`, { body: readFileSync(0, "utf8") }));
+    print(json, created, () => `commented on the task (comment ${created.id})`);
+    return;
+  }
+  if (group === "comment" && command === "edit" && rest.length === 1) {
+    const updated = commentOf(await call("PATCH", `/comments/${rest[0]}`, { body: readFileSync(0, "utf8") }));
+    print(json, updated, () => `comment ${updated.id} is edited`);
+    return;
+  }
+  if (group === "comment" && command === "delete" && rest.length === 1) {
+    const deleted = commentOf(await call("DELETE", `/comments/${rest[0]}`));
+    print(json, deleted, () => `comment ${deleted.id} is deleted`);
     return;
   }
 

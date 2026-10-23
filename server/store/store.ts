@@ -4,10 +4,10 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
 import type {
-  Actor, HistoryEntry, HistoryEvent, Person, Project, Session, SessionRuntime, Task, TaskDetail, TaskNotes, TaskState, TaskSummary, Topic, TopicLink,
+  Actor, Comment, FolderFile, HistoryEntry, HistoryEvent, Person, Project, PullRequest, Session, SessionRuntime, Task, TaskDetail, TaskState, TaskSummary, Topic, TopicLink,
 } from "../../shared/api.ts";
 
-export type { Actor, HistoryEntry, HistoryEvent, Person, Project, Session, SessionRuntime, Task, TaskDetail, TaskNotes, TaskState, TaskSummary, Topic, TopicLink };
+export type { Actor, Comment, FolderFile, HistoryEntry, HistoryEvent, Person, Project, Session, SessionRuntime, Task, TaskDetail, TaskState, TaskSummary, Topic, TopicLink };
 
 /** TOPIC-2 and TASK-7: a status is a short current-state note, not a document. */
 export const STATUS_MAX_LINES = 50;
@@ -84,8 +84,6 @@ CREATE TABLE IF NOT EXISTS tasks (
   base_ref TEXT,
   status TEXT NOT NULL DEFAULT '',
   status_revision INTEGER NOT NULL DEFAULT 0,
-  notes TEXT NOT NULL DEFAULT '',
-  notes_revision INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -116,6 +114,27 @@ CREATE TABLE IF NOT EXISTS people (
   owner INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS comments (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  author_kind TEXT NOT NULL,
+  author_id TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  edited_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS comments_task ON comments (task_id, created_at);
+CREATE TABLE IF NOT EXISTS folder_files (
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  path TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  content_type TEXT NOT NULL,
+  added_by_kind TEXT,
+  added_by_id TEXT,
+  added_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (task_id, path)
+);
 `;
 
 /** TASK-14: what happened to a task, appended as it happens; created on its own so old stores can be backfilled. */
@@ -132,6 +151,25 @@ CREATE INDEX task_events_task ON task_events (task_id, at);
 `;
 
 type Row = Record<string, unknown>;
+
+/** FOLDER-1: a file as its task's folder holds it now; `modifiedAt` is its modification time. */
+export interface FolderEntry {
+  path: string;
+  size: number;
+  contentType: string;
+  modifiedAt: number;
+}
+
+function folderFile(row: Row): FolderFile {
+  return {
+    path: String(row.path),
+    size: Number(row.size),
+    contentType: String(row.content_type),
+    addedBy: actorOfRow(row.added_by_kind, row.added_by_id),
+    addedAt: Number(row.added_at),
+    updatedAt: Number(row.updated_at),
+  };
+}
 
 function project(row: Row): Project {
   return {
@@ -167,6 +205,25 @@ function person(row: Row): Person {
 
 function actorOf(principal: Principal): Actor {
   return principal.kind === "human" ? { kind: "person", personId: principal.personId } : { kind: "agent", sessionId: principal.sessionId };
+}
+
+function actorOfRow(kind: unknown, id: unknown): Actor | null {
+  if (kind === "person") return { kind: "person", personId: String(id) };
+  if (kind === "agent") return { kind: "agent", sessionId: String(id) };
+  return null;
+}
+
+function comment(row: Row): Comment {
+  const author = actorOfRow(row.author_kind, row.author_id);
+  if (author === null) throw new Error(`comment ${String(row.id)} has unknown author kind ${String(row.author_kind)}`);
+  return {
+    id: String(row.id),
+    taskId: String(row.task_id),
+    author,
+    body: String(row.body),
+    createdAt: Number(row.created_at),
+    editedAt: row.edited_at === null ? null : Number(row.edited_at),
+  };
 }
 
 function task(row: Row): Task {
@@ -244,6 +301,24 @@ export class Store {
       this.db.prepare("UPDATE topics SET color = ? WHERE id = ?").run(PALETTE[index % PALETTE.length], String(row.id));
     }
     this.migrateHistory();
+    this.migrateNotes();
+  }
+
+  /**
+   * TASK-15: notes are gone; each task's notes became a comment by the store's owner, dated
+   * when the task was last updated, the closest the store knows to when they were written.
+   */
+  private migrateNotes(): void {
+    const columns = this.db.prepare("SELECT name FROM pragma_table_info('tasks')").all().map((row) => String(row.name));
+    if (!columns.includes("notes")) return;
+    this.transaction(() => {
+      const owner = this.ownerPrincipal();
+      for (const row of this.db.prepare("SELECT id, notes, updated_at FROM tasks WHERE trim(notes) != '' ORDER BY created_at").all()) {
+        this.insertComment(String(row.id), owner, String(row.notes), Number(row.updated_at));
+      }
+      this.db.exec("ALTER TABLE tasks DROP COLUMN notes");
+      if (columns.includes("notes_revision")) this.db.exec("ALTER TABLE tasks DROP COLUMN notes_revision");
+    });
   }
 
   /**
@@ -276,8 +351,8 @@ export class Store {
 
   /**
    * TASK-10: a store from before tasks has sessions with their own topic links and notes.
-   * Each such session becomes a task with its name, branch, topic links, and notes; the
-   * session-level tables go away.
+   * Each such session becomes a task with its name, branch, topic links, and notes (which
+   * then become a comment, TASK-15); the session-level tables go away.
    */
   private migrateSessionsToTasks(): void {
     const columns = this.db.prepare("SELECT name FROM pragma_table_info('sessions')").all().map((row) => String(row.name));
@@ -286,10 +361,11 @@ export class Store {
       this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !== undefined;
     this.transaction(() => {
       this.db.exec("ALTER TABLE sessions ADD COLUMN task_id TEXT REFERENCES tasks(id)");
+      this.addColumn("tasks", "notes", "TEXT NOT NULL DEFAULT ''");
       const insert = this.db.prepare(
-        "INSERT INTO tasks (id, project_id, title, state, branch, base_ref, notes, notes_revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO tasks (id, project_id, title, state, branch, base_ref, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       );
-      const notesOf = hasTable("session_notes") ? this.db.prepare("SELECT text, revision FROM session_notes WHERE session_id = ?") : null;
+      const notesOf = hasTable("session_notes") ? this.db.prepare("SELECT text FROM session_notes WHERE session_id = ?") : null;
       for (const row of this.db.prepare("SELECT * FROM sessions ORDER BY started_at").all()) {
         const id = randomUUID();
         const notes = notesOf?.get(row.id);
@@ -302,7 +378,6 @@ export class Store {
           row.branch === null ? null : String(row.branch),
           row.base_ref === null ? null : String(row.base_ref),
           notes === undefined ? "" : String(notes.text),
-          notes === undefined ? 0 : Number(notes.revision),
           startedAt,
           row.ended_at === null ? startedAt : Number(row.ended_at),
         );
@@ -364,12 +439,19 @@ export class Store {
   /** TASK-14: what happened to the task, oldest first. */
   taskHistory(principal: Principal, taskId: string): HistoryEntry[] {
     this.visibleTask(principal, taskId);
-    return this.db.prepare("SELECT * FROM task_events WHERE task_id = ? ORDER BY at, id").all(taskId).map((row) => {
-      const actor: Actor | null = row.actor_kind === "person"
-        ? { kind: "person", personId: String(row.actor_id) }
-        : row.actor_kind === "agent" ? { kind: "agent", sessionId: String(row.actor_id) } : null;
-      return { ...historyEvent.parse(JSON.parse(String(row.data))), at: Number(row.at), actor };
-    });
+    return this.db.prepare("SELECT * FROM task_events WHERE task_id = ? ORDER BY at, id").all(taskId).map((row) => ({
+      ...historyEvent.parse(JSON.parse(String(row.data))),
+      at: Number(row.at),
+      actor: actorOfRow(row.actor_kind, row.actor_id),
+    }));
+  }
+
+  /** TASK-14: a pull request of the task's branch, recorded once, by no one, at the time it was opened. */
+  recordPullRequest(taskId: string, pr: PullRequest, openedAt: number): void {
+    const seen = this.db.prepare(
+      "SELECT 1 FROM task_events WHERE task_id = ? AND json_extract(data, '$.kind') = 'pull_request' AND json_extract(data, '$.number') = ?",
+    ).get(taskId, pr.number);
+    if (seen === undefined) this.recordTaskEvent(taskId, null, { kind: "pull_request", number: pr.number, title: pr.title, url: pr.url }, openedAt);
   }
 
   /** PERSON-1: everyone who uses the store, the owner first. */
@@ -553,12 +635,22 @@ export class Store {
     });
   }
 
-  /** Every task of a project with its topics and running session, oldest first. */
-  listTasks(principal: Principal, projectId: string): TaskSummary[] {
+  /**
+   * Every task of a project with its topics and running session, oldest first. BOARD-3: with
+   * `search`, only the tasks whose title, description, or comments hold each of its words,
+   * ignoring case.
+   */
+  listTasks(principal: Principal, projectId: string, search = ""): TaskSummary[] {
     this.visibleProject(principal, projectId);
-    return this.db.prepare("SELECT * FROM tasks WHERE project_id = ? ORDER BY created_at").all(projectId).map((row) => {
+    const words = search.toLowerCase().split(/\s+/).filter(Boolean);
+    const commentsOf = this.db.prepare("SELECT body FROM comments WHERE task_id = ?");
+    return this.db.prepare("SELECT * FROM tasks WHERE project_id = ? ORDER BY created_at").all(projectId).flatMap((row) => {
       const found = task(row);
-      return { task: found, topics: this.topicsOf(found.id), sessionId: this.runningSessionOf(found.id)?.id ?? null };
+      if (words.length > 0) {
+        const text = [found.title, found.description, ...commentsOf.all(found.id).map((comment) => String(comment.body))].join("\n").toLowerCase();
+        if (!words.every((word) => text.includes(word))) return [];
+      }
+      return [{ task: found, topics: this.topicsOf(found.id), sessionId: this.runningSessionOf(found.id)?.id ?? null }];
     });
   }
 
@@ -666,26 +758,59 @@ export class Store {
     });
   }
 
-  /** TASK-8: a task's notes; empty at revision 0 until first written. */
-  getNotes(principal: Principal, taskId: string): TaskNotes {
+  /** COMMENT-1: a task's comments, oldest first. */
+  listComments(principal: Principal, taskId: string): Comment[] {
     this.visibleTask(principal, taskId);
-    const row = this.db.prepare("SELECT notes, notes_revision FROM tasks WHERE id = ?").get(taskId);
-    return { text: String(row?.notes ?? ""), revision: Number(row?.notes_revision ?? 0) };
+    return this.db.prepare("SELECT * FROM comments WHERE task_id = ? ORDER BY created_at, rowid").all(taskId).map(comment);
   }
 
-  /** TASK-8: as a topic status (TOPIC-3), a write based on a stale revision is refused with the current notes. */
-  writeNotes(principal: Principal, taskId: string, text: string, baseRevision: number): TaskNotes {
+  /** COMMENT-1: a person or an agent comments on a task; its history records who (TASK-14). */
+  createComment(principal: Principal, taskId: string, body: string): Comment {
     return this.transaction(() => {
-      const current = this.getNotes(principal, taskId);
-      if (baseRevision !== current.revision) {
-        throw new StoreError(409, `notes changed since revision ${baseRevision}; re-read and merge`, {
-          currentRevision: current.revision,
-          text: current.text,
-        });
-      }
-      const next: TaskNotes = { text, revision: current.revision + 1 };
-      this.db.prepare("UPDATE tasks SET notes = ?, notes_revision = ? WHERE id = ?").run(next.text, next.revision, taskId);
-      return next;
+      this.visibleTask(principal, taskId);
+      return this.insertComment(taskId, principal, body, Date.now());
+    });
+  }
+
+  private insertComment(taskId: string, principal: Principal, body: string, at: number): Comment {
+    const author = actorOf(principal);
+    const created: Comment = { id: randomUUID(), taskId, author, body, createdAt: at, editedAt: null };
+    this.db.prepare("INSERT INTO comments (id, task_id, author_kind, author_id, body, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(created.id, taskId, author.kind, author.kind === "person" ? author.personId : author.sessionId, body, at);
+    this.recordTaskEvent(taskId, principal, { kind: "comment", commentId: created.id }, at);
+    return created;
+  }
+
+  /** COMMENT-2: the comment, when the principal wrote it; anyone else is refused. */
+  private ownComment(principal: Principal, commentId: string): Comment {
+    const row = this.db.prepare("SELECT c.*, t.project_id FROM comments c JOIN tasks t ON t.id = c.task_id WHERE c.id = ?").get(commentId);
+    const scope = this.scope(principal);
+    if (row === undefined || (scope !== null && scope !== row.project_id)) throw new StoreError(404, `comment ${commentId} not found`);
+    const found = comment(row);
+    const me = actorOf(principal);
+    const mine = me.kind === "person"
+      ? found.author.kind === "person" && found.author.personId === me.personId
+      : found.author.kind === "agent" && found.author.sessionId === me.sessionId;
+    if (!mine) throw new StoreError(403, "only a comment's author can edit or delete it");
+    return found;
+  }
+
+  /** COMMENT-2: its author edits a comment, which then says when. */
+  updateComment(principal: Principal, commentId: string, body: string): Comment {
+    return this.transaction(() => {
+      const found = this.ownComment(principal, commentId);
+      const editedAt = Date.now();
+      this.db.prepare("UPDATE comments SET body = ?, edited_at = ? WHERE id = ?").run(body, editedAt, commentId);
+      return { ...found, body, editedAt };
+    });
+  }
+
+  /** COMMENT-2: its author deletes a comment; the history keeps that it was written. */
+  deleteComment(principal: Principal, commentId: string): Comment {
+    return this.transaction(() => {
+      const found = this.ownComment(principal, commentId);
+      this.db.prepare("DELETE FROM comments WHERE id = ?").run(commentId);
+      return found;
     });
   }
 
@@ -780,6 +905,58 @@ export class Store {
       if (current.state !== state) this.recordTaskEvent(taskId, principal, { kind: "state", from: current.state, to: state }, next.updatedAt);
       return next;
     });
+  }
+
+  /**
+   * FOLDER-1, FOLDER-3: brings the task's recorded files in line with what its folder's
+   * directory holds, `entries`. A file that appeared there was written by the agent of the
+   * task's running session, the only one with the directory; with none running, by no one
+   * known. New files go into the task's history (TASK-14) as added when they were written.
+   */
+  syncFolder(taskId: string, entries: FolderEntry[]): FolderFile[] {
+    return this.transaction(() => {
+      const recorded = new Map(this.db.prepare("SELECT * FROM folder_files WHERE task_id = ?").all(taskId).map((row) => [String(row.path), folderFile(row)]));
+      const running = this.runningSessionOf(taskId);
+      const writer: Principal | null = running === null ? null : { kind: "agent", sessionId: running.id };
+      for (const entry of entries) {
+        const known = recorded.get(entry.path);
+        recorded.delete(entry.path);
+        if (known === undefined) {
+          this.insertFolderFile(taskId, entry, writer, entry.modifiedAt);
+        } else if (known.size !== entry.size || known.updatedAt !== entry.modifiedAt || known.contentType !== entry.contentType) {
+          this.db.prepare("UPDATE folder_files SET size = ?, content_type = ?, updated_at = ? WHERE task_id = ? AND path = ?")
+            .run(entry.size, entry.contentType, entry.modifiedAt, taskId, entry.path);
+        }
+      }
+      for (const gone of recorded.keys()) this.db.prepare("DELETE FROM folder_files WHERE task_id = ? AND path = ?").run(taskId, gone);
+      return this.db.prepare("SELECT * FROM folder_files WHERE task_id = ? ORDER BY path").all(taskId).map(folderFile);
+    });
+  }
+
+  /** FOLDER-1: a file someone put into the task's folder, replacing any of the same path; added now, by them. */
+  addFolderFile(principal: Principal, taskId: string, entry: FolderEntry): FolderFile {
+    return this.transaction(() => {
+      this.visibleTask(principal, taskId);
+      this.db.prepare("DELETE FROM folder_files WHERE task_id = ? AND path = ?").run(taskId, entry.path);
+      return this.insertFolderFile(taskId, entry, principal, Date.now());
+    });
+  }
+
+  private insertFolderFile(taskId: string, entry: FolderEntry, principal: Principal | null, addedAt: number): FolderFile {
+    const addedBy = principal === null ? null : actorOf(principal);
+    this.db.prepare(
+      "INSERT INTO folder_files (task_id, path, size, content_type, added_by_kind, added_by_id, added_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run(
+      taskId, entry.path, entry.size, entry.contentType, addedBy?.kind ?? null,
+      addedBy === null ? null : addedBy.kind === "person" ? addedBy.personId : addedBy.sessionId, addedAt, entry.modifiedAt,
+    );
+    this.recordTaskEvent(taskId, principal, { kind: "file", path: entry.path }, addedAt);
+    return { path: entry.path, size: entry.size, contentType: entry.contentType, addedBy, addedAt, updatedAt: entry.modifiedAt };
+  }
+
+  /** FOLDER-1: forgets a file deleted from the task's folder. */
+  removeFolderFile(taskId: string, path: string): void {
+    this.db.prepare("DELETE FROM folder_files WHERE task_id = ? AND path = ?").run(taskId, path);
   }
 
   /** Sessions whose agent socket must be listening. */

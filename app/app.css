@@ -60,6 +60,20 @@ button.ghost:hover { color: var(--fg); }
 .menu { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 6px; color: var(--muted); }
 .menu:hover, .menu[aria-current="page"] { color: var(--fg); background: var(--surface-2); }
 .badge { background: var(--red); color: #111; border-radius: 10px; padding: 0 7px; font-size: 12px; font-weight: 700; }
+/* BOARD-3: task search; UI-5: the tasks waiting on you, on every page */
+.search { margin-left: auto; }
+.search input { width: 220px; padding: 3px 10px; }
+.waiting { position: relative; }
+.waiting summary { display: flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; color: var(--fg); font-size: 13px; }
+.waiting summary::-webkit-details-marker { display: none; }
+.waiting nav { position: absolute; right: 0; top: calc(100% + 8px); z-index: 10; display: grid; gap: 2px; min-width: 240px; padding: 6px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 10px 28px rgb(0 0 0 / 0.4); }
+
+/* UI-4: a topic's name in its own colour; PERSON-1: initials on a person's colour */
+.topic-name { display: inline-flex; align-items: center; padding: 0 8px; border-radius: 10px; font-size: 12px; font-weight: 600; background: color-mix(in srgb, currentColor 14%, transparent); border: 1px solid color-mix(in srgb, currentColor 35%, transparent); }
+.topic-name:hover { background: color-mix(in srgb, currentColor 24%, transparent); }
+.chip .topic-name { background: none; border: none; padding: 0; }
+.topic-panel { position: fixed; top: 52px; right: 8px; bottom: 8px; z-index: 5; width: 380px; max-width: calc(100vw - 16px); overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; box-shadow: -10px 0 28px rgb(0 0 0 / 0.4); }
+.topic-panel .task-link { justify-content: space-between; }
 
 /* Tasks: the task list beside the task's workspace; kept, hidden, while the board shows */
 .tasks-page { display: grid; grid-template-columns: 172px minmax(0, 1fr); min-height: 0; }
@@ -86,7 +100,8 @@ button.ghost:hover { color: var(--fg); }
 
 /* Board: the project's tasks in columns by state */
 .board-page { min-height: 0; overflow: auto; padding: 14px; }
-.board { display: grid; grid-template-columns: repeat(4, minmax(260px, 1fr)); gap: 12px; align-items: start; }
+.board { display: grid; grid-template-columns: repeat(3, minmax(260px, 1fr)); gap: 12px; align-items: start; }
+.board-bar { display: flex; justify-content: flex-end; margin-bottom: 10px; }
 .column { display: grid; gap: 10px; align-content: start; }
 .column h2 { margin: 0; font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
 .new-task input, .new-task textarea { width: 100%; }
@@ -95,51 +110,100 @@ button.ghost:hover { color: var(--fg); }
 .description { margin: 0; white-space: pre-wrap; }
 .start-session { display: grid; gap: 10px; align-content: start; justify-items: start; max-width: 640px; }
 .start-session h2 { margin: 0; }
-.card { display: grid; gap: 8px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; color: var(--fg); }
+/* BOARD-1: the card's title link covers the card; its topic names sit above it. */
+.card { position: relative; display: grid; gap: 8px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; color: var(--fg); }
 .card:hover { border-color: var(--grey); }
 .card-blocked { border-color: color-mix(in srgb, var(--red) 55%, var(--border)); }
 .card header { display: flex; align-items: center; gap: 8px; }
-.card header .state { margin-left: auto; color: var(--muted); font-size: 12px; }
+.card-link { flex: 1; color: var(--fg); font-weight: 600; }
+.card-link::after { content: ""; position: absolute; inset: 0; border-radius: inherit; }
+.card .topic-name, .card .avatar { position: relative; z-index: 1; }
+.card-session { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.machine { font: 11px/1.4 ui-monospace, "SF Mono", Menlo, monospace; }
+/* CARD-4: other running tasks changed the same files. */
+.overlap-mark { position: relative; z-index: 1; color: var(--orange); border: 1px solid color-mix(in srgb, var(--orange) 50%, transparent); border-radius: 4px; padding: 0 5px; cursor: help; }
 .meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; color: var(--muted); }
 .chip { display: inline-flex; align-items: center; gap: 4px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: 0 8px; font-size: 12px; }
 .chip-x { border: none; background: none; padding: 0 2px; color: var(--muted); }
-.said { margin: 0; display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap; }
-.said b { color: var(--muted); font-weight: 600; margin-right: 6px; }
-.said.you { -webkit-line-clamp: 2; }
-.said.agent { -webkit-line-clamp: 4; }
-.git-line { display: flex; gap: 10px; font-size: 12px; }
-.unsaved { color: var(--orange); }
 .overlap { margin: 0; font-size: 12px; color: var(--orange); }
+
+/* BOARD-3: every task, done and cancelled too */
+.all-tasks { display: grid; gap: 10px; max-width: 900px; }
+.all-tasks-head { display: flex; align-items: baseline; gap: 12px; }
+.all-tasks-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.all-tasks-row { display: grid; grid-template-columns: 9px minmax(0, 1fr) minmax(0, 260px) 90px 22px; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 6px; background: var(--surface); }
+.all-tasks-row .name { color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.all-tasks-row .state { color: var(--muted); font-size: 12px; }
+.all-tasks-row .assignee { display: flex; }
 
 /*
  * UI-2: the workspace, a small browser. The tabs' contents share one grid cell: the chat
- * frames, the notes over them, and the settings over the right of both.
+ * frames, with the page or the settings over them.
  */
 .workspace { display: grid; grid-template-rows: auto auto minmax(0, 1fr); grid-template-areas: "banner" "tabs" "body"; min-width: 0; min-height: 0; padding: 0 12px 12px; }
-.workspace-page { grid-area: body; overflow-y: auto; margin: 0; padding-top: 14px; }
+.workspace-page { grid-area: body; z-index: 1; overflow-y: auto; margin: 0; padding-top: 14px; }
 .workspace-tabs { grid-area: tabs; display: flex; align-items: flex-end; gap: 2px; margin-bottom: 8px; border-bottom: 1px solid var(--border); }
-.workspace-tabs [role="tablist"] { display: flex; gap: 2px; padding-top: 8px; }
-.tab { padding: 6px 16px; margin-bottom: -1px; color: var(--muted); border: 1px solid transparent; border-radius: 8px 8px 0 0; }
+.workspace-tabs [role="tablist"] { display: flex; flex: 1; gap: 2px; padding-top: 8px; }
+.tab { display: inline-flex; align-items: center; gap: 6px; padding: 6px 16px; margin-bottom: -1px; color: var(--muted); border: 1px solid transparent; border-radius: 8px 8px 0 0; }
 .tab:hover { color: var(--fg); }
 .tab[aria-selected="true"] { color: var(--fg); background: var(--surface); border-color: var(--border); border-bottom-color: var(--surface); }
-.icon-button { margin: 0 0 4px auto; display: grid; place-items: center; padding: 5px; background: transparent; border-color: transparent; color: var(--muted); }
-.icon-button:hover, .icon-button[aria-expanded="true"] { color: var(--fg); background: var(--surface-2); }
+.settings-tab { margin-left: auto; }
 
-.notes { grid-area: body; z-index: 1; display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 6px; min-height: 0; }
-.notes textarea { width: 100%; height: 100%; resize: none; padding: 12px 14px; border-radius: 10px; background: var(--surface); font: 13px/1.55 ui-monospace, "SF Mono", Menlo, monospace; }
-.notes-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; min-height: 24px; }
-.conflict { color: var(--orange); }
+/* TASK-12: the task's page, its text on the left and its fields on the right */
+.task-page { display: grid; gap: 12px; align-content: start; }
+.page-head { display: flex; align-items: center; gap: 10px; }
+.title-field { flex: 1; min-width: 0; }
+.title-input { width: 100%; font-size: 20px; font-weight: 600; background: transparent; border-color: transparent; padding: 4px 6px; }
+.title-input:hover, .title-input:focus { border-color: var(--border); background: var(--surface-2); }
+.session-state { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.page-grid { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 12px; align-items: start; }
+.page-main { display: grid; gap: 12px; min-width: 0; }
+.page-side { display: grid; gap: 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+.field { display: grid; gap: 6px; }
+.field .actions, .finish-task .actions, .comment-form .actions, .page-main .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.finish-task { display: grid; gap: 6px; }
+.button-link { justify-self: start; padding: 5px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-2); color: var(--fg); }
+.sessions { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.session-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.markdown > :first-child { margin-top: 0; }
+.markdown > :last-child { margin-bottom: 0; }
+.comment { display: grid; gap: 6px; border-top: 1px solid var(--border); padding-top: 8px; }
+.comment-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.comment-actions { margin-left: auto; display: flex; gap: 2px; }
+.comment-form { display: grid; gap: 6px; }
+.comment-form textarea, .edit-task textarea { width: 100%; }
+.history { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.history li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 13px; }
+.history time { margin-left: auto; }
 
-.workspace-settings { grid-area: body; z-index: 2; justify-self: end; width: 340px; max-width: 100%; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; box-shadow: -10px 0 28px rgb(0 0 0 / 0.4); }
+/* PERSON-1, PERSON-2: initials on a person's colour; an agent's square on its session's */
+.actor { display: inline-flex; align-items: center; gap: 6px; color: var(--fg); font-weight: 600; font-size: 13px; }
+.avatar { flex: none; display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; color: #fff; font-size: 10px; font-weight: 700; letter-spacing: 0.02em; }
+.avatar::before { content: attr(data-initials); }
+.avatar-agent { border-radius: 5px; }
+.avatar-system { background: var(--grey); }
+.people-dialog { position: fixed; z-index: 10; top: 80px; left: 50%; transform: translateX(-50%); width: 360px; max-width: calc(100vw - 24px); box-shadow: 0 12px 40px rgb(0 0 0 / 0.5); }
+.people { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.person { display: flex; align-items: center; gap: 8px; }
+.person input { flex: 1; min-width: 0; }
+
+/* UI-2: the Settings tab, for the task's session, with its subtabs */
+.task-settings { display: grid; gap: 12px; align-content: start; max-width: 760px; }
 .settings-head { display: flex; align-items: center; gap: 8px; }
 .settings-head .close { margin-left: auto; font-size: 18px; line-height: 1; }
+.subtabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+.subtab { background: transparent; border-color: transparent; color: var(--muted); }
+.subtab[aria-selected="true"] { color: var(--fg); background: var(--surface-2); border-color: var(--border); }
+.settings-body { display: grid; gap: 8px; }
+.settings-body .actions { display: flex; gap: 8px; }
+.file-status { display: inline-block; width: 14px; font: 12px ui-monospace, "SF Mono", Menlo, monospace; color: var(--muted); }
+.file-added { color: var(--green); }
+.file-deleted { color: var(--red); }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.status { display: grid; gap: 4px; border-top: 1px solid var(--border); padding-top: 8px; }
 .files { margin: 0; padding-left: 18px; }
 button.danger { border-color: color-mix(in srgb, var(--red) 55%, var(--border)); color: var(--red); }
 button.ghost.danger { border-color: transparent; }
 .end-session p { margin: 0; }
-.end-session .actions { display: flex; gap: 8px; }
 
 .session-frames { grid-area: body; position: relative; min-height: 0; }
 /* Hidden frames keep their size, so showing one again needs no new layout in Tern. */
@@ -147,3 +211,27 @@ button.ghost.danger { border-color: transparent; }
 .session-frame.current { visibility: visible; }
 .session-frames.covered .session-frame { visibility: hidden; }
 .session-frame-status { position: absolute; inset: 0; z-index: 1; margin: 0; display: grid; place-items: center; color: var(--muted); pointer-events: none; }
+
+/* FOLDER-1, FOLDER-2: a task's folder, a drop zone with its files and the one shown inline */
+.folder-tab { z-index: 1; }
+.folder { display: grid; gap: 10px; align-content: start; min-height: 160px; padding: 12px 14px; background: var(--surface); border: 1px dashed var(--border); border-radius: 10px; }
+.folder.dragging { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--surface)); }
+.folder-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.folder-head h3 { margin-right: 4px; }
+.folder-head .muted { flex: 1; }
+.button { display: inline-block; cursor: pointer; color: var(--fg); background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; }
+.folder-empty { margin: 0; }
+.folder-files { width: 100%; border-collapse: collapse; }
+.folder-files th { text-align: left; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); padding: 4px 8px; }
+.folder-files td { padding: 4px 8px; border-top: 1px solid var(--border); }
+.folder-files tr[aria-current="true"] td { background: var(--surface-2); }
+.file-name { color: var(--accent); padding: 0; word-break: break-all; }
+.file-actions { display: flex; gap: 8px; align-items: center; justify-content: flex-end; }
+.who { display: inline-flex; align-items: center; gap: 6px; color: var(--fg); }
+.avatar { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--grey); color: #111; font-size: 10px; font-weight: 700; }
+.avatar.agent { background: var(--accent); }
+.folder-preview { margin: 0; display: grid; gap: 8px; border-top: 1px solid var(--border); padding-top: 10px; }
+.folder-preview figcaption { font-weight: 600; }
+.folder-media { max-width: 100%; max-height: 70vh; justify-self: start; border-radius: 6px; }
+.folder-pdf { width: 100%; height: 75vh; border: 1px solid var(--border); border-radius: 6px; background: #fff; }
+.folder-text { max-height: 70vh; overflow: auto; padding: 10px 12px; background: var(--bg); border-radius: 6px; }

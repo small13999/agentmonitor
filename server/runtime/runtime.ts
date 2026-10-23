@@ -20,6 +20,8 @@ export interface LaunchInput {
   sessionId: string;
   repoPath: string;
   dirs: WorkspaceDirs;
+  /** FOLDER-3: the task's folder on this machine; a container gets it at CONTAINER_FOLDER, a host session's agent uses it where it is. */
+  folder: string;
   /** omp model for the chat; null: omp's default. */
   model: string | null;
   /** omp chat (omp session id) to resume; null: a new chat. */

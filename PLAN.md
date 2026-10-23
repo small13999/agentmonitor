@@ -18,8 +18,8 @@ through Agent Monitor (dogfooding).
 |---|------|-------|
 | 1 | Tasks: Topic → Task → Session, board, task workspace, snapshots, `am check` | Done (`7ae8314`..`2f84742`) |
 | 2 | Bootstrap: host sessions, "+ Project", agentmonitor project in the store on the user's PC | Done: HOST-1..7, UI-3; the integrator runs as a main-checkout session of project `agentmonitor` |
-| 3 | SPEC draft for steps 4–8, reviewed by the user; its Concepts section is agreed | Draft in `SPEC-DRAFT.md`, three Q points open |
-| 4 | Redesign from a clean slate: task page, comments, attachments (folder), people and assignee, board, session Settings tab, topic reader, visual identity; done through Agent Monitor itself | |
+| 3 | SPEC draft for steps 4–8, reviewed by the user; its Concepts section is agreed | Done: step 4 claims in SPEC.md (`c55171c`); steps 5–8 stay in `SPEC-DRAFT.md` until their step |
+| 4 | Redesign from a clean slate: task page, comments, attachments (folder), people and assignee, board, session Settings tab, topic reader, visual identity; done through Agent Monitor itself | In progress: foundation on main (`fec2d9d`); four slice tasks (topic Redesign) in host sessions; the integrator merges them |
 | 5 | Hub on Hetzner for draftcoach: Cloudflare Tunnel + Access, login, teammate access, flat hosts; the user's local Agent Monitor lists the hub's projects | |
 | 6 | Preview tab per task (and the draftcoach preview login), Deploy changes | |
 | 7 | Automations | |
@@ -53,7 +53,10 @@ through Agent Monitor (dogfooding).
   the full rendered text and linked work.
 - Visual identity from a clean slate: type with character, a distinct accent, a
   colour per topic, avatars for people and agents, live status (pulse while
-  working, a clear "needs you"). Show a clickable prototype before building it in.
+  working, a clear "needs you"). Picked from three prototypes: Studio (Bricolage
+  Grotesque, violet, compact and high signal), toned down: no offset 3D shadows, no
+  tilted elements or stickers. Console was too intimidating for non-technical users,
+  Paper too drawn out (half the tasks per screen).
 - People: the user and the teammate as named users; the assignee is a person.
 
 ### Automations (step 7)

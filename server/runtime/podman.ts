@@ -10,6 +10,9 @@ const run = promisify(execFile);
 /** Built by scripts/build-image.ts. */
 export const WORKSPACE_IMAGE = "localhost/agentmonitor-workspace:dev";
 
+/** FOLDER-3: where a session container has its task's folder: beside the worktree, outside git. */
+export const CONTAINER_FOLDER = "/task-folder";
+
 /** The user's git credentials a session container gets: host path under the credentials home → mount point. */
 const CREDENTIALS: Array<[string, string]> = [
   [".ssh", "/host-credentials/ssh"],
@@ -20,7 +23,7 @@ const CREDENTIALS: Array<[string, string]> = [
 /**
  * Session containers run directly under rootless podman, as the host user, with:
  * the worktree at /workspace/<repo>, the repository's .git at its host path (worktree
- * metadata uses absolute paths), the run directory, a per-session omp home, the
+ * metadata uses absolute paths), the run directory, the task's folder, a per-session omp home, the
  * configured omp agent directory for credentials, and the user's ssh keys, git config and
  * gh login (read-only; the entrypoint copies them). Never podman.
  */
@@ -56,6 +59,7 @@ export class PodmanRuntime implements Runtime {
       "-v", `${input.dirs.worktree}:/workspace/${repoName}`,
       "-v", `${commonDir}:${commonDir}`,
       "-v", `${input.dirs.run}:/run/agentmonitor`,
+      "-v", `${input.folder}:${CONTAINER_FOLDER}`,
       "-v", `${input.dirs.ompHome}:/home/agent/.omp`,
       "-v", `${this.options.ompAgentDir}:/host-omp-agent`,
       ...CREDENTIALS.flatMap(([path, mount]) => {
