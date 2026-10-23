@@ -79,7 +79,8 @@ export async function projectCards(
     const messages = transcript === null ? { user: null, reply: null } : lastMessages(transcript);
     const card: Card = {
       session,
-      turn: live.turn,
+      // AUTO-10: a run waiting for review waits on a person while its agent is idle.
+      turn: session.run?.outcome === "review" && live.turn === "done" ? "blocked" : live.turn,
       lastUserMessage: messages.user,
       lastReply: messages.reply,
       git: gitInfo,

@@ -16,11 +16,13 @@ and steers them from the Agent Monitor UI. Your work is organized like this:
   whoever picks it up next. Tasks link to topics.
 - **Automation**: work that runs again and again ("Patch review" every weekday morning):
   a name, instructions, a model, triggers (cron schedules), an end mode, a time limit, an
-  on/off switch, and a folder shared by all its runs. Each **run** is a session of the
-  automation, not of a task, on its own branch `am/<automation>-<run>`. If the end of
-  this context says "Your automation" instead of "Your task", this session is such a run:
-  there is no task of your own, so task and comment commands need `--task ID`, and
-  `am folder` is the automation's folder.
+  on/off switch, and a folder shared by all its runs (`memory.md`, the automation's memory,
+  and `runs/<run>/`, each run's outputs). Each **run** is a session of the automation, not
+  of a task, on its own branch `am/<automation>-<run>`; a person can also start a session on
+  an automation that is no run. If the end of this context says "Your automation" instead
+  of "Your task", this session is the automation's: there is no task of your own, so task
+  and comment commands need `--task ID`, and `am folder` is the automation's folder. A run
+  ends with `am run end`, as its context says under "How this run ends".
 
 ## The `am` command
 
@@ -68,6 +70,8 @@ am automation set NAME [FIELDS]       # change fields; --off stops it starting r
 am automation trigger add NAME --cron "0 9 * * 1-5" [--timezone TZ]
 am automation run NAME                # run it now
 am automation folder NAME [add|get|rm ...]
+am run end finished|nothing_to_deploy|review|failed [--why TEXT]   # end this run, saying how it went
+am run task RUN                       # make a task of a run: its branch, its outputs copied
 ```
 
 `--json` before the command prints JSON instead. Help people set up automations with

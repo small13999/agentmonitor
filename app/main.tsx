@@ -7,6 +7,7 @@ import { AllTasks } from "./AllTasks.tsx";
 import { api, chooseStore, LOCAL_STORE, storeOf, usePolled, type Card, type Person, type Project, type StoreListing, type TaskDetail, type TaskSummary, type Topic } from "./api.ts";
 import { Board, waitsOnYou } from "./Board.tsx";
 import { ProjectSettings } from "./ProjectSettings.tsx";
+import { hostOrigin, zoneOf } from "../shared/hosts.ts";
 import { SessionFrames } from "./SessionFrames.tsx";
 import { TaskList } from "./TaskList.tsx";
 import { TaskPage } from "./TaskPage.tsx";
@@ -115,12 +116,16 @@ function SearchTasks({ query }: { query: string }) {
   );
 }
 
-/** UI-5: how many tasks wait on you, and links to each. */
-function WaitingOnYou({ waiting }: { waiting: TaskSummary[] }) {
-  if (waiting.length === 0) return null;
+/**
+ * UI-5: how many tasks wait on you, and links to each; AUTO-10: runs of automations waiting for
+ * review count too, each linking to its chat, which shows on the run's own chat host.
+ */
+function WaitingOnYou({ waiting, runs, hub }: { waiting: TaskSummary[]; runs: Card[]; hub: string | null }) {
+  const count = waiting.length + runs.length;
+  if (count === 0) return null;
   return (
     <details className="waiting">
-      <summary title="Tasks waiting on you"><span className="badge">{waiting.length}</span> waiting on you</summary>
+      <summary title="Tasks and runs waiting on you"><span className="badge">{count}</span> waiting on you</summary>
       <nav aria-label="Waiting on you">
         {waiting.map((summary) => (
           <a
@@ -133,13 +138,26 @@ function WaitingOnYou({ waiting }: { waiting: TaskSummary[] }) {
             <span className="name">{summary.task.title}</span>
           </a>
         ))}
+        {runs.map(({ session }) => (
+          <a
+            key={session.id}
+            className="task-link"
+            href={`${hostOrigin(zoneOf(hub === null ? location : new URL(hub)), { kind: "chat", sessionId: session.id })}/`}
+            target="_blank"
+            rel="noreferrer"
+            onClick={(event) => event.currentTarget.closest("details")?.removeAttribute("open")}
+          >
+            <span className="light light-blocked" />
+            <span className="name">{session.name}: run {session.id.slice(0, 8)} waits for review</span>
+          </a>
+        ))}
       </nav>
     </details>
   );
 }
 
 /** UI-1, BOARD-3, and UI-5: Agent Monitor's header with its menus, task search, and the tasks waiting on you. */
-function AppHeader({ route, waiting }: { route: Route; waiting: TaskSummary[] }) {
+function AppHeader({ route, waiting, runs, hub }: { route: Route; waiting: TaskSummary[]; runs: Card[]; hub: string | null }) {
   return (
     <header className="app-header">
       <a className="brand" href="#/"><span className="brand-mark" aria-hidden="true" />Agent Monitor</a>
@@ -148,7 +166,7 @@ function AppHeader({ route, waiting }: { route: Route; waiting: TaskSummary[] })
         <a className="menu" href="#/t" aria-current={route.page === "tasks" ? "page" : undefined}>Tasks</a>
       </nav>
       <SearchTasks query={route.query} />
-      <WaitingOnYou waiting={waiting} />
+      <WaitingOnYou waiting={waiting} runs={runs} hub={hub} />
     </header>
   );
 }
@@ -237,7 +255,12 @@ function App() {
   return (
     <OpenTopic.Provider value={setOpenTopic}>
     <div className="shell">
-      <AppHeader route={route} waiting={waiting} />
+      <AppHeader
+        route={route}
+        waiting={waiting}
+        runs={(cards.data ?? []).filter((card) => card.session.automationId !== null && card.turn === "blocked")}
+        hub={chosen?.store.url ?? null}
+      />
       {page === "board" && (
         <main className="board-page">
           {error && <p className="error banner">{error}</p>}
