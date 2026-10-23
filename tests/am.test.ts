@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before } from "node:test";
@@ -19,10 +19,7 @@ let project: Project;
 before(async () => {
   await buildApp();
   scratch = mkdtempSync(join(tmpdir(), "am-cli-"));
-  const config = join(scratch, "config");
-  mkdirSync(join(config, "cloudflare"), { recursive: true });
-  writeFileSync(join(config, "cloudflare", "cloudflare-fixture.env"), "CLOUDFLARE_READ_TOKEN=cf-read\nCLOUDFLARE_WRITE_TOKEN=cf-write\n");
-  [gateway, chrome] = await Promise.all([Gateway.start({ runtime: "none", env: { AGENTMONITOR_CONFIG_DIR: config } }), chromium.launch()]);
+  [gateway, chrome] = await Promise.all([Gateway.start({ runtime: "none" }), chromium.launch()]);
   page = await chrome.newPage();
   page.setDefaultTimeout(10_000);
   project = await gateway.data<Project>("POST", "/projects", { name: "draftcoach" });
@@ -128,7 +125,9 @@ spec("STORE-5", "am project show says what the project settings page says, and f
   const repository = form.getByRole("textbox", { name: "Repository" });
   const hostSessions = form.getByRole("checkbox", { name: /Allow host sessions/ });
   assert.deepEqual([await name.inputValue(), await repository.inputValue(), await hostSessions.isChecked()], ["settings-fixture", "/srv/settings-fixture", false]);
-  assert.deepEqual(said(), [`project settings-fixture (${own.id})`, "repository /srv/settings-fixture", "host sessions not allowed"]);
+  assert.deepEqual(said(), [`project settings-fixture (${own.id})`, "repository /srv/settings-fixture", "host sessions not allowed", "cloudflare no tokens"]);
+  const cloudflare = page.getByRole("form", { name: "Cloudflare" });
+  await cloudflare.getByText("No Cloudflare tokens.").waitFor();
 
   // A running session works in a worktree of the repository, which stays while it runs.
   await repository.fill("/srv/elsewhere");
@@ -141,7 +140,13 @@ spec("STORE-5", "am project show says what the project settings page says, and f
   await hostSessions.check();
   await form.getByRole("button", { name: "Save" }).click();
   await form.getByRole("status").getByText("Saved.").waitFor();
-  assert.deepEqual(said(), [`project settings-renamed (${own.id})`, "repository /srv/settings-fixture", "host sessions allowed"]);
+  assert.deepEqual(said(), [`project settings-renamed (${own.id})`, "repository /srv/settings-fixture", "host sessions allowed", "cloudflare no tokens"]);
+
+  // The owner gives it a read token: the page and am say it is set, and neither says the token.
+  await cloudflare.getByLabel("Read token").fill("cf-read-settings");
+  await cloudflare.getByRole("button", { name: "Save" }).click();
+  await cloudflare.getByText("Read token set. No write token: agents only read.").waitFor();
+  assert.equal(said().at(-1), "cloudflare read token set, no write token");
   await page.getByRole("link", { name: "Back to the board" }).click();
   await page.getByRole("heading", { name: "settings-renamed" }).waitFor();
 });
@@ -237,6 +242,7 @@ spec("STORE-5", "am changes and shows another task's title, description, state, 
 
 spec("STORE-5", "am session show says the session's state and its Cloudflare access as the task's Settings tab does", async () => {
   const cloudflare = await gateway.data<Project>("POST", "/projects", { name: "cloudflare-fixture" });
+  await gateway.data("PUT", `/projects/${cloudflare.id}/cloudflare`, { read: "cf-read", write: "cf-write" });
   const target = await task("Cloudflare for agents", cloudflare);
   const session = await start(target);
   const said = () => lines(gateway.am(session.id, ["session", "show"]));

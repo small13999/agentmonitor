@@ -22,6 +22,9 @@ let access: FakeAccess;
 let edge: { url: string; hub: string | null; server: Server };
 let chrome: Browser;
 let scratch: string;
+/** Cloudflare's API as the target's broker reaches it: each request's method, path and token. */
+let cloudflareApi: Server;
+const cloudflareSeen: Array<{ method: string; path: string; authorization: string }> = [];
 
 /** A store as the test reaches it: the source directly, the hub through its edge with an Access token. */
 interface Reach {
@@ -58,6 +61,17 @@ async function startEdge(): Promise<{ url: string; hub: string | null; server: S
 
 before(async () => {
   await buildApp();
+  cloudflareApi = createServer((request, response) => {
+    cloudflareSeen.push({ method: request.method ?? "", path: request.url ?? "", authorization: request.headers.authorization ?? "" });
+    request.resume();
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ success: true, errors: [], messages: [], result: [] }));
+  });
+  const listening = Promise.withResolvers<void>();
+  cloudflareApi.listen(0, "127.0.0.1", () => listening.resolve());
+  await listening.promise;
+  const address = cloudflareApi.address();
+  assert.ok(address !== null && typeof address === "object");
   [source, access, chrome, edge] = await Promise.all([Gateway.start(), FakeAccess.start(), chromium.launch(), startEdge()]);
   target = await Gateway.start({
     runtime: "none",
@@ -67,6 +81,7 @@ before(async () => {
       AGENTMONITOR_ACCESS_AUD: AUDIENCE,
       AGENTMONITOR_OWNER_EMAIL: OWNER,
       AGENTMONITOR_PUBLIC_ORIGIN: edge.url,
+      AGENTMONITOR_CLOUDFLARE_API: `http://127.0.0.1:${address.port}`,
     },
   });
   edge.hub = target.url;
@@ -76,6 +91,7 @@ before(async () => {
 });
 after(async () => {
   edge?.server.close();
+  cloudflareApi?.close();
   edge?.server.closeAllConnections();
   await chrome?.close();
   await Promise.all([source?.stop(), target?.stop(), access?.stop()]);
@@ -221,4 +237,37 @@ spec("STORE-6", "a project moves to another store with its topics, tasks, commen
   assert.equal((await source.api("GET", `/tasks/${notes.id}`)).status, 404);
   assert.ok(!existsSync(join(source.stateDir, "folders", notes.id)), "the task's folder is gone");
   assert.ok(!existsSync(join(source.stateDir, "sessions", session.id)), "the session's chats are gone");
+});
+
+/** A Cloudflare API request of a session's agent on the hub, as Wrangler sends it to the session's socket; its status. */
+function agentCloudflare(session: Session, method: string, path: string): Promise<number> {
+  const { promise, resolve, reject } = Promise.withResolvers<number>();
+  const sent = forward({ socketPath: join(target.stateDir, "sessions", session.id, "run", "am.sock"), method, path, headers: { authorization: "Bearer agent-monitor" } }, (response) => {
+    response.resume();
+    resolve(response.statusCode ?? 0);
+  });
+  sent.on("error", reject);
+  sent.end(method === "GET" ? undefined : "{}");
+  return promise;
+}
+
+spec("CLOUDFLARE-3", "a project's Cloudflare tokens move with it: its sessions on the other store reach Cloudflare with them", async () => {
+  const project = await source.data<Project>("POST", "/projects", { name: "bracket-site" });
+  await source.data("PUT", `/projects/${project.id}/cloudflare`, { read: "cf-read-bracket", write: "cf-write-bracket" });
+  const task = await source.data<Task>("POST", `/projects/${project.id}/tasks`, { title: "Worlds bracket page" });
+
+  const moved = await moveProject(source.url, "bracket-site", edge.url, "--target-token-command", `echo ${access.token(OWNER)}`);
+  assert.equal(moved.code, 0, moved.stderr);
+  assert.equal((await source.api("GET", `/tasks/${task.id}`)).status, 404);
+  const onTarget = (await call<Project[]>(onHub, "GET", "/projects")).find((found) => found.id === project.id);
+  assert.deepEqual(onTarget?.cloudflare, { read: true, write: true });
+
+  // A session of the moved project reads with the moved read token, and writes, once the hub's owner allows it, with the write token.
+  const session = await call<Session>(onHub, "POST", `/tasks/${task.id}/sessions`, {});
+  assert.equal(await agentCloudflare(session, "GET", "/client/v4/accounts"), 200);
+  assert.deepEqual(cloudflareSeen.at(-1), { method: "GET", path: "/client/v4/accounts", authorization: "Bearer cf-read-bracket" });
+  await call(onHub, "POST", `/sessions/${session.id}/cloudflare-writes`);
+  assert.equal(await agentCloudflare(session, "POST", "/client/v4/accounts/bracket/workers/scripts"), 200);
+  assert.deepEqual(cloudflareSeen.at(-1), { method: "POST", path: "/client/v4/accounts/bracket/workers/scripts", authorization: "Bearer cf-write-bracket" });
+  await call(onHub, "POST", `/sessions/${session.id}/end`, {});
 });

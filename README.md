@@ -214,14 +214,18 @@ and `~/.config/gh`, so agents commit as the user and push over ssh; the image
 has `ssh` and `gh`.
 
 A project's agents reach its Cloudflare account through the gateway
-(`server/cloudflare.ts`), which keeps the tokens in
-`~/.config/agentmonitor/cloudflare/<project name>.env`
-(`CLOUDFLARE_READ_TOKEN`, optional `CLOUDFLARE_WRITE_TOKEN`). A container of such
-a project gets `CLOUDFLARE_API_BASE_URL`, a loopback relay to its session
-socket, so Wrangler works unchanged. Reads always pass; writes pass only while
-the user allows them in the task's settings, 10 minutes at a time or until
-revoked. Grants live in the gateway's memory: a restart revokes them. A token
-file added later reaches a session when its container starts again.
+(`server/cloudflare.ts`), with the project's tokens from its store (table
+`cloudflare_tokens`): a read token and an optional write token, which the
+store's owner sets or removes in the project settings (`PUT` / `DELETE
+/projects/:id/cloudflare`, `{ read, write? }`). No route answers with a token:
+a project says only whether each is set (`cloudflare: { read, write }`), and
+`am` has no command for them. A container of such a project gets
+`CLOUDFLARE_API_BASE_URL`, a loopback relay to its session socket, so Wrangler
+works unchanged. Reads always pass; writes pass only while the user allows
+them in the task's settings, 10 minutes at a time or until revoked. Grants live
+in the gateway's memory: a restart revokes them. Tokens set later reach a
+session when its container starts again; changed tokens reach it at once. A
+moved project's tokens move with it (STORE-6).
 
 `AGENTMONITOR_STATE_DIR` (default `~/.local/state/agentmonitor`),
 `AGENTMONITOR_WORKSPACE_RUNTIME` (`podman` | `none`),
@@ -264,8 +268,8 @@ moves a project, for example from the user's PC to the hub, keeping its ids
 store's owner. The script drives three store routes:
 
 1. `POST /projects/:id/export {confirm?}` on the source answers the bundle, a
-   `.tar.gz` of `bundle.json` (every record of the project and the people they
-   name), `folders/<task id>/…`, and `chats/<session id>/{sessions,blobs}/…`
+   `.tar.gz` of `bundle.json` (every record of the project, the people they
+   name, and its Cloudflare tokens), `folders/<task id>/…`, and `chats/<session id>/{sessions,blobs}/…`
    (each session's omp transcripts and the blobs they refer to). It is refused
    while a session runs, naming it; a stopped session ends first. Without
    `confirm` (`--confirm`) it is refused when a task has work the move leaves
@@ -282,7 +286,7 @@ store's owner. The script drives three store routes:
    `--target-repo` as its checkout (else none) and host sessions off. The
    answer carries the SHA-256 of `bundle.json`.
 3. `POST /projects/:id/moved {digest}` on the source deletes the project, its
-   folders, chats, and snapshots, only if its records still have that digest.
+   folders, chats, snapshots, and Cloudflare tokens, only if its records still have that digest.
 
 A store not on this machine is reached with a Cloudflare Access token in
 `cf-access-token`, printed by `--source-token-command` /
@@ -316,5 +320,5 @@ of the hub. It requires `AGENTMONITOR_ACCESS_TEAM_DOMAIN` (the issuer, e.g.
 start) and `AGENTMONITOR_PUBLIC_ORIGIN` (the UI's exact https origin, host
 `am.<zone>`, from which the chat and preview hosts derive); only the UI's host
 reaches the API and the app. On a hub every person works on every project; only
-the owner adds people, allows and starts host sessions, and allows Cloudflare
-writes. Vite's dev server runs without its HMR socket in access mode.
+the owner adds people, allows and starts host sessions, sets projects'
+Cloudflare tokens, and allows Cloudflare writes. Vite's dev server runs without its HMR socket in access mode.

@@ -75,16 +75,13 @@ before(async () => {
   writeFileSync(gh, `#!/bin/sh\necho '${listing}' | sed "s/OPENED/$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)/"\n`);
   chmodSync(gh, 0o755);
 
-  // The user's git credentials and the project's Cloudflare tokens, which the gateway keeps.
+  // The user's git credentials, which the gateway keeps; Cloudflare's API, for the project's tokens.
   home = join(scratch, "home");
   mkdirSync(join(home, ".ssh"), { recursive: true, mode: 0o700 });
   execFileSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-C", "fixture", "-f", join(home, ".ssh", "id_ed25519")]);
   writeFileSync(join(home, ".gitconfig"), "[user]\n\tname = Fixture User\n\temail = fixture@example.com\n");
   mkdirSync(join(home, ".config", "gh"), { recursive: true });
   writeFileSync(join(home, ".config", "gh", "hosts.yml"), "github.com:\n    user: fixture-user\n    oauth_token: gho_fixture\n    git_protocol: ssh\n");
-  const config = join(scratch, "config");
-  mkdirSync(join(config, "cloudflare"), { recursive: true });
-  writeFileSync(join(config, "cloudflare", "fixture.env"), "CLOUDFLARE_READ_TOKEN=cf-read-fixture\nCLOUDFLARE_WRITE_TOKEN=cf-write-fixture\n");
   cloudflareApi = createServer((request, response) => {
     cloudflareSeen.push({ method: request.method ?? "", path: request.url ?? "", authorization: request.headers.authorization ?? "" });
     request.resume();
@@ -103,11 +100,12 @@ before(async () => {
       AGENTMONITOR_OMP_AGENT_DIR: agentDir,
       AGENTMONITOR_GH: gh,
       AGENTMONITOR_CREDENTIALS_HOME: home,
-      AGENTMONITOR_CONFIG_DIR: config,
       AGENTMONITOR_CLOUDFLARE_API: `http://127.0.0.1:${address.port}`,
     },
   });
   projectId = (await gateway.data<{ id: string }>("POST", "/projects", { name: "fixture", repoPath: repo })).id;
+  // CLOUDFLARE-3: the project's tokens, kept in its store.
+  await gateway.data("PUT", `/projects/${projectId}/cloudflare`, { read: "cf-read-fixture", write: "cf-write-fixture" });
   const taskA = await gateway.data<Task>("POST", `/projects/${projectId}/tasks`, { title: "Patch Notes JP", description: TASK_A.description });
   await gateway.data("PUT", `/tasks/${taskA.id}/status`, { status: TASK_A.status, baseRevision: 0 });
   await gateway.data("POST", `/tasks/${taskA.id}/comments`, { body: TASK_A.comment });
