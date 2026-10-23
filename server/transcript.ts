@@ -2,7 +2,7 @@ import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from
 import { join } from "node:path";
 
 /** The working directory a chat ran in, from its header; null if the header has none. */
-function chatCwd(path: string): string | null {
+export function chatCwd(path: string): string | null {
   const buffer = Buffer.alloc(4096);
   const fd = openSync(path, "r");
   let read: number;

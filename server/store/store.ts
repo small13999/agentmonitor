@@ -2,10 +2,10 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { z } from "zod";
 import type {
   Actor, Comment, FolderFile, HistoryEntry, HistoryEvent, Person, Project, PullRequest, Session, SessionRuntime, Task, TaskDetail, TaskState, TaskSummary, Topic, TopicLink,
 } from "../../shared/api.ts";
+import { historyEvent, matchPeople, type ProjectRecords } from "./bundle.ts";
 
 export type { Actor, Comment, FolderFile, HistoryEntry, HistoryEvent, Person, Project, Session, SessionRuntime, Task, TaskDetail, TaskState, TaskSummary, Topic, TopicLink };
 
@@ -17,25 +17,6 @@ export type Principal = { kind: "human"; personId: string } | { kind: "agent"; s
 
 /** UI-4 and PERSON-1: colours handed out in turn to topics and people. */
 const PALETTE = ["#e5484d", "#f76b15", "#d6a000", "#46a758", "#12a594", "#0090ff", "#6e56cf", "#d6409f", "#ab4aba", "#978365"];
-
-const taskState = z.enum(["open", "in_progress", "in_review", "done", "cancelled"]);
-/** TASK-14: a stored event's data, as recorded. */
-const historyEvent: z.ZodType<HistoryEvent> = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("created") }),
-  z.object({ kind: z.literal("state"), from: taskState, to: taskState }),
-  z.object({ kind: z.literal("assignee"), personId: z.string().nullable() }),
-  z.object({ kind: z.literal("topic"), topicId: z.string(), name: z.string(), linked: z.boolean() }),
-  z.object({
-    kind: z.literal("session"),
-    sessionId: z.string(),
-    event: z.enum(["started", "ended"]),
-    machine: z.string().nullable(),
-    runtime: z.enum(["container", "host"]),
-  }),
-  z.object({ kind: z.literal("comment"), commentId: z.string() }),
-  z.object({ kind: z.literal("file"), path: z.string() }),
-  z.object({ kind: z.literal("pull_request"), number: z.number(), title: z.string(), url: z.string() }),
-]);
 
 /** A refused store operation; `status` is the HTTP status the API answers with. */
 export class StoreError extends Error {
@@ -203,6 +184,12 @@ function person(row: Row): Person {
     owner: Number(row.owner) === 1,
     createdAt: Number(row.created_at),
   };
+}
+
+/** An actor as the `*_kind` and `*_id` columns of a record keep it. */
+function actorColumns(actor: Actor | null): [string | null, string | null] {
+  if (actor === null) return [null, null];
+  return [actor.kind, actor.kind === "person" ? actor.personId : actor.sessionId];
 }
 
 function actorOf(principal: Principal): Actor {
@@ -507,7 +494,7 @@ export class Store {
     return this.db.prepare("SELECT 1 FROM people WHERE id = ? AND owner = 1").get(principal.personId) !== undefined;
   }
 
-  /** AUTH-3: what only the store's owner does. */
+  /** AUTH-3, STORE-6: what only the store's owner does. */
   requireOwner(principal: Principal): void {
     if (!this.isOwner(principal)) throw new StoreError(403, "only the store's owner can do this");
   }
@@ -1005,6 +992,141 @@ export class Store {
   /** FOLDER-1: forgets a file deleted from the task's folder. */
   removeFolderFile(taskId: string, path: string): void {
     this.db.prepare("DELETE FROM folder_files WHERE task_id = ? AND path = ?").run(taskId, path);
+  }
+
+  /**
+   * STORE-6: every record of the project, in the order the store wrote them, with the store's
+   * owner and the people the records name.
+   */
+  projectRecords(principal: Principal, projectId: string): ProjectRecords {
+    this.requireOwner(principal);
+    const found = this.visibleProject(principal, projectId);
+    const ofProject = (sql: string) => this.db.prepare(sql).all(projectId);
+    const ofTasks = (table: string, order: string) =>
+      ofProject(`SELECT r.* FROM ${table} r JOIN tasks t ON t.id = r.task_id WHERE t.project_id = ? ORDER BY ${order}`);
+    const tasks = ofProject("SELECT * FROM tasks WHERE project_id = ? ORDER BY created_at, id").map(task);
+    const comments = ofTasks("comments", "r.rowid").map(comment);
+    const folderFiles = ofTasks("folder_files", "r.task_id, r.path").map((row) => ({ taskId: String(row.task_id), ...folderFile(row) }));
+    const events = ofTasks("task_events", "r.id").map((row) => ({
+      taskId: String(row.task_id),
+      at: Number(row.at),
+      actor: actorOfRow(row.actor_kind, row.actor_id),
+      event: historyEvent.parse(JSON.parse(String(row.data))),
+    }));
+    const named = new Set<string>();
+    for (const who of [...comments.map((found) => found.author), ...folderFiles.map((file) => file.addedBy), ...events.map((entry) => entry.actor)]) {
+      if (who?.kind === "person") named.add(who.personId);
+    }
+    for (const id of [...tasks.map((found) => found.assigneeId), ...events.map(({ event }) => (event.kind === "assignee" ? event.personId : null))]) {
+      if (id !== null) named.add(id);
+    }
+    return {
+      version: 1,
+      project: found,
+      people: this.db.prepare("SELECT * FROM people ORDER BY owner DESC, created_at, id").all().map(person).filter((found) => found.owner || named.has(found.id)),
+      topics: ofProject("SELECT * FROM topics WHERE project_id = ? ORDER BY created_at, id").map(topic),
+      tasks,
+      topicLinks: ofTasks("task_topics", "r.rowid").map((row) => ({ taskId: String(row.task_id), topicId: String(row.topic_id), linkedAt: Number(row.linked_at) })),
+      sessions: ofProject("SELECT * FROM sessions WHERE project_id = ? ORDER BY started_at, id").map(session),
+      comments,
+      folderFiles,
+      events,
+    };
+  }
+
+  /**
+   * STORE-6: a project moved here from another store, with the ids it had there so its links
+   * and branches stay valid; refused when this store has any of them already. Whoever its
+   * records name is this store's person (matchPeople); anyone this store lacks is added with
+   * their id. `repoPath` is the project's main checkout on this machine; host sessions stay off
+   * until this store's owner allows them (HOST-1).
+   */
+  importProject(principal: Principal, records: ProjectRecords, repoPath: string | null): { project: Project; added: Person[] } {
+    this.requireOwner(principal);
+    return this.transaction(() => {
+      const moved = records.project;
+      if (this.db.prepare("SELECT 1 FROM projects WHERE id = ? OR name = ?").get(moved.id, moved.name) !== undefined) {
+        throw new StoreError(409, `this store already has a project ${moved.name} or ${moved.id}`);
+      }
+      for (const [table, ids] of Object.entries({
+        topics: records.topics.map((found) => found.id),
+        tasks: records.tasks.map((found) => found.id),
+        sessions: records.sessions.map((found) => found.id),
+        comments: records.comments.map((found) => found.id),
+      })) {
+        const taken = ids.find((id) => this.db.prepare(`SELECT 1 FROM ${table} WHERE id = ?`).get(id) !== undefined);
+        if (taken !== undefined) throw new StoreError(409, `this store already has ${table.slice(0, -1)} ${taken}`);
+      }
+      const match = matchPeople(records.people, this.db.prepare("SELECT * FROM people").all().map(person));
+      const added: Person[] = [];
+      for (const moved of records.people.filter((candidate) => match.get(candidate.id) === null)) {
+        const created: Person = { id: moved.id, name: moved.name, email: moved.email?.toLowerCase() ?? null, color: moved.color, owner: false, createdAt: Date.now() };
+        this.db.prepare("INSERT INTO people (id, name, email, color, owner, created_at) VALUES (?, ?, ?, ?, 0, ?)")
+          .run(created.id, created.name, created.email, created.color, created.createdAt);
+        match.set(moved.id, moved.id);
+        added.push(created);
+      }
+      const here = (personId: string) => {
+        const found = match.get(personId);
+        if (found == null) throw new Error(`person ${personId} is not in the bundle`);
+        return found;
+      };
+      const actorHere = (who: Actor | null): Actor | null => (who?.kind === "person" ? { kind: "person", personId: here(who.personId) } : who);
+      this.db.prepare("INSERT INTO projects (id, name, repo_path, host_sessions, created_at) VALUES (?, ?, ?, 0, ?)").run(moved.id, moved.name, repoPath, moved.createdAt);
+      for (const found of records.topics) {
+        this.db.prepare("INSERT INTO topics (id, project_id, name, color, created_at, status, status_revision) VALUES (?, ?, ?, ?, ?, ?, ?)")
+          .run(found.id, moved.id, found.name, found.color, found.createdAt, found.status, found.statusRevision);
+      }
+      for (const found of records.tasks) {
+        this.db.prepare(
+          "INSERT INTO tasks (id, project_id, title, description, state, assignee_id, branch, base_ref, status, status_revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ).run(
+          found.id, moved.id, found.title, found.description, found.state, found.assigneeId === null ? null : here(found.assigneeId),
+          found.branch, found.baseRef, found.status, found.statusRevision, found.createdAt, found.updatedAt,
+        );
+      }
+      for (const link of records.topicLinks) {
+        this.db.prepare("INSERT INTO task_topics (task_id, topic_id, linked_at) VALUES (?, ?, ?)").run(link.taskId, link.topicId, link.linkedAt);
+      }
+      for (const found of records.sessions) {
+        this.db.prepare(
+          "INSERT INTO sessions (id, project_id, task_id, name, branch, base_ref, machine, runtime, checkout, model, started_at, ended_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ).run(
+          found.id, moved.id, found.taskId, found.name, found.branch, found.baseRef, found.machine, found.runtime, found.checkout ? 1 : 0,
+          found.model, found.startedAt, found.endedAt,
+        );
+      }
+      for (const found of records.comments) {
+        const [kind, id] = actorColumns(actorHere(found.author));
+        this.db.prepare("INSERT INTO comments (id, task_id, author_kind, author_id, body, created_at, edited_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+          .run(found.id, found.taskId, kind, id, found.body, found.createdAt, found.editedAt);
+      }
+      for (const file of records.folderFiles) {
+        const [kind, id] = actorColumns(actorHere(file.addedBy));
+        this.db.prepare(
+          "INSERT INTO folder_files (task_id, path, size, content_type, added_by_kind, added_by_id, added_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ).run(file.taskId, file.path, file.size, file.contentType, kind, id, file.addedAt, file.updatedAt);
+      }
+      for (const entry of records.events) {
+        const [kind, id] = actorColumns(actorHere(entry.actor));
+        const event = entry.event.kind === "assignee" && entry.event.personId !== null ? { ...entry.event, personId: here(entry.event.personId) } : entry.event;
+        this.db.prepare("INSERT INTO task_events (task_id, at, actor_kind, actor_id, data) VALUES (?, ?, ?, ?, ?)").run(entry.taskId, entry.at, kind, id, JSON.stringify(event));
+      }
+      return { project: { ...moved, repoPath, hostSessions: false }, added };
+    });
+  }
+
+  /** STORE-6: forgets a project that moved to another store, with every record of it; people stay. */
+  deleteProject(principal: Principal, projectId: string): void {
+    this.requireOwner(principal);
+    this.transaction(() => {
+      this.visibleProject(principal, projectId);
+      for (const table of ["task_events", "comments", "folder_files", "task_topics"]) {
+        this.db.prepare(`DELETE FROM ${table} WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)`).run(projectId);
+      }
+      for (const table of ["sessions", "tasks", "topics"]) this.db.prepare(`DELETE FROM ${table} WHERE project_id = ?`).run(projectId);
+      this.db.prepare("DELETE FROM projects WHERE id = ?").run(projectId);
+    });
   }
 
   /** Sessions whose agent socket must be listening. */
