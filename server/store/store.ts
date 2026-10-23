@@ -43,8 +43,7 @@ function isTaskState(value: unknown): value is TaskState {
 
 /**
  * SESSION-5: a session belongs to one task or one automation; AUTO-9: a session of an automation
- * is one of its runs when it has a trigger context (empty for "run now"), and otherwise a session
- * on the automation (AUTO-11).
+ * is one of its runs (`is_run`), or a session on the automation that is none (AUTO-11).
  */
 function sessionsTable(name: string): string {
   return `CREATE TABLE ${name} (
@@ -68,6 +67,7 @@ function sessionsTable(name: string): string {
   run_ended_by_kind TEXT,
   run_ended_by_id TEXT,
   run_reason TEXT,
+  is_run INTEGER NOT NULL DEFAULT 0,
   CHECK ((task_id IS NULL) != (automation_id IS NULL))
 );`;
 }
@@ -379,9 +379,9 @@ function session(row: Row): Session {
     model: row.model === null ? null : String(row.model),
     startedAt: Number(row.started_at),
     endedAt: row.ended_at === null ? null : Number(row.ended_at),
-    run: row.automation_id === null || row.run_trigger_context === null ? null : {
+    run: Number(row.is_run) !== 1 ? null : {
       startedBy: actorOfRow(row.run_started_by_kind, row.run_started_by_id),
-      triggerContext: String(row.run_trigger_context),
+      triggerContext: row.run_trigger_context === null ? "" : String(row.run_trigger_context),
       outcome: RUN_OUTCOMES.find((outcome) => outcome === row.run_outcome) ?? null,
       reason: row.run_reason === null ? null : String(row.run_reason),
       endedBy: actorOfRow(row.run_ended_by_kind, row.run_ended_by_id),
@@ -479,8 +479,13 @@ export class Store {
     this.addColumn("sessions", "runtime", "TEXT NOT NULL DEFAULT 'container'");
     this.addColumn("sessions", "checkout", "INTEGER NOT NULL DEFAULT 0");
     this.migrateSessionOwners();
-    // AUTO-10: stores from before runs said why they failed.
+    // AUTO-10: stores from before runs ended said why they failed; AUTO-11: every session of an
+    // automation from before sessions on automations is a run.
     this.addColumn("sessions", "run_reason", "TEXT");
+    if (!this.columns("sessions").includes("is_run")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN is_run INTEGER NOT NULL DEFAULT 0");
+      this.db.exec("UPDATE sessions SET is_run = 1 WHERE automation_id IS NOT NULL");
+    }
     // PERSON-1: every store has its owner; TASK-13 and UI-4 on stores from before people.
     if (this.db.prepare("SELECT 1 FROM people WHERE owner = 1").get() === undefined) {
       this.db.prepare("INSERT INTO people (id, name, color, owner, created_at) VALUES (?, ?, ?, 1, ?)").run(randomUUID(), ownerName, PALETTE[5], Date.now());
@@ -535,9 +540,12 @@ export class Store {
     });
   }
 
+  private columns(table: string): string[] {
+    return this.db.prepare(`SELECT name FROM pragma_table_info('${table}')`).all().map((row) => String(row.name));
+  }
+
   private addColumn(table: string, column: string, definition: string): void {
-    const columns = this.db.prepare(`SELECT name FROM pragma_table_info('${table}')`).all().map((row) => String(row.name));
-    if (!columns.includes(column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    if (!this.columns(table).includes(column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 
   close(): void {
@@ -1326,7 +1334,7 @@ export class Store {
 
   /** AUTO-9: the automation's run that is still going, if any; a session on it that is no run does not count. */
   private runningRunOf(automationId: string): Session | null {
-    const row = this.db.prepare("SELECT * FROM sessions WHERE automation_id = ? AND run_trigger_context IS NOT NULL AND ended_at IS NULL").get(automationId);
+    const row = this.db.prepare("SELECT * FROM sessions WHERE automation_id = ? AND is_run = 1 AND ended_at IS NULL").get(automationId);
     return row === undefined ? null : session(row);
   }
 
@@ -1554,8 +1562,8 @@ export class Store {
       };
       const [kind, id] = actorColumns(startedBy);
       this.db.prepare(
-        "INSERT INTO sessions (id, project_id, automation_id, name, machine, runtime, checkout, model, started_at, run_started_by_kind, run_started_by_id, run_trigger_context) " +
-          "VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)",
+        "INSERT INTO sessions (id, project_id, automation_id, name, machine, runtime, checkout, model, started_at, run_started_by_kind, run_started_by_id, run_trigger_context, is_run) " +
+          "VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 1)",
       ).run(created.id, created.projectId, automationId, created.name, created.machine, created.runtime, created.model, created.startedAt, kind, id, created.run?.triggerContext ?? "");
       return created;
     });
@@ -1563,7 +1571,7 @@ export class Store {
 
   /** AUTO-10: how a run ended, or waits for review, and why; it ends separately (endRun). */
   setRunOutcome(sessionId: string, outcome: RunOutcome, reason: string | null): void {
-    this.db.prepare("UPDATE sessions SET run_outcome = ?, run_reason = ? WHERE id = ? AND run_trigger_context IS NOT NULL").run(outcome, reason, sessionId);
+    this.db.prepare("UPDATE sessions SET run_outcome = ?, run_reason = ? WHERE id = ? AND is_run = 1").run(outcome, reason, sessionId);
   }
 
   /**
@@ -1735,11 +1743,12 @@ export class Store {
         const [endedKind, endedId] = actorColumns(actorHere(found.run?.endedBy ?? null));
         this.db.prepare(
           "INSERT INTO sessions (id, project_id, task_id, automation_id, name, branch, base_ref, machine, runtime, checkout, model, started_at, ended_at, " +
-            "run_started_by_kind, run_started_by_id, run_trigger_context, run_outcome, run_ended_by_kind, run_ended_by_id, run_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "run_started_by_kind, run_started_by_id, run_trigger_context, run_outcome, run_ended_by_kind, run_ended_by_id, run_reason, is_run) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         ).run(
           found.id, moved.id, found.taskId, found.automationId, found.name, found.branch, found.baseRef, found.machine, found.runtime, found.checkout ? 1 : 0,
           found.model, found.startedAt, found.endedAt, startedKind, startedId, found.run?.triggerContext ?? null, found.run?.outcome ?? null, endedKind, endedId,
-          found.run?.reason ?? null,
+          found.run?.reason ?? null, found.run === null ? 0 : 1,
         );
       }
       for (const found of records.firings) {

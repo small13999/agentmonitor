@@ -8,7 +8,7 @@ import { z } from "zod";
 import type { Automation, Card, EndedSession, HistoryEntry, TaskChanges, TaskDetail, UnpushedWork } from "../../shared/api.ts";
 import { gatewayZone, hostOrigin } from "../../shared/hosts.ts";
 import { projectCards } from "../cards.ts";
-import { Clock } from "../clock.ts";
+import { fileClock, systemClock, type Clock } from "../scheduler/clock.ts";
 import { taskChanges } from "../changes.ts";
 import { CLOUDFLARE_API_PREFIX, CloudflareBroker } from "../cloudflare.ts";
 import type { GatewayConfig } from "../config.ts";
@@ -48,7 +48,7 @@ import { folderOwnerOf, runShortId, Store, StoreError, type Principal, type Proj
 type ServiceConfig = Pick<
   GatewayConfig,
   | "workspaceRuntime" | "workspaceMemoryMib" | "machineName" | "ompAgentDir" | "credentialsHome" | "cloudflareApi" | "ownerEmail" | "publicOrigin"
-  | "clockOffsetFile"
+  | "clockFile"
 >;
 
 export interface TernUpstream {
@@ -93,6 +93,8 @@ export class StoreService implements StoreContext {
   private readonly cloudflare: CloudflareBroker;
   /** AUTO-14: the time runs' time limits are measured on. */
   private readonly clock: Clock;
+  /** Stops checking runs' time limits: on every minute, and whenever the clock jumps (tests). */
+  private stopTicking: () => void = () => undefined;
   /** AUTO-10: runs whose agent said how they went; each ends when its agent's turn does. */
   private readonly ending = new Set<string>();
   /** AUTO-10, AUTO-14: runs being ended without a person, each once, whoever asks. */
@@ -111,7 +113,7 @@ export class StoreService implements StoreContext {
       : null;
     this.config = config;
     this.cloudflare = new CloudflareBroker({ store: this.store, upstream: config.cloudflareApi });
-    this.clock = new Clock(config.clockOffsetFile);
+    this.clock = config.clockFile === null ? systemClock : fileClock(config.clockFile);
     this.moves = new ProjectMoves({
       store: this.store,
       folders: this.folders,
@@ -812,13 +814,19 @@ export class StoreService implements StoreContext {
       this.ending.add(id);
       void turnEnded(this.dirs(id).run).then(() => this.stopRun(id, { kind: "agent", sessionId: id }, outcome)).finally(() => this.ending.delete(id));
     }
-    this.clock.onTick(() => this.stopRunsOverTime());
+    const minutely = setInterval(() => this.stopRunsOverTime(), 60_000);
+    minutely.unref();
+    const stopJumps = this.clock.onJump(() => this.stopRunsOverTime());
+    this.stopTicking = () => {
+      clearInterval(minutely);
+      stopJumps();
+    };
     this.stopRunsOverTime();
   }
 
   /** Closes the agent sockets and the database; for a dev server that reloads its config. */
   close(): void {
-    this.clock.close();
+    this.stopTicking();
     for (const id of [...this.servers.keys()]) this.unlisten(id);
     this.store.close();
   }

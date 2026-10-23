@@ -42,11 +42,8 @@ export interface GatewayConfig {
   configDir: string;
   /** Cloudflare's API origin, which the gateway's Cloudflare broker forwards agents' requests to. */
   cloudflareApi: string;
-  /**
-   * Tests only: a file holding milliseconds the gateway's clock (server/clock.ts) runs ahead of
-   * the system's; it ticks whenever the file changes. Null: the system's clock.
-   */
-  clockOffsetFile: string | null;
+  /** Tests only: a file holding the time the scheduler reads as now (AUTO-2); null: the system's clock. */
+  clockFile: string | null;
 }
 
 /** People's emails are compared case-insensitively: the store keeps them lower-cased. */
@@ -141,6 +138,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig 
     credentialsHome: env.AGENTMONITOR_CREDENTIALS_HOME ?? homedir(),
     configDir: env.AGENTMONITOR_CONFIG_DIR ?? join(homedir(), ".config", "agentmonitor"),
     cloudflareApi: env.AGENTMONITOR_CLOUDFLARE_API ?? "https://api.cloudflare.com",
-    clockOffsetFile: env.AGENTMONITOR_CLOCK_OFFSET_FILE || null,
+    clockFile: env.AGENTMONITOR_CLOCK_FILE || null,
   };
 }

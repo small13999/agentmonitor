@@ -96,12 +96,14 @@ async function freePort(): Promise<number> {
 export class Gateway {
   readonly stateDir: string;
   readonly url: string;
-  private readonly child: ChildProcess;
+  private child: ChildProcess;
+  private readonly env: NodeJS.ProcessEnv;
 
-  private constructor(stateDir: string, url: string, child: ChildProcess) {
+  private constructor(stateDir: string, url: string, child: ChildProcess, env: NodeJS.ProcessEnv) {
     this.stateDir = stateDir;
     this.url = url;
     this.child = child;
+    this.env = env;
   }
 
   /**
@@ -117,37 +119,48 @@ export class Gateway {
     const stateDir = options.stateDir ?? mkdtempSync(join(tmpdir(), "am-gw-"));
     const port = await freePort();
     const url = options.hub === true ? `http://am.localhost:${port}` : `http://127.0.0.1:${port}`;
-    const child = spawn(process.execPath, [join(root, "server", "index.ts")], {
-      cwd: root,
-      env: {
-        ...process.env,
-        AGENTMONITOR_PORT: String(port),
-        AGENTMONITOR_STATE_DIR: stateDir,
-        AGENTMONITOR_AUTH_MODE: "local",
-        AGENTMONITOR_WORKSPACE_RUNTIME: options.runtime,
-        // Never the user's settings, e.g. the hubs of their hubs.json (STORE-3).
-        AGENTMONITOR_CONFIG_DIR: join(stateDir, "config"),
-        ...(options.hub === true ? { AGENTMONITOR_PUBLIC_ORIGIN: url } : {}),
-        ...options.env,
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let log = "";
-    const { promise: listening, resolve, reject } = Promise.withResolvers<void>();
-    child.stdout?.on("data", (chunk) => {
-      log += chunk;
-      if (log.includes("agentmonitor gateway")) resolve();
-    });
-    child.stderr?.on("data", (chunk) => { log += chunk; });
-    child.once("exit", (code) => reject(new Error(`gateway exited with ${code}:\n${log}`)));
-    const gateway = new Gateway(stateDir, url, child);
+    const env = {
+      ...process.env,
+      AGENTMONITOR_PORT: String(port),
+      AGENTMONITOR_STATE_DIR: stateDir,
+      AGENTMONITOR_AUTH_MODE: "local",
+      AGENTMONITOR_WORKSPACE_RUNTIME: options.runtime,
+      // Never the user's settings, e.g. the hubs of their hubs.json (STORE-3).
+      AGENTMONITOR_CONFIG_DIR: join(stateDir, "config"),
+      ...(options.hub === true ? { AGENTMONITOR_PUBLIC_ORIGIN: url } : {}),
+      ...options.env,
+    };
+    const child = spawn(process.execPath, [join(root, "server", "index.ts")], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
+    const gateway = new Gateway(stateDir, url, child, env);
     try {
-      await listening;
+      await gateway.listening();
     } catch (error) {
       await gateway.stop();
       throw error;
     }
     return gateway;
+  }
+
+  private async listening(): Promise<void> {
+    let log = "";
+    const { promise, resolve, reject } = Promise.withResolvers<void>();
+    this.child.stdout?.on("data", (chunk) => {
+      log += chunk;
+      if (log.includes("agentmonitor gateway")) resolve();
+    });
+    this.child.stderr?.on("data", (chunk) => { log += chunk; });
+    this.child.once("exit", (code) => reject(new Error(`gateway exited with ${code}:\n${log}`)));
+    await promise;
+  }
+
+  /** Stops the gateway's process and starts it again on the same state, port, and settings; sessions go on running meanwhile. */
+  async restart(): Promise<void> {
+    const { promise, resolve } = Promise.withResolvers<void>();
+    this.child.once("exit", () => resolve());
+    this.child.kill();
+    await promise;
+    this.child = spawn(process.execPath, [join(root, "server", "index.ts")], { cwd: root, env: this.env, stdio: ["ignore", "pipe", "pipe"] });
+    await this.listening();
   }
 
   async stop(): Promise<void> {
