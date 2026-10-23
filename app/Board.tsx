@@ -4,7 +4,7 @@ import { api, type Card, type Project, type Task, type TaskState, type TaskSumma
 export const LIGHT_LABEL: Record<Card["turn"], string> = {
   blocked: "Waiting on you",
   working: "Working",
-  done: "Turn done",
+  done: "Idle",
   stopped: "Stopped",
 };
 

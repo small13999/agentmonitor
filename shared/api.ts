@@ -41,7 +41,7 @@ export type TaskState = "open" | "in_progress" | "in_review" | "done" | "cancell
 
 /**
  * Requested work. Its sessions all work on its `branch` (TASK-4), which it gets when its
- * first session starts; its status and notes outlive them.
+ * first session starts; its status and comments outlive them.
  */
 export interface Task {
   id: string;
@@ -148,12 +148,25 @@ export interface TopicLink {
   linkedAt: number;
 }
 
-/** TASK-8: the user's notes on a task; agents read and write them too. */
-export interface TaskNotes {
-  /** Markdown; empty until first written. */
-  text: string;
-  /** Counts writes; a write names the revision it edited (as TOPIC-3). */
-  revision: number;
+/** CARD-3: a file the task's branch changed against the default branch. */
+export interface ChangedFile {
+  path: string;
+  status: "added" | "modified" | "deleted" | "renamed";
+}
+
+/** CARD-3, CARD-4: what a task's branch changed, its uncommitted files, and who else changed the same files. */
+export interface TaskChanges {
+  branch: string | null;
+  /** The default branch the task's branch started from. */
+  baseRef: string | null;
+  /** Commits and files on the branch since it left the default branch; null: no branch here yet. */
+  committed: { commits: string[]; files: ChangedFile[] } | null;
+  /** The running session's uncommitted files; null without a running session's worktree. */
+  uncommitted: string[] | null;
+  /** Open pull requests from the branch; null when GitHub cannot be asked. */
+  pullRequests: PullRequest[] | null;
+  /** CARD-4: the other running tasks of the project that changed any of the same files. */
+  overlaps: Array<{ taskId: string; title: string; files: string[] }>;
 }
 
 /** blocked: waits for you (red); working: a turn runs (orange); done: turn finished (green); stopped: no live agent. */

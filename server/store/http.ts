@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
-import type { Card, EndedSession } from "../../shared/api.ts";
+import type { Card, EndedSession, HistoryEntry, TaskChanges } from "../../shared/api.ts";
 import { StoreError, type Principal, type Session, type Store, type Task } from "./store.ts";
 
 /** What a store route can touch: the database plus the session lifecycle owned by the gateway. */
@@ -14,6 +14,10 @@ export interface StoreContext {
   finishTask(principal: Principal, taskId: string, state: "done" | "cancelled", confirm: boolean): Promise<Task>;
   /** Running sessions of a project with their live, git, and transcript state. */
   cards(principal: Principal, projectId: string): Promise<Card[]>;
+  /** TASK-14: the task's history, with the pull requests of its branch GitHub knows of. */
+  taskHistory(principal: Principal, taskId: string): Promise<HistoryEntry[]>;
+  /** CARD-3, CARD-4: what the task's branch changed, its uncommitted files and pull requests, and overlapping tasks. */
+  taskChanges(principal: Principal, taskId: string): Promise<TaskChanges>;
   /** CLOUDFLARE-2: humans only; allows the session's Cloudflare writes for 10 minutes from now. */
   allowCloudflareWrites(principal: Principal, sessionId: string): { writesUntil: number };
   revokeCloudflareWrites(principal: Principal, sessionId: string): { writesUntil: null };
@@ -45,7 +49,7 @@ const sessionBody = z.strictObject({
 });
 export type SessionInput = z.infer<typeof sessionBody>;
 const statusBody = z.strictObject({ status: z.string().max(64 * 1024), baseRevision: z.int().min(0) });
-const notesBody = z.strictObject({ text: z.string().max(64 * 1024), baseRevision: z.int().min(0) });
+const commentBody = z.strictObject({ body: z.string().trim().min(1).max(64 * 1024) });
 
 type Handler = (c: StoreContext, principal: Principal, params: string[], body: () => Promise<unknown>) => unknown;
 
@@ -113,7 +117,20 @@ const routes: Route[] = [
     pattern: new RegExp(`^/tasks/${id}$`),
     handler: async (c, p, [taskId], body) => c.store.updateTask(p, taskId, taskUpdateBody.parse(await body())),
   },
-  { method: "GET", pattern: new RegExp(`^/tasks/${id}/history$`), handler: (c, p, [taskId]) => c.store.taskHistory(p, taskId) },
+  { method: "GET", pattern: new RegExp(`^/tasks/${id}/history$`), handler: (c, p, [taskId]) => c.taskHistory(p, taskId) },
+  { method: "GET", pattern: new RegExp(`^/tasks/${id}/changes$`), handler: (c, p, [taskId]) => c.taskChanges(p, taskId) },
+  { method: "GET", pattern: new RegExp(`^/tasks/${id}/comments$`), handler: (c, p, [taskId]) => c.store.listComments(p, taskId) },
+  {
+    method: "POST",
+    pattern: new RegExp(`^/tasks/${id}/comments$`),
+    handler: async (c, p, [taskId], body) => c.store.createComment(p, taskId, commentBody.parse(await body()).body),
+  },
+  {
+    method: "PATCH",
+    pattern: new RegExp(`^/comments/${id}$`),
+    handler: async (c, p, [commentId], body) => c.store.updateComment(p, commentId, commentBody.parse(await body()).body),
+  },
+  { method: "DELETE", pattern: new RegExp(`^/comments/${id}$`), handler: (c, p, [commentId]) => c.store.deleteComment(p, commentId) },
   {
     method: "POST",
     pattern: new RegExp(`^/tasks/${id}/finish$`),
@@ -143,15 +160,6 @@ const routes: Route[] = [
     handler: async (c, p, [taskId], body) => {
       const input = statusBody.parse(await body());
       return c.store.writeTaskStatus(p, taskId, input.status, input.baseRevision);
-    },
-  },
-  { method: "GET", pattern: new RegExp(`^/tasks/${id}/notes$`), handler: (c, p, [taskId]) => c.store.getNotes(p, taskId) },
-  {
-    method: "PUT",
-    pattern: new RegExp(`^/tasks/${id}/notes$`),
-    handler: async (c, p, [taskId], body) => {
-      const input = notesBody.parse(await body());
-      return c.store.writeNotes(p, taskId, input.text, input.baseRevision);
     },
   },
   { method: "POST", pattern: new RegExp(`^/sessions/${id}/end$`), handler: (c, p, [sessionId]) => c.endSession(p, sessionId) },

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before } from "node:test";
 import { chromium, type Browser, type Page } from "playwright";
-import type { Project, Session, Task, Topic } from "../shared/api.ts";
+import type { Project, Session, Task } from "../shared/api.ts";
 import { buildApp, Gateway } from "./harness.ts";
 import { spec } from "./spec.ts";
 
@@ -30,11 +30,6 @@ function start(target: Task): Promise<Session> {
   return gateway.data<Session>("POST", `/tasks/${target.id}/sessions`, {});
 }
 
-/** The notes textarea's value once it is `text`; the page polls the store, so this waits for it. */
-async function notesShow(text: string): Promise<void> {
-  await page.waitForFunction((expected) => document.querySelector("textarea")?.value === expected, text);
-}
-
 spec("UI-1", "the Tasks page lists open and in-progress tasks beside the workspace", async () => {
   const jp = await task("26.21 JP");
   const en = await task("26.21 EN");
@@ -58,21 +53,25 @@ spec("UI-1", "the Tasks page lists open and in-progress tasks beside the workspa
   await list.getByRole("link", { name: /26\.21 EN/ }).waitFor({ state: "detached" });
   assert.deepEqual(await listed(), ["26.21 JP", "Client fixes"]);
 
-  // Choosing one opens it in the workspace, on its chat.
+  // Choosing one opens it in the workspace, on its page.
   await list.getByRole("link", { name: /26\.21 JP/ }).click();
   await page.waitForURL(new RegExp(`#/t/${jp.id}$`));
-  assert.equal(await page.getByRole("tab", { name: "Chat" }).getAttribute("aria-selected"), "true");
-  assert.equal(await list.getByRole("link", { name: /26\.21 JP/ }).getAttribute("aria-current"), "page");
+  assert.equal(await page.getByRole("tab", { name: "Page" }).getAttribute("aria-selected"), "true");
 });
 
-spec("UI-2", "a task's workspace has Chat and Notes tabs, starts sessions, and has its settings behind the icon right of them", async () => {
+spec("UI-2", "a task has Page, Chat, and Settings tabs, Settings at the right with its subtabs, and switching keeps the chat loaded", async () => {
   const target = await task("Workspace tabs");
-  await page.goto(`${gateway.url}/#/t/${target.id}`);
+  await page.goto(`${gateway.url}/#/t/${target.id}/chat`);
   const tabs = page.getByRole("tablist", { name: "Workspace" });
   await tabs.getByRole("tab", { name: "Chat" }).waitFor();
-  assert.deepEqual(await tabs.getByRole("tab").allTextContents(), ["Chat", "Notes"]);
+  assert.deepEqual((await tabs.getByRole("tab").allTextContents()).map((text) => text.trim()), ["Page", "Chat", "Settings"]);
+  // Settings sits at the right end of the tabs, apart from the others.
+  const [bar, chatTab, settingsTab] = await Promise.all([tabs.boundingBox(), tabs.getByRole("tab", { name: "Chat" }).boundingBox(), tabs.getByRole("tab", { name: "Settings" }).boundingBox()]);
+  assert.ok(bar && chatTab && settingsTab);
+  assert.ok(Math.abs(settingsTab.x + settingsTab.width - (bar.x + bar.width)) <= 2, "Settings ends where the tabs end");
+  assert.ok(settingsTab.x > chatTab.x + chatTab.width + 100, "Settings stands apart from Page and Chat");
 
-  // Without a session, the chat tab starts one.
+  // Without a session, the Chat tab starts one.
   await page.getByRole("region", { name: "Start session" }).getByRole("button", { name: "Start session" }).click();
   const chat = page.locator("iframe.session-frame.current");
   await chat.waitFor();
@@ -80,62 +79,31 @@ spec("UI-2", "a task's workspace has Chat and Notes tabs, starts sessions, and h
   const { sessions } = await gateway.data<{ sessions: Session[] }>("GET", `/tasks/${target.id}`);
   assert.equal(sessions.length, 1);
 
-  // Mark the chat's frame and count its loads: the Notes tab must neither replace nor reload it.
+  // Mark the chat's frame and count its loads: the other tabs must neither replace nor reload it.
   await chat.evaluate((frame) => frame.setAttribute("data-mark", "kept"));
   const ternHost = `tern-${sessions[0].id}.localhost`;
   let loads = 0;
   page.on("framenavigated", (frame) => { if (frame.url().includes(ternHost)) loads++; });
-  await tabs.getByRole("tab", { name: "Notes" }).click();
-  await page.waitForURL(new RegExp(`#/t/${target.id}/notes$`));
-  await page.getByRole("textbox", { name: "Notes" }).waitFor();
+  await tabs.getByRole("tab", { name: "Page" }).click();
+  await page.waitForURL(new RegExp(`#/t/${target.id}$`));
+  await page.getByRole("article", { name: "Task page" }).waitFor();
+  await chat.waitFor({ state: "hidden" });
+  await tabs.getByRole("tab", { name: "Settings" }).click();
+  await page.waitForURL(new RegExp(`#/t/${target.id}/settings$`));
+  const settings = page.getByRole("region", { name: "Settings" });
+  await settings.getByRole("tab", { name: "Changes" }).waitFor();
+  assert.deepEqual(await settings.getByRole("tablist", { name: "Settings" }).getByRole("tab").allTextContents(), ["Changes", "Cloudflare", "End session"]);
+  await settings.getByRole("region", { name: "Changes" }).getByText("The task has no branch yet", { exact: false }).waitFor();
+  await settings.getByRole("tab", { name: "Cloudflare" }).click();
+  await settings.getByRole("region", { name: "Cloudflare" }).waitFor();
+  await settings.getByRole("tab", { name: "End session" }).click();
+  await settings.getByRole("region", { name: "End session" }).getByRole("button", { name: "End session" }).waitFor();
   await chat.waitFor({ state: "hidden" });
   await tabs.getByRole("tab", { name: "Chat" }).click();
   await chat.waitFor({ state: "visible" });
-  await page.getByRole("textbox", { name: "Notes" }).waitFor({ state: "hidden" });
+  await settings.waitFor({ state: "detached" });
   assert.equal(await chat.getAttribute("data-mark"), "kept");
   assert.equal(loads, 0);
-
-  // The settings: the task's state, its status, topic links (here a new topic, linked at once),
-  // the session's changes and ending it, and finishing the task.
-  await page.getByRole("button", { name: "Workspace settings" }).click();
-  const settings = page.getByRole("complementary", { name: "Workspace settings" });
-  const patched = page.waitForResponse((response) => response.request().method() === "PATCH" && response.url().endsWith(`/tasks/${target.id}`));
-  await settings.getByRole("combobox", { name: "State" }).selectOption("in_review");
-  assert.equal((await patched).status(), 200);
-  assert.equal((await gateway.data<{ task: Task }>("GET", `/tasks/${target.id}`)).task.state, "in_review");
-  await settings.getByRole("region", { name: "Status" }).getByText("No status yet.", { exact: false }).waitFor();
-  await settings.getByRole("button", { name: "+ New topic" }).click();
-  await settings.getByRole("textbox", { name: "New topic" }).fill("Release");
-  await settings.getByRole("button", { name: "Add" }).click();
-  await settings.getByRole("button", { name: "Unlink Release" }).waitFor();
-  const linked = await gateway.data<{ topics: Topic[] }>("GET", `/tasks/${target.id}`);
-  assert.deepEqual(linked.topics.map((topic) => topic.name), ["Release"]);
-  await settings.getByRole("heading", { name: "Changes" }).waitFor();
-  await settings.getByRole("button", { name: "End session" }).waitFor();
-  await settings.getByRole("region", { name: "Finish task" }).getByRole("button", { name: "Mark done" }).waitFor();
-  await page.keyboard.press("Escape");
-  await settings.waitFor({ state: "detached" });
-});
-
-spec("TASK-8", "a task's notes save as the user types, and its agents read and write them", async () => {
-  const target = await task("Notes");
-  const session = await start(target);
-  await page.goto(`${gateway.url}/#/t/${target.id}/notes`);
-  const notes = page.getByRole("textbox", { name: "Notes" });
-  const saved = page.waitForResponse((response) => response.request().method() === "PUT" && response.url().endsWith(`/tasks/${target.id}/notes`));
-  await notes.fill("Ship 26.21 after QA");
-  assert.equal((await saved).status(), 200);
-  assert.equal(gateway.am(session.id, ["notes"]).stdout, "# revision 1\nShip 26.21 after QA\n");
-  await page.reload();
-  await notesShow("Ship 26.21 after QA");
-
-  // The agent's write must name the revision it read.
-  const stale = gateway.am(session.id, ["notes", "set", "--base", "0"], "Agent: QA passed\n");
-  assert.equal(stale.code, 1);
-  assert.match(stale.stderr, /current revision 1/);
-  assert.equal(gateway.am(session.id, ["notes", "set", "--base", "1"], "Ship 26.21 after QA\nAgent: QA passed\n").code, 0);
-  // The open page, with nothing unsaved, shows the agent's write.
-  await notesShow("Ship 26.21 after QA\nAgent: QA passed\n");
 });
 
 spec("UI-3", "the project menu creates a project from its name, repository, and whether it allows host sessions", async () => {

@@ -1,10 +1,7 @@
-import { useEffect, useRef, useState } from "react";
-import { api, ApiError, usePolled, type Session, type SessionRuntime, type Task, type TaskNotes } from "./api.ts";
+import { useState } from "react";
+import { api, type Session, type SessionRuntime, type Task } from "./api.ts";
 
-export type WorkspaceTab = "chat" | "notes";
-
-/** Typing pauses this long before the notes are saved. */
-const SAVE_DELAY_MS = 500;
+export type WorkspaceTab = "page" | "chat" | "settings";
 
 function GearIcon() {
   return (
@@ -15,27 +12,20 @@ function GearIcon() {
   );
 }
 
-/** UI-2: the task workspace's tabs, Chat and Notes, and at the far right its settings. */
-export function WorkspaceTabs({ taskId, tab, settingsOpen, onSettings }: {
-  taskId: string;
-  tab: WorkspaceTab;
-  settingsOpen: boolean;
-  onSettings: () => void;
-}) {
-  const tabs: Array<{ id: WorkspaceTab; label: string; href: string }> = [
-    { id: "chat", label: "Chat", href: `#/t/${taskId}` },
-    { id: "notes", label: "Notes", href: `#/t/${taskId}/notes` },
-  ];
+/**
+ * UI-2: a task's tabs: its Page, its Chat, and at the far right, with the gear, its Settings.
+ * Each tab is a link, so a tab has its own address.
+ */
+export function WorkspaceTabs({ taskId, tab }: { taskId: string; tab: WorkspaceTab }) {
   return (
     <header className="workspace-tabs">
       <nav role="tablist" aria-label="Workspace">
-        {tabs.map((entry) => (
-          <a key={entry.id} role="tab" className="tab" aria-selected={entry.id === tab} href={entry.href}>{entry.label}</a>
-        ))}
+        <a role="tab" className="tab" aria-selected={tab === "page"} href={`#/t/${taskId}`}>Page</a>
+        <a role="tab" className="tab" aria-selected={tab === "chat"} href={`#/t/${taskId}/chat`}>Chat</a>
+        <a role="tab" className="tab settings-tab" aria-selected={tab === "settings"} href={`#/t/${taskId}/settings`}>
+          <GearIcon />Settings
+        </a>
       </nav>
-      <button type="button" className="icon-button" aria-label="Workspace settings" aria-expanded={settingsOpen} onClick={onSettings}>
-        <GearIcon />
-      </button>
     </header>
   );
 }
@@ -108,103 +98,6 @@ export function StartSession({ task, hostSessions, onStarted }: { task: Task; ho
         </>
       )}
       {error && <p className="error">{error}</p>}
-    </section>
-  );
-}
-
-/** The notes a refused write found in the store instead of the revision it edited. */
-function conflictOf(cause: unknown): TaskNotes | null {
-  if (!(cause instanceof ApiError)) return null;
-  const { text, currentRevision } = cause.details;
-  return typeof text === "string" && typeof currentRevision === "number" ? { text, revision: currentRevision } : null;
-}
-
-/**
- * TASK-8: the task's notes, saved as you type. Writes run one at a time, each based on the
- * revision the last one returned; a write that finds someone else's newer revision is
- * refused, and you choose which text to keep. Changes made elsewhere show while you have no
- * unsaved edits.
- */
-export function Notes({ taskId, hidden }: { taskId: string; hidden: boolean }) {
-  const polled = usePolled<TaskNotes>(`/tasks/${taskId}/notes`, 5_000);
-  const [text, setText] = useState("");
-  const [saved, setSaved] = useState<TaskNotes | null>(null);
-  const [conflict, setConflict] = useState<TaskNotes | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  // Saves outlive renders, and the last one outlives the component: they read these.
-  const latest = useRef({ text, saved, conflict });
-  latest.current = { text, saved, conflict };
-  const chain = useRef<Promise<void>>(Promise.resolve());
-  const mounted = useRef(true);
-
-  const save = () => {
-    chain.current = chain.current.then(async () => {
-      const { text: value, saved: base, conflict: open } = latest.current;
-      if (base === null || open !== null || value === base.text) return;
-      try {
-        const next = await api<TaskNotes>("PUT", `/tasks/${taskId}/notes`, { text: value, baseRevision: base.revision });
-        latest.current = { ...latest.current, saved: next };
-        if (mounted.current) { setSaved(next); setError(null); }
-      } catch (cause) {
-        if (!mounted.current) return;
-        const theirs = conflictOf(cause);
-        if (theirs !== null) setConflict(theirs);
-        else setError(cause instanceof Error ? cause.message : String(cause));
-      }
-    });
-  };
-
-  // The store's notes: the first read fills the editor, later ones replace it while nothing is unsaved.
-  useEffect(() => {
-    const data = polled.data;
-    const { text: current, saved: base } = latest.current;
-    if (data === null || (base !== null && (data.revision <= base.revision || current !== base.text))) return;
-    setSaved(data);
-    setText(data.text);
-  }, [polled.data]);
-
-  useEffect(() => {
-    if (saved === null || conflict !== null || text === saved.text) return;
-    const timer = setTimeout(save, SAVE_DELAY_MS);
-    return () => clearTimeout(timer);
-  }, [text, saved, conflict]);
-
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-      save();
-    };
-  }, []);
-
-  const resolve = (keep: "mine" | "theirs") => {
-    if (conflict === null) return;
-    setSaved(conflict);
-    if (keep === "theirs") setText(conflict.text);
-    setConflict(null);
-  };
-
-  const state = saved === null ? "Loading…" : conflict !== null ? "Not saved" : text === saved.text ? "Saved" : "Saving…";
-  return (
-    <section className="notes" aria-label="Notes" hidden={hidden}>
-      <textarea
-        aria-label="Notes"
-        value={text}
-        disabled={saved === null}
-        placeholder="Notes on this task: plans, links, what to check. Agents can read them with `am notes`."
-        onChange={(event) => setText(event.target.value)}
-      />
-      <footer className="notes-foot">
-        <span className="muted small" aria-live="polite">{state}</span>
-        {error && <span className="error small">{error}</span>}
-        {conflict !== null && (
-          <span className="small conflict">
-            Someone else changed these notes (revision {conflict.revision}).{" "}
-            <button type="button" onClick={() => resolve("mine")}>Keep mine</button>{" "}
-            <button type="button" className="ghost" onClick={() => resolve("theirs")}>Use theirs</button>
-          </span>
-        )}
-      </footer>
     </section>
   );
 }

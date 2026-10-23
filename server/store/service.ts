@@ -5,8 +5,9 @@ import { userInfo } from "node:os";
 import { basename, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
-import type { Card, EndedSession, UnpushedWork } from "../../shared/api.ts";
+import type { Card, EndedSession, HistoryEntry, TaskChanges, UnpushedWork } from "../../shared/api.ts";
 import { projectCards } from "../cards.ts";
+import { taskChanges } from "../changes.ts";
 import { CLOUDFLARE_API_PREFIX, CloudflareBroker } from "../cloudflare.ts";
 import type { GatewayConfig } from "../config.ts";
 import {
@@ -22,6 +23,7 @@ import {
   unpushedCommits,
   type RestoredSnapshot,
 } from "../git.ts";
+import { branchPullRequests } from "../github.ts";
 import { HostRuntime } from "../runtime/host.ts";
 import { PodmanRuntime } from "../runtime/podman.ts";
 import type { Runtime, WorkspaceDirs } from "../runtime/runtime.ts";
@@ -96,6 +98,20 @@ export class StoreService implements StoreContext {
     const cloudflareOf = (sessionId: string): Card["cloudflare"] =>
       tokens === null ? null : { canWrite: tokens.write !== null, writesUntil: this.cloudflare.writesUntil(sessionId) };
     return projectCards(this.store, (id) => this.dirs(id), cloudflareOf, principal, projectId);
+  }
+
+  /** TASK-14: the task's history; the pull requests of its branch join it, by no one, when GitHub first lists them. */
+  async taskHistory(principal: Principal, taskId: string): Promise<HistoryEntry[]> {
+    const { task } = this.store.getTask(principal, taskId);
+    const { repoPath } = this.store.getProject(principal, task.projectId);
+    if (repoPath !== null && task.branch !== null) {
+      for (const pr of (await branchPullRequests(repoPath, task.branch, "all")) ?? []) this.store.recordPullRequest(task.id, pr, pr.createdAt);
+    }
+    return this.store.taskHistory(principal, taskId);
+  }
+
+  taskChanges(principal: Principal, taskId: string): Promise<TaskChanges> {
+    return taskChanges(this.store, (id) => this.dirs(id), principal, taskId);
   }
 
   /** The running session whose Cloudflare writes a human allows or revokes; its project must have a write token. */
@@ -238,13 +254,15 @@ export class StoreService implements StoreContext {
 
   /**
    * TASK-6: what the container adds to the agent's workflow context: the task as it is now,
-   * and what happened to the work an earlier session left uncommitted (SESSION-9). A checkout
-   * session (HOST-6) is told it works in the main checkout, `checkout`, instead.
+   * with its comments (COMMENT-3: the only time they reach the agent unasked), and what
+   * happened to the work an earlier session left uncommitted (SESSION-9). A checkout session
+   * (HOST-6) is told it works in the main checkout, `checkout`, instead.
    */
   private taskContext(taskId: string, restored: RestoredSnapshot, checkout: string | null): string {
     const human = this.store.ownerPrincipal();
     const { task, topics } = this.store.getTask(human, taskId);
-    const notes = this.store.getNotes(human, taskId);
+    const comments = this.store.listComments(human, taskId);
+    const people = this.store.listPeople(human);
     const sections = [
       "# Your task",
       checkout === null
@@ -259,8 +277,14 @@ export class StoreService implements StoreContext {
       task.description.trim() === "" ? "(none)" : task.description.trim(),
       `## Status (revision ${task.statusRevision})`,
       task.status.trim() === "" ? "(none yet)" : task.status.trim(),
-      `## Notes from the user (revision ${notes.revision})`,
-      notes.text.trim() === "" ? "(none)" : notes.text.trim(),
+      `## Comments (${comments.length})`,
+      ...(comments.length === 0 ? ["(none)"] : comments.map(({ author, body, createdAt, editedAt }) => {
+        const name = author.kind === "person"
+          ? people.find((person) => person.id === author.personId)?.name ?? "someone no longer in the store"
+          : `the agent of session ${author.sessionId}`;
+        const quoted = body.trim().split("\n").map((line) => `> ${line}`.trimEnd()).join("\n");
+        return `${name}, ${new Date(createdAt).toISOString()}${editedAt === null ? "" : " (edited)"}:\n\n${quoted}`;
+      })),
     ];
     if (restored.kind === "restored") {
       sections.push("## Restored work", "The task's previous session ended with uncommitted changes. They are back in the worktree, still uncommitted: commit what belongs to the task.");
