@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { gatewayZone, hostOrigin, hostRole } from "../shared/hosts.ts";
 import { AccessVerifier } from "./access.ts";
 import type { GatewayConfig } from "./config.ts";
 import type { Principal, Store } from "./store/store.ts";
@@ -50,12 +51,23 @@ export class Auth {
   }
 }
 
-/** Same-host Origin check for state changes and socket upgrades; requests without Origin (CLIs) pass. */
-export function validOrigin(request: IncomingMessage): boolean {
+/**
+ * Same-host Origin check for state changes and socket upgrades; requests without Origin (CLIs)
+ * pass. A hub knows its hosts (shared/hosts.ts): the Origin is the request's own host's, and
+ * a host that is none of the hub's is refused.
+ */
+export function validOrigin(request: IncomingMessage, publicOrigin: string | null): boolean {
   const origin = request.headers.origin;
   if (origin === undefined) return true;
   const host = request.headers.host;
-  return host !== undefined && (origin === `http://${host}` || origin === `https://${host}`);
+  if (publicOrigin === null) return host !== undefined && (origin === `http://${host}` || origin === `https://${host}`);
+  const role = hostRole(host, publicOrigin);
+  return role !== null && origin === hostOrigin(gatewayZone(publicOrigin), role);
+}
+
+/** Whether the request is for the UI's host: chat, preview, and unknown hosts never reach the monitor's API or app. */
+export function validHost(request: IncomingMessage, publicOrigin: string | null): boolean {
+  return hostRole(request.headers.host, publicOrigin)?.kind === "ui";
 }
 
 /** A page that says why the request was refused, for what a browser opens (the app, a Tern host). */

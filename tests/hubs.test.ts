@@ -14,18 +14,21 @@ import { spec } from "./spec.ts";
 const OWNER = "armin@example.com";
 
 /**
- * Cloudflare's edge in front of a hub: it turns the client's `cf-access-token` into the
- * `Cf-Access-Jwt-Assertion` the hub checks, and answers 502 when the hub behind it is down.
- * It keeps every token it saw.
+ * Cloudflare's edge in front of a hub, at the hub's public origin (`am.<zone>`, here
+ * `am.localhost:<port>`): it turns the client's `cf-access-token` into the
+ * `Cf-Access-Jwt-Assertion` the hub checks, passes the public Host on, and answers 502 when the
+ * hub behind it is down. It keeps every token it saw. The hub starts after it, knowing its origin,
+ * and is set as `hub`.
  */
-async function startEdge(origin: string): Promise<{ url: string; tokens: string[]; close: () => void }> {
+async function startEdge(): Promise<{ url: string; tokens: string[]; hub: string | null; close: () => void }> {
   const tokens: string[] = [];
   const server = createServer((request, response) => {
     const token = request.headers["cf-access-token"];
     tokens.push(typeof token === "string" ? token : "");
     const headers: IncomingHttpHeaders = Object.fromEntries(Object.entries(request.headers).filter(([name]) => name !== "cf-access-token"));
     headers["cf-access-jwt-assertion"] = token;
-    const forwarded = httpRequest(new URL(request.url ?? "/", origin), { method: request.method, headers }, (answer) => {
+    assert.ok(edge.hub !== null);
+    const forwarded = httpRequest(new URL(request.url ?? "/", edge.hub), { method: request.method, headers }, (answer) => {
       response.writeHead(answer.statusCode ?? 502, answer.headers);
       answer.pipe(response);
     });
@@ -36,18 +39,21 @@ async function startEdge(origin: string): Promise<{ url: string; tokens: string[
     request.pipe(forwarded);
   });
   const { promise, resolve } = Promise.withResolvers<void>();
-  server.listen(0, "127.0.0.1", () => resolve());
+  // am.localhost resolves to ::1 or 127.0.0.1; both reach a dual-stack socket.
+  server.listen(0, "::", () => resolve());
   await promise;
   const address = server.address();
   assert.ok(typeof address === "object" && address !== null);
-  return {
-    url: `http://127.0.0.1:${address.port}`,
+  const edge: { url: string; tokens: string[]; hub: string | null; close: () => void } = {
+    url: `http://am.localhost:${address.port}`,
     tokens,
+    hub: null,
     close: () => {
       server.close();
       server.closeAllConnections();
     },
   };
+  return edge;
 }
 
 /**
@@ -56,6 +62,7 @@ async function startEdge(origin: string): Promise<{ url: string; tokens: string[
  * cannot get a token for.
  */
 async function hubAndClient() {
+  const edge = await startEdge();
   const hub = await Gateway.start({
     runtime: "none",
     env: {
@@ -63,9 +70,10 @@ async function hubAndClient() {
       AGENTMONITOR_ACCESS_TEAM_DOMAIN: access.url,
       AGENTMONITOR_ACCESS_AUD: AUDIENCE,
       AGENTMONITOR_OWNER_EMAIL: OWNER,
+      AGENTMONITOR_PUBLIC_ORIGIN: edge.url,
     },
   });
-  const edge = await startEdge(hub.url);
+  edge.hub = hub.url;
   const ownerToken = access.token(OWNER);
   const strangerToken = access.token("eve@example.com");
   const configDir = mkdtempSync(join(tmpdir(), "am-client-config-"));
@@ -76,8 +84,17 @@ async function hubAndClient() {
   ]));
   const client = await Gateway.start({ runtime: "none", env: { AGENTMONITOR_CONFIG_DIR: configDir } });
   stops.push(() => client.stop(), () => hub.stop(), async () => edge.close());
-  /** What the test sends the hub directly comes through the edge as the owner's. */
-  const asOwner = { "cf-access-jwt-assertion": ownerToken };
+  /** What the test sends the hub itself, through its edge as the owner from the hub's UI. */
+  const onHub = async <T>(method: string, path: string, body?: unknown): Promise<T> => {
+    const response = await fetch(`${edge.url}/api/store${path}`, {
+      method,
+      headers: { "cf-access-token": ownerToken, origin: edge.url, ...(body === undefined ? {} : { "content-type": "application/json" }) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const answer = await response.json() as { ok: boolean; data: T; error?: string };
+    if (!answer.ok) throw new Error(`${method} ${path} -> ${response.status} ${answer.error}`);
+    return answer.data;
+  };
   /** The client's store API of hub `draftcoach`, as the app calls it. */
   const viaClient = async <T>(method: string, path: string, body?: unknown): Promise<{ status: number; ok: boolean; data: T; error?: string }> => {
     const response = await fetch(`${client.url}/api/hubs/draftcoach/store${path}`, {
@@ -91,7 +108,7 @@ async function hubAndClient() {
     const response = await fetch(`${client.url}/api/stores`);
     return (await response.json() as { data: StoreListing[] }).data;
   };
-  return { hub, edge, client, viaClient, stores, asOwner, ownerToken, strangerToken };
+  return { hub, edge, client, viaClient, stores, onHub, ownerToken, strangerToken };
 }
 
 const stops: Array<() => Promise<void>> = [];
@@ -109,12 +126,12 @@ after(async () => {
 });
 
 spec("STORE-3", "a client lists its hubs' projects beside its own, shows a hub project as the hub's site does, and marks an unreachable hub unavailable", async () => {
-  const { hub, edge, client, viaClient, stores, asOwner, ownerToken, strangerToken } = await hubAndClient();
+  const { hub, edge, client, viaClient, stores, onHub, ownerToken, strangerToken } = await hubAndClient();
   const local = await client.data<Project>("POST", "/projects", { name: "agentmonitor" });
-  const project = await hub.data<Project>("POST", "/projects", { name: "draftcoach" }, asOwner);
-  const task = await hub.data<Task>("POST", `/projects/${project.id}/tasks`, { title: "Patch notes 26.21", description: "Translate the **JP** notes." }, asOwner);
-  await hub.data("POST", `/tasks/${task.id}/comments`, { body: "Notes are in the folder." }, asOwner);
-  const owner = (await hub.data<{ person: Person }>("GET", "/me", undefined, asOwner)).person;
+  const project = await onHub<Project>("POST", "/projects", { name: "draftcoach" });
+  const task = await onHub<Task>("POST", `/projects/${project.id}/tasks`, { title: "Patch notes 26.21", description: "Translate the **JP** notes." });
+  await onHub("POST", `/tasks/${task.id}/comments`, { body: "Notes are in the folder." });
+  const owner = (await onHub<{ person: Person }>("GET", "/me")).person;
 
   // Both stores' projects; a hub that refuses the token, or gives none, says why.
   const listed = await stores();
@@ -153,7 +170,7 @@ spec("STORE-3", "a client lists its hubs' projects beside its own, shows a hub p
   await comments.getByRole("textbox", { name: "Comment", exact: true }).fill("Ship **after** QA");
   await comments.getByRole("button", { name: "Comment", exact: true }).click();
   await comments.locator(".comment strong", { hasText: "after" }).waitFor();
-  const written = await hub.data<Comment[]>("GET", `/tasks/${task.id}/comments`, undefined, asOwner);
+  const written = await onHub<Comment[]>("GET", `/tasks/${task.id}/comments`);
   assert.deepEqual(written.map((comment) => [comment.author, comment.body]), [
     [{ kind: "person", personId: owner.id }, "Notes are in the folder."],
     [{ kind: "person", personId: owner.id }, "Ship **after** QA"],
@@ -162,7 +179,7 @@ spec("STORE-3", "a client lists its hubs' projects beside its own, shows a hub p
   // A folder's file goes to the hub and comes back as bytes.
   const uploaded = await fetch(`${client.url}/api/hubs/draftcoach/store/tasks/${task.id}/folder/notes/jp.txt`, { method: "PUT", body: "パッチノート" });
   assert.equal(uploaded.status, 200);
-  assert.deepEqual((await hub.data<FolderFile[]>("GET", `/tasks/${task.id}/folder`, undefined, asOwner)).map((file) => file.path), ["notes/jp.txt"]);
+  assert.deepEqual((await onHub<FolderFile[]>("GET", `/tasks/${task.id}/folder`)).map((file) => file.path), ["notes/jp.txt"]);
   const downloaded = await fetch(`${client.url}/api/hubs/draftcoach/store/tasks/${task.id}/folder/notes/jp.txt`);
   assert.equal(await downloaded.text(), "パッチノート");
   assert.equal((await viaClient<TaskDetail>("GET", `/tasks/${task.id}`)).data.task.title, "Patch notes 26.21");
@@ -182,14 +199,14 @@ spec("STORE-3", "a client lists its hubs' projects beside its own, shows a hub p
 });
 
 spec("STORE-4", "starting a session in a hub project starts it on the hub, and fails naming the hub when it is unreachable", async () => {
-  const { hub, viaClient, asOwner } = await hubAndClient();
-  const project = await hub.data<Project>("POST", "/projects", { name: "draftcoach" }, asOwner);
-  const first = await hub.data<Task>("POST", `/projects/${project.id}/tasks`, { title: "Leaderboard" }, asOwner);
-  const second = await hub.data<Task>("POST", `/projects/${project.id}/tasks`, { title: "Client fixes" }, asOwner);
+  const { hub, viaClient, onHub } = await hubAndClient();
+  const project = await onHub<Project>("POST", "/projects", { name: "draftcoach" });
+  const first = await onHub<Task>("POST", `/projects/${project.id}/tasks`, { title: "Leaderboard" });
+  const second = await onHub<Task>("POST", `/projects/${project.id}/tasks`, { title: "Client fixes" });
 
   const started = await viaClient<Session>("POST", `/tasks/${first.id}/sessions`, {});
   assert.equal(started.ok, true, started.error ?? "");
-  assert.deepEqual((await hub.data<Session[]>("GET", `/projects/${project.id}/sessions`, undefined, asOwner)).map((session) => session.id), [started.data.id]);
+  assert.deepEqual((await onHub<Session[]>("GET", `/projects/${project.id}/sessions`)).map((session) => session.id), [started.data.id]);
 
   await hub.stop();
   const refused = await viaClient<Session>("POST", `/tasks/${second.id}/sessions`, {});

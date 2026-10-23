@@ -96,7 +96,7 @@ spec("UI-2", "a task has Page, Chat, and Settings tabs, Settings at the right wi
 
   // Mark the chat's frame and count its loads: the other tabs must neither replace nor reload it.
   await chat.evaluate((frame) => frame.setAttribute("data-mark", "kept"));
-  const ternHost = `tern-${sessions[0].id}.localhost`;
+  const ternHost = `am-t-${sessions[0].id}.localhost`;
   let loads = 0;
   page.on("framenavigated", (frame) => { if (frame.url().includes(ternHost)) loads++; });
   await tabs.getByRole("tab", { name: "Page" }).click();

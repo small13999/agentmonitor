@@ -1,25 +1,14 @@
 import { useEffect, useState } from "react";
+import { hostOrigin, zoneOf } from "../shared/hosts.ts";
 
 /** Sessions whose chats stay loaded after you leave them, so going back shows them at once. */
 const KEPT = 4;
 
-/**
- * A session's chat: on this gateway, its Tern host; on a hub (STORE-3), the hub's own chat host
- * for it (PREVIEW-2: `am.draftcoach.gg` has `am-t-<session>.draftcoach.gg`), which the browser
- * reaches through Cloudflare Access itself.
- */
-function chatUrl(sessionId: string, hub: string | null): string {
-  if (hub === null) return `${location.protocol}//tern-${sessionId}.localhost${location.port === "" ? "" : `:${location.port}`}/`;
-  const url = new URL(hub);
-  const [first, ...rest] = url.hostname.split(".");
-  url.hostname = [`${first}-t-${sessionId}`, ...rest].join(".");
-  return url.href;
-}
 
 /**
  * The running sessions' chats: Tern's chat on omp, in Tern's web client, which the gateway
- * serves for each session on its own host (server/tern-proxy.ts). *.localhost names resolve
- * on the browser's own machine, so this needs the monitor in local mode.
+ * serves for each session on its own chat host beside the UI's, `am-t-<session id>`
+ * (shared/hosts.ts, server/tern-proxy.ts).
  *
  * Starting Tern's client takes a second or two, so the last few sessions' clients stay
  * loaded, hidden, and the current one shows. Frames keep the order they opened in: moving an
@@ -54,7 +43,7 @@ export function SessionFrames({ current, covered, running, stopped, hub }: {
         <iframe
           key={id}
           className={id === current ? "session-frame current" : "session-frame"}
-          src={chatUrl(id, hub)}
+          src={`${hostOrigin(zoneOf(hub === null ? location : new URL(hub)), { kind: "chat", sessionId: id })}/`}
           title={id === current ? "Session" : "Session (hidden)"}
           allow="clipboard-read; clipboard-write"
           onLoad={() => setLoaded((before) => new Set([...before, id]))}

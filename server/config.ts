@@ -19,6 +19,11 @@ export interface GatewayConfig {
   access: AccessConfig | null;
   /** The store owner's email (AUTH-2), lower-cased; required in access mode. */
   ownerEmail: string | null;
+  /**
+   * The UI's exact origin, e.g. https://am.draftcoach.gg; chat and preview hosts derive from it
+   * (shared/hosts.ts). Required in access mode; without it, the local naming under localhost.
+   */
+  publicOrigin: string | null;
   /** Display name for this machine's gateway. */
   machineName: string;
   /** Gateway state dir: store, session worktrees and run directories. Default ~/.local/state/agentmonitor. */
@@ -27,7 +32,7 @@ export interface GatewayConfig {
   workspaceRuntime: "podman" | "none";
   /** Memory limit of each workspace container. */
   workspaceMemoryMib: number;
-  /** Port the gateway listens on; workspace Tern origins are derived from it. */
+  /** Port the gateway listens on. */
   port: number;
   /** The omp agent directory whose credentials (agent.db) and providers (models.db, models.yml) workspaces use. */
   ompAgentDir: string;
@@ -83,18 +88,35 @@ function ownerEmail(raw: string | undefined): string | null {
   return parsed.data;
 }
 
+/** The UI's origin: host `am.<zone>`, https except under `localhost`, which resolves on the browser's machine. */
+function publicOrigin(raw: string): string {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error("AGENTMONITOR_PUBLIC_ORIGIN must be an absolute URL");
+  }
+  // The UI is `am.<zone>`; chats and previews are `am-t-…` and `am-p-…` beside it.
+  if (!url.hostname.startsWith("am.")) throw new Error("AGENTMONITOR_PUBLIC_ORIGIN must name the host am.<zone>");
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && url.hostname.endsWith(".localhost"))) {
+    throw new Error("AGENTMONITOR_PUBLIC_ORIGIN must be https:");
+  }
+  return url.origin;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig {
   const authMode = env.AGENTMONITOR_AUTH_MODE ?? "local";
   if (authMode !== "local" && authMode !== "access") {
     throw new Error(`AGENTMONITOR_AUTH_MODE must be "local" or "access"`);
   }
   const owner = ownerEmail(env.AGENTMONITOR_OWNER_EMAIL);
+  const origin = env.AGENTMONITOR_PUBLIC_ORIGIN ? publicOrigin(env.AGENTMONITOR_PUBLIC_ORIGIN) : null;
   let access: AccessConfig | null = null;
   if (authMode === "access") {
     const domain = env.AGENTMONITOR_ACCESS_TEAM_DOMAIN;
     const audience = env.AGENTMONITOR_ACCESS_AUD;
-    if (!domain || !audience || owner === null) {
-      throw new Error("access mode requires AGENTMONITOR_ACCESS_TEAM_DOMAIN, AGENTMONITOR_ACCESS_AUD and AGENTMONITOR_OWNER_EMAIL");
+    if (!domain || !audience || owner === null || origin === null) {
+      throw new Error("access mode requires AGENTMONITOR_ACCESS_TEAM_DOMAIN, AGENTMONITOR_ACCESS_AUD, AGENTMONITOR_OWNER_EMAIL and AGENTMONITOR_PUBLIC_ORIGIN");
     }
     access = { teamDomain: teamDomain(domain), audience };
   }
@@ -102,6 +124,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig 
     authMode,
     access,
     ownerEmail: owner,
+    publicOrigin: origin,
     machineName: env.AGENTMONITOR_MACHINE_NAME ?? "Agent Monitor",
     stateDir: env.AGENTMONITOR_STATE_DIR || join(homedir(), ".local", "state", "agentmonitor"),
     workspaceRuntime: workspaceRuntime(env.AGENTMONITOR_WORKSPACE_RUNTIME),
