@@ -17,13 +17,13 @@ through Agent Monitor (dogfooding).
 | # | Step | State |
 |---|------|-------|
 | 1 | Tasks: Topic → Task → Session, board, task workspace, snapshots, `am check` | Done (`7ae8314`..`2f84742`) |
-| 2 | Bootstrap: host sessions, "+ Project", agentmonitor project; the user's PC is the hub | Done: HOST-1..7, UI-3; the integrator runs as a main-checkout session of project `agentmonitor` |
-| 3 | SPEC draft for steps 4–8 (claims below), reviewed by the user | Draft in `SPEC-DRAFT.md`, awaiting review |
+| 2 | Bootstrap: host sessions, "+ Project", agentmonitor project in the store on the user's PC | Done: HOST-1..7, UI-3; the integrator runs as a main-checkout session of project `agentmonitor` |
+| 3 | SPEC draft for steps 4–8, reviewed by the user; its Concepts section is agreed | Draft in `SPEC-DRAFT.md`, three Q points open |
 | 4 | Redesign from a clean slate: task page, comments, attachments (folder), people and assignee, board, session Settings tab, topic reader, visual identity; done through Agent Monitor itself | |
-| 5 | Hub on Hetzner: Cloudflare Tunnel + Access, login, teammate access, flat hosts | |
-| 6 | Preview tab per task (and the draftcoach preview login) | |
+| 5 | Hub on Hetzner for draftcoach: Cloudflare Tunnel + Access, login, teammate access, flat hosts; the user's local Agent Monitor lists the hub's projects | |
+| 6 | Preview tab per task (and the draftcoach preview login), Deploy changes | |
 | 7 | Automations | |
-| 8 | Runners (Hetzner, the user's PC when on), idle auto-stop with WIP push | |
+| 8 | Agent commits every turn and Agent Monitor pushes the task branch (replaces snapshots), idle stop, "Run session locally" | |
 
 ## Decided, not yet claims
 
@@ -97,10 +97,13 @@ Still open:
   to the container.
 
 ### Infrastructure (steps 5, 8)
-- Hub on Hetzner plus runners (Hetzner, and the user's PC when on). Cloudflare
-  Tunnel + Access (JWT); hosts `am.draftcoach.gg`, `am-p-<task>.draftcoach.gg`,
-  `am-t-<session>.draftcoach.gg`. No Kubernetes, no Tailscale, no new domain.
-  Commits under the user's identity.
+- Stores, hub, clients, machines, local runs, and the commit model: see the
+  Concepts section of `SPEC-DRAFT.md` (moves into SPEC.md).
+- Hub on Hetzner. Cloudflare Tunnel + Access (JWT); hosts `am.draftcoach.gg`,
+  `am-p-<task>.draftcoach.gg`, `am-t-<session>.draftcoach.gg`. No Kubernetes, no
+  Tailscale, no new domain. Commits under the user's identity.
+- The user's PC is not a persistent runner (it is off too often); it runs hub
+  sessions only when the user asks for a local run.
 
 ### Chat: our own UI on `omp acp`, replacing Tern (decided, not scheduled)
 - omp is what matters (the harness); Tern is only used as the chat, and its

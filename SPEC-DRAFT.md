@@ -5,14 +5,44 @@ Step 3 of PLAN.md. The user reviews this file; accepted claims move into SPEC.md
 SPEC.md: a claim is observable and gets a real-stack test.
 
 Marks: **new** claim, **changed** (same ID, new text), **retired** (ID never comes
-back). Unmarked existing claims stay as they are. Questions are marked **Q** with
-the answer this draft assumes; a different answer changes the claims under it.
+back). Unmarked existing claims stay as they are. Open points are marked **Q** with
+the answer this draft assumes.
+
+## Concepts (agreed; SPEC.md's Concepts table changes to match)
+
+- **Store**: one Agent Monitor server and its database: projects, topics, tasks,
+  comments, folders, chats. A project lives in exactly one store. `agentmonitor`
+  lives in the store on the user's PC; `draftcoach` in the store on the Hetzner hub.
+  Caching parts of a store elsewhere is an implementation detail.
+- **Hub**: a store that people other than its owner reach over the network
+  (`am.draftcoach.gg`). The teammate only uses the hub's site.
+- **Client**: the user's local Agent Monitor also shows the hub's projects (STORE-3),
+  exactly as the hub's site shows them, plus "Run session locally".
+- **Machine**: where a session's workspace runs. A store's own machine runs its
+  sessions. A **local run** is a session of a hub project that a client asked to run
+  on its own machine; the hub never sends work to a client. A **persistent runner**
+  is a machine that opted in to take work from a hub (later; the user's PC will not).
+- **Host session**: a session without a container on whichever machine runs it, as
+  that machine's user: on the hub for disk or database work, on the user's PC to
+  build and test there. On a hub only its owner starts them.
+- **Integrator** (checkout session): the project's main thread. One per project
+  (later perhaps one per independent subsystem), a host session in the main checkout,
+  where other tasks' branches are pulled in, reviewed, and their conflicts resolved.
+- **Session states**: running; **stopped** (idle stop, machine off, crash; to people
+  it is still the same session and goes on with the same chat, possibly on another
+  machine); **ended** (only when a person ends it).
+- **Commits and pushes**: the agent commits by the end of every turn that changed
+  files (its instructions say so; Agent Monitor does not commit, so the agent
+  decides what is committed, which keeps secrets out). The task's branch is the
+  backup and the turn history: Agent Monitor pushes it after every turn. Deploying
+  is separate: when a person says so, the agent opens a pull request with logical
+  commits, and it merges. Nobody needs to know about commits.
 
 ## Step 4: redesign
 
 ### People
 
-- **PERSON-1** new: A store has people, each with a name and an avatar; the user
+- **PERSON-1** new: A store has people, each with a name and an avatar; its owner
   adds them. Every human action (comment, state change, upload, start/end of a
   session) is recorded with the person who did it. Until login exists (step 5)
   every request is the store's owner.
@@ -27,8 +57,8 @@ the answer this draft assumes; a different answer changes the claims under it.
   place.
 - **TASK-13** new: A task's assignee is one person or nobody.
 - **TASK-14** new: A task's history lists in time order its state and assignee
-  changes, sessions started and ended (with their machine), comments, files
-  added, and pull requests, each with who and when.
+  changes, sessions started, stopped, and ended (with their machine), comments,
+  files added, and pull requests, each with who and when.
 - **TASK-6** changed: A session's first chat starts with its task's title,
   description, status, and comments in context.
 - **TASK-8** retired (notes). Replaced by comments.
@@ -41,11 +71,9 @@ the answer this draft assumes; a different answer changes the claims under it.
   comment`; a comment is Markdown, shows rendered, and shows its author and time.
 - **COMMENT-2** new: A comment's author can edit or delete it; an edited comment
   says so.
-- **COMMENT-3** new: A comment by a person while the task's session runs reaches
-  its agent: `am comments` lists it, and the agent's next turn starts with it.
-  - **Q** Should a human's comment also *start* a turn in the running chat (like
-    typing a prompt)? Draft: no; it is delivered at the next turn, so comments
-    never interrupt work. The chat stays the way to talk to the agent now.
+- **COMMENT-3** new: Comments are discussion between people and never reach a
+  running session's chat; its agent reads them when its session starts (TASK-6) and
+  when it asks (`am comments`).
 
 ### Folders
 
@@ -56,34 +84,31 @@ the answer this draft assumes; a different answer changes the claims under it.
   downloads, the folder as a zip.
 - **FOLDER-3** new: A session's agent finds its owner's folder as a directory in
   its workspace; what it writes there shows on the page within seconds, and the
-  reverse.
-  - **Q** Container and host sessions on the hub can mount it; a session on a
-    remote runner (step 8) gets it synced over the runner link. Fine to claim the
-    behavior now and build the sync in step 8?
+  reverse. Local runs (step 8) get it synced.
 
 ### Board
 
 - **BOARD-1** changed: The board shows the project's tasks in Open, In progress,
   and In review; each card shows the task's title, topic names, assignee, and its
-  running session's state and machine.
+  session's state and machine.
 - **BOARD-3** new: Done and cancelled tasks leave the board; search and the All
   tasks list find every task by title, description, and comments.
 - **CARD-2** retired (last messages on the card). The task page and chat show them.
-- **CARD-1, CARD-3, CARD-4, CARD-5** changed to name the task, not a session card:
-  - CARD-1: A task's card and page show its running session as waiting on you,
-    working, idle, or stopped; working pulses.
-  - CARD-3: A task's Changes view shows its uncommitted changes, unpushed commits,
-    and open pull requests.
+- **CARD-5** retired, duplicate of BOARD-2.
+- **CARD-1, CARD-3, CARD-4** changed to name the task, not a session card:
+  - CARD-1: A task's card and page show its session as waiting on you, working,
+    idle, stopped, or ended; working pulses.
+  - CARD-3: A task's Changes view shows what its branch changed against the
+    default branch, its uncommitted files, and its open pull requests.
   - CARD-4: A task's Changes view names the other running tasks of the project
     that changed any of the same files, and its card marks that it has them.
-  - CARD-5: retired, duplicate of BOARD-2.
 
 ### Layout and identity
 
-- **UI-2** changed: A task has three tabs: Page, Chat (its running session's
-  chat, or starting one), and Settings, a full tab at the right of the tabs with
-  subtabs Changes, Previews, Cloudflare, and End session. Switching tabs keeps the
-  chat loaded.
+- **UI-2** changed: A task has three tabs: Page, Chat (its session's chat, or
+  starting one), and Settings, a full tab at the right of the tabs with subtabs
+  Changes, Previews, Cloudflare, and End session. Switching tabs keeps the chat
+  loaded.
 - **UI-4** new: A topic's name shows the same everywhere, in the topic's own
   colour; clicking it opens a panel with its rendered status and linked tasks.
 - **UI-5** new: The header counts the tasks waiting on you, on every page, and
@@ -99,20 +124,21 @@ the answer this draft assumes; a different answer changes the claims under it.
 - **AUTH-2** new: A person logs in through Cloudflare Access with their email and
   acts as the person with that email; an email that is not a person of the store
   is refused.
-- **AUTH-3** new: Only the store's owner adds people, allows host sessions, and
-  allows Cloudflare writes.
-  - **Q** The teammate otherwise sees and does everything (all projects, start and
-    end sessions, finish tasks)? Draft: yes; per-project access comes later if
-    ever needed.
+- **AUTH-3** new: Every person of a hub sees and works on all its projects; only
+  its owner adds people, starts host sessions, and allows Cloudflare writes.
+- **HOST-1** changed: A session runs its agent in a container, or on the host when
+  its project allows host sessions; a project allows them only when its store's
+  owner says so.
+- **HOST-2** changed: "on the gateway's machine" becomes "on the machine that runs
+  it, as that machine's user".
+- **STORE-3** changed: A client configured with hubs lists their projects beside
+  its own, shows each hub project as the hub's site does, and marks unreachable
+  hubs as unavailable.
 - **PREVIEW-2** changed: The UI, each session's chat, and each preview are each
   their own origin: `am.draftcoach.gg`, `am-t-<session>.draftcoach.gg`,
   `am-p-<task>.draftcoach.gg`.
 - **STORE-6** new: Moving a store to another machine keeps every project, topic,
-  task, comment, folder, chat, and snapshot.
-- **Q** Host sessions on the hub run on Hetzner as its service user, so they are
-  off for every project there; host sessions (and the integrator) stay on the
-  user's PC as a runner (step 8). Until then the integrator keeps running against
-  the PC's own store. OK?
+  task, comment, folder, and chat.
 
 ## Step 6: previews
 
@@ -124,6 +150,11 @@ the answer this draft assumes; a different answer changes the claims under it.
   preview's login requests go to production as if they came from production's own
   site, the preview gets the login, and the login cookie never reaches the
   session's container. Draftcoach is set up this way.
+- **DEPLOY-1** new: A task's page has "Deploy changes": its agent opens a pull
+  request of the task's work to the default branch, in logical commits, and
+  merges it when its checks pass. Telling the agent to deploy does the same.
+  - **Q** Draft: the button sends the agent a fixed prompt, so both ways are one
+    path. MERGE-2 (merge when checks pass and policy allows) covers the merge.
 
 ## Step 7: automations
 
@@ -148,34 +179,48 @@ the answer this draft assumes; a different answer changes the claims under it.
   links the run's outputs.
 - **AUTO-7** changed: An automation's page shows first what its runs produced and
   what waits for review, then its runs with time, session, and outcome.
-- **SESSION-5** changed: A session belongs to one task or one automation, and
-  runs in one workspace on exactly one machine.
+- **SESSION-5** changed: A session belongs to one task or one automation and runs
+  in one workspace on one machine at a time.
 - **AUTO-3, AUTO-4, AUTO-5, AUTO-6** retired: event triggers and dedupe are not in
   the design (Deferred mentions events); AUTO-6 is replaced by end modes.
-- **Q** REVIEW-1..3 (inbox) are untested and partly overlap the board's "waiting
-  on you". Draft: keep them; the inbox lists waiting runs, waiting sessions, and
-  pull requests across projects. Or retire them in favour of the header count?
+- REVIEW-1..3 (inbox) stay.
 
-## Step 8: runners and idle stop
+## Step 8: commits, stops, local runs
 
-- **MACHINE-3** new: A session runs on a runner: the hub's machine, or a machine
-  connected to the hub (the user's PC while it is on); starting a session picks
-  one, the user can choose.
-- **MACHINE-4** new: A runner that disconnects shows as offline, and its sessions
-  as stopped on that machine.
-- **MACHINE-5** new: A session idle for 30 minutes (no turn working, nobody
-  waiting on it, its chat open nowhere) stops; its uncommitted work goes to the
-  store as the task's snapshot first (SESSION-9), so any runner can go on.
-  - **Q** "WIP push" in PLAN.md: draft reads it as the snapshot going to the
-    store, not a commit pushed to GitHub, so SESSION-9 ("never pushed to a
-    remote") stays. Or push a WIP commit to the task branch?
-  - **Q** After an idle stop, does the task's next session (maybe on another
-    runner) go on with the last chat, or start a new chat with the task's context?
-    Draft: go on with the last chat; chats are in the store (SESSION-3).
+- **SESSION-9** retired (snapshot refs, "never pushed"). Replaced by SESSION-15.
+- **SESSION-15** new: A session's agent commits by the end of every turn that
+  changed files, and Agent Monitor pushes the task's branch after every turn, so a
+  session's work is on the remote when its turn ends.
+  - **Q** Draft: Agent Monitor pushes (the agent decided the content when it
+    committed; pushing has nothing left to decide, and it also has to happen before
+    an idle stop). Or the agent pushes too?
+- **TURN-1** retired (snapshot without changing the branch).
+- **TURN-2, TURN-3** changed: a turn's diff is the commits it made; the diff view
+  offers the whole branch and each turn, with the turn's prompt and final reply.
+- **TASK-11** changed: `am check` lists uncommitted files and untracked files that
+  look like secrets, and fails while there are any; the agent runs it before it
+  ends a turn.
+- **SESSION-16** new: A running session that is idle for 30 minutes (no turn
+  working, not waiting on anyone, its chat open nowhere) stops; opening it goes on
+  with its last chat from its branch, on any machine that may run it.
+  - **Q** Draft: a session with uncommitted files is never idle-stopped (the agent
+    forgot to commit; its card says so) rather than stopped with work only on one
+    machine.
+- **SESSION-10** changed: Opening a stopped session starts it again on its last
+  chat; SESSION-16 covers starting it on another machine.
+- **MACHINE-3** new: A client can run a session of a hub project locally ("Run
+  session locally"); the session shows on the hub as running on that machine, and
+  its chats reach the hub (SESSION-3).
+- **MACHINE-4** new: The hub never starts a session on a machine that has not
+  opted in as a persistent runner; a client that disconnects leaves its local runs
+  stopped, and they go on elsewhere from their branches (SESSION-16).
+- Deferred: "moving a running session between machines" stays deferred; moving a
+  stopped one is SESSION-16.
 - MACHINE-1, MACHINE-2 stay.
 
-## Open items not drafted
+## Not drafted yet
 
-- The integrator pulling in other tasks' branches (PLAN.md, host sessions).
-- Switching host sessions on for an existing project: a project settings claim in
-  step 4, UI-6, if wanted.
+- How the integrator pulls in other tasks' branches.
+- Switching host sessions on for an existing project (project settings, step 4).
+- The agent's instructions (`AGENTS.md` of sessions) change with SESSION-15: commit
+  by the end of every turn, never push, deploy only when told.
