@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import type { Automation, RunOutcome, Session } from "../../shared/api.ts";
 import { defaultBaseRef, fetchOrigin, git, uncommittedFiles, unpushedCommits } from "../git.ts";
+import { DEPLOY_INSTRUCTION } from "../deploy.ts";
 import { hasMergedPullRequest } from "../github.ts";
 import { runShortId, StoreError } from "./store.ts";
 
@@ -70,8 +71,9 @@ export function runPrompt(automation: Automation, run: Session, memory: Buffer |
 /** AUTO-10, AUTO-14: what a run's agent is told about how its run ends, by its automation's end mode. */
 export function endModeSection(automation: Automation, run: Session): string {
   const outputs = runOutputs(run.id);
-  const deploy = "commit, push the branch, open a pull request to the default branch (`gh pr create`), wait until its checks pass " +
-    "(`gh pr checks --watch`), merge it (`gh pr merge`), then `am run end finished`; Agent Monitor accepts it once the branch is merged into the default branch";
+  // DEPLOY-1: the instruction Deploy on the run's page sends, here as the run's own way to deploy.
+  const deploy = `do what Deploy on the run's page sends you ("${DEPLOY_INSTRUCTION}"), then \`am run end finished\`; ` +
+    "Agent Monitor accepts it once the branch is merged into the default branch";
   const common = [
     `- Nothing to deploy (no change to the repository): \`am run end nothing_to_deploy\`; Agent Monitor deletes the run's branch.`,
     "- You cannot do what the instructions ask: `am run end failed --why \"WHY\"`.",

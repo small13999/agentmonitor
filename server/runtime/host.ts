@@ -130,6 +130,13 @@ export class HostRuntime implements Runtime {
     return `127.0.0.1:${state.port}`;
   }
 
+  async prompt(sessionId: string, text: string): Promise<void> {
+    const { run: runDir } = this.options.dirs(sessionId);
+    const env = { ...process.env, TERN_DAEMON_SOCKET: join(runDir, "tern-daemon.sock"), TERN_CONFIG_DIR: join(runDir, "tern-config") };
+    await run("tern", ["send", "workspace/@focused", "text", text], { env });
+    await run("tern", ["send", "workspace/@focused", "keys", "Enter"], { env });
+  }
+
   async remove(sessionId: string): Promise<void> {
     signal(sessionPids(sessionId), "SIGTERM");
     for (const deadline = Date.now() + STOP_MS; sessionPids(sessionId).length > 0 && Date.now() < deadline;) await sleep(100);

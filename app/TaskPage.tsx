@@ -8,6 +8,7 @@ import { Folder } from "./Folder.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { ActorName, PeopleDialog, PersonAvatar, useDirectory, type Directory } from "./People.tsx";
 import { TopicName } from "./Topics.tsx";
+import { WorkSection } from "./Work.tsx";
 
 const UNFINISHED: TaskState[] = ["open", "in_progress", "in_review"];
 
@@ -419,8 +420,8 @@ function HistorySection({ entries, directory, comments }: { entries: HistoryEntr
 
 /**
  * TASK-12: the task's page, its primary place: title, description, state, assignee, and
- * topics, edited in place; its status, folder, comments, history, and sessions. CARD-1: the
- * running session's state shows by the title.
+ * topics, edited in place; its work (CARD-3), status, folder, comments, history, and sessions.
+ * CARD-1: the running session's state shows by the title.
  */
 export function TaskPage({ summary, card, topics, onChanged }: { summary: TaskSummary; card: Card | null; topics: Topic[]; onChanged: () => void }) {
   const { task } = summary;
@@ -455,6 +456,7 @@ export function TaskPage({ summary, card, topics, onChanged }: { summary: TaskSu
       <div className="page-grid">
         <div className="page-main">
           <DescriptionField task={task} onSaved={changed} />
+          <WorkSection path={`/tasks/${task.id}/changes`} deployPath={`/tasks/${task.id}/deploy`} onDeployed={changed} />
           <StatusSection task={task} />
           <Folder owner={{ kind: "task", id: task.id }} directory={directory} hint="Drop files here to add them; the task's agent finds them in its folder." />
           <CommentsSection taskId={task.id} comments={comments.data} directory={directory} onChanged={commented} />

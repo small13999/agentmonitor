@@ -4,7 +4,7 @@ import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import type { ChangedFile } from "../shared/api.ts";
+import type { ChangedFile, WorkCommit } from "../shared/api.ts";
 
 const run = promisify(execFile);
 
@@ -90,23 +90,67 @@ export async function unpushedCommits(repo: string, ref: string, baseRef: string
 }
 
 /**
- * CARD-3: the commits on `ref` since it left `baseRef`, newest first as "<short sha> <subject>",
- * and the files they changed.
+ * CARD-3: where the work of `branch` (at `ref`, its name or a worktree's HEAD) starts: where it
+ * left `baseRef`. A branch merged into `baseRef` without a squash has no commits of its own
+ * there any more; its work then starts where the branch was created, as its reflog says, so a
+ * deployed branch still shows what it did.
  */
-export async function branchChanges(repo: string, ref: string, baseRef: string): Promise<{ commits: string[]; files: ChangedFile[] }> {
-  const base = await git(repo, ["merge-base", ref, baseRef]);
-  const commits = (await git(repo, ["log", "--format=%h %s", `${base}..${ref}`])).split("\n").filter(Boolean);
-  // -z entries are "status\0path\0"; renames and copies carry the old path first.
-  const entries = (await git(repo, ["diff", "--name-status", "-z", base, ref])).split("\0").filter(Boolean);
+async function workBase(cwd: string, ref: string, branch: string, baseRef: string): Promise<string> {
+  const base = await git(cwd, ["merge-base", ref, baseRef]);
+  if (base !== await git(cwd, ["rev-parse", ref])) return base;
+  const reflog = (await git(cwd, ["log", "-g", "--format=%H%x00%gs", `refs/heads/${branch}`]).catch(() => "")).split("\n").filter(Boolean);
+  const [created, message] = (reflog.at(-1) ?? "").split("\0");
+  if (message?.startsWith("branch: Created from") !== true) return base;
+  return git(cwd, ["merge-base", "--is-ancestor", created, ref]).then(() => created, () => base);
+}
+
+/** CARD-3: the web page of a commit on the repository's origin, e.g. GitHub's, from origin's URL as configured; null when origin is no web host. */
+async function commitPage(cwd: string): Promise<((sha: string) => string) | null> {
+  const url = await git(cwd, ["config", "--get", "remote.origin.url"]).catch(() => "");
+  // https://host/owner/repo.git, ssh://git@host:22/owner/repo.git, git@host:owner/repo.git
+  const match = /^(?:(?:https?|ssh):\/\/(?:[^@/]+@)?|[^@/:]+@)([^/:]+)(?::\d+)?[:/](.+?)(?:\.git)?\/?$/.exec(url);
+  if (match === null) return null;
+  return (sha) => `https://${match[1]}/${match[2]}/commit/${sha}`;
+}
+
+/**
+ * CARD-3: the commits of `branch` (at `ref`) since it left `baseRef` (workBase), newest first,
+ * each with whether a remote has it, and the files they changed with their lines added and
+ * deleted.
+ */
+export async function branchChanges(cwd: string, ref: string, branch: string, baseRef: string): Promise<{ commits: WorkCommit[]; files: ChangedFile[] }> {
+  const base = await workBase(cwd, ref, branch, baseRef);
+  const [log, unpushed, page, statuses, numstat] = await Promise.all([
+    git(cwd, ["log", "--format=%H%x00%ct%x00%s%x00%b%x1e", `${base}..${ref}`]),
+    // As unpushedCommits counts them: what a remote branch or the default branch has is safe.
+    git(cwd, ["rev-list", `${base}..${ref}`, "--not", "--remotes", baseRef]),
+    commitPage(cwd),
+    git(cwd, ["diff", "--name-status", "-z", base, ref]),
+    git(cwd, ["diff", "--numstat", "-z", base, ref]),
+  ]);
+  const notPushed = new Set(unpushed.split("\n"));
+  const commits = log.split("\x1e").map((entry) => entry.trim()).filter(Boolean).map((entry): WorkCommit => {
+    const [sha, at, subject, body] = entry.split("\0");
+    return { sha, subject, body: (body ?? "").trim(), at: Number(at) * 1000, pushed: !notPushed.has(sha), url: page === null ? null : page(sha) };
+  });
+  // numstat -z entries are "added\tdeleted\tpath\0", or for a rename "added\tdeleted\t\0old\0new\0"; binary files count "-".
+  const lines = new Map<string, { added: number | null; deleted: number | null }>();
+  const counted = numstat.split("\0");
+  for (let index = 0; index < counted.length; index++) {
+    const [added, deleted, path] = counted[index].split("\t");
+    if (path === undefined) continue;
+    const target = path === "" ? counted[(index += 2)] : path;
+    lines.set(target, { added: added === "-" ? null : Number(added), deleted: deleted === "-" ? null : Number(deleted) });
+  }
+  // name-status -z entries are "status\0path\0"; renames and copies carry the old path first.
+  const entries = statuses.split("\0").filter(Boolean);
   const files: ChangedFile[] = [];
   for (let index = 0; index < entries.length; index += 2) {
     const code = entries[index][0];
-    if (code === "R" || code === "C") {
-      index++;
-      files.push({ path: entries[index + 1], status: code === "R" ? "renamed" : "added" });
-    } else {
-      files.push({ path: entries[index + 1], status: code === "A" ? "added" : code === "D" ? "deleted" : "modified" });
-    }
+    if (code === "R" || code === "C") index++;
+    const path = entries[index + 1];
+    const status = code === "R" ? "renamed" : code === "A" || code === "C" ? "added" : code === "D" ? "deleted" : "modified";
+    files.push({ path, status, ...(lines.get(path) ?? { added: null, deleted: null }) });
   }
   return { commits, files };
 }

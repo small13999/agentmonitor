@@ -87,6 +87,11 @@ export class PodmanRuntime implements Runtime {
     return address;
   }
 
+  async prompt(sessionId: string, text: string): Promise<void> {
+    await run("podman", ["exec", this.containerName(sessionId), "tern", "send", "workspace/@focused", "text", text]);
+    await run("podman", ["exec", this.containerName(sessionId), "tern", "send", "workspace/@focused", "keys", "Enter"]);
+  }
+
   async remove(sessionId: string): Promise<void> {
     await run("podman", ["rm", "-f", "--ignore", "-t", "5", this.containerName(sessionId)]);
   }

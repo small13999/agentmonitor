@@ -42,6 +42,8 @@ export interface Runtime {
   running(sessionId: string): Promise<boolean>;
   /** The loopback address the session's Tern web client listens on, e.g. 127.0.0.1:41234. */
   ternAddress(sessionId: string): Promise<string>;
+  /** AGENT-3, DEPLOY-1: types `text` into the session's chat and sends it, as a person's prompt in Tern's web client reaches it. */
+  prompt(sessionId: string, text: string): Promise<void>;
   /** Stops the session's processes; its directories stay. */
   remove(sessionId: string): Promise<void>;
 }

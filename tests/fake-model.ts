@@ -17,7 +17,8 @@ interface ChatMessage {
  *   bash:COMMAND  call the bash tool with the rest of the message as the command
  *   glob:PATTERN  call the glob tool with PATTERN
  * After a tool result the model replies "answered: " and the result's first line (omp ends
- * results with a "Wall time" line under ACP).
+ * results with a "Wall time" line under ACP). A prompt the test does not write itself (one
+ * Agent Monitor sends) is scripted with `when`.
  */
 export class FakeModel {
   private readonly server: Server;
@@ -25,6 +26,12 @@ export class FakeModel {
   private holdWaiters: Array<() => void> = [];
   // Providers give every tool call its own id; the chat matches results and output by it.
   private calls = 0;
+  private readonly scripts = new Map<string, string>();
+
+  /** From now on, answer a user message that holds `holding` as if it were `marker` (one of the markers above). */
+  when(holding: string, marker: string): void {
+    this.scripts.set(holding, marker);
+  }
 
   private constructor(server: Server) {
     this.server = server;
@@ -107,7 +114,8 @@ export class FakeModel {
         ...(finish === null ? {} : { usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }),
       })}\n\n`);
     };
-    const user = last?.role === "user" ? text : "";
+    const said = last?.role === "user" ? text : "";
+    const user = [...this.scripts].find(([holding]) => said.includes(holding))?.[1] ?? said;
     const toolCall = (name: string, args: unknown) => {
       const id = `call_${name}_${++this.calls}`;
       chunk({ role: "assistant", tool_calls: [{ index: 0, id, type: "function", function: { name, arguments: JSON.stringify(args) } }] }, null);

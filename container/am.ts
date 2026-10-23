@@ -11,7 +11,9 @@ import { basename, dirname, join } from "node:path";
 import type { Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 // Types only: erased when Node runs this file, so the container needs no copy of shared/.
-import type { Actor, Card, ChangedFile, HistoryEntry, Person, Project, PullRequest, TaskChanges, TaskState, TurnLight } from "../shared/api.ts";
+import type {
+  Actor, BranchState, Card, ChangedFile, CheckState, HistoryEntry, Person, Project, PullRequest, TaskState, TurnLight, Work, WorkBadge, WorkCommit,
+} from "../shared/api.ts";
 
 const USAGE = `usage: am [--json] COMMAND [--task ID]
 
@@ -28,9 +30,14 @@ const USAGE = `usage: am [--json] COMMAND [--task ID]
   task set-description                replace the task's description with stdin (Markdown)
   task assign PERSON                  assign the task to a person (name or id), or nobody
   task history                        what happened to the task, oldest first: who, what, when
-  task changes                        what the task's branch changed against the default
-                                      branch, its uncommitted files, its open pull requests,
-                                      and the other running tasks that changed the same files
+  task changes                        the task's work, as its page's Work section: the
+                                      branch's state, its commits, the files they changed, its
+                                      pull requests with their checks, and the other running
+                                      tasks that changed the same files
+  task deploy                         have the task's agent deploy (Deploy on its page): its
+                                      session (started if it has none) is told to open a pull
+                                      request to the default branch and merge it once its
+                                      checks pass
   task create TITLE                   create another task (stdin: its description)
   task search [WORDS...]              every task of this project, done and cancelled too,
                                       whose title, description, or comments hold all of WORDS
@@ -95,6 +102,8 @@ const USAGE = `usage: am [--json] COMMAND [--task ID]
   run task RUN [--title TITLE]        make a task of a run (its id, or the 8 characters of its
                                       branch): the task takes over the run's branch, and the
                                       run's outputs are copied into the task's folder
+  run changes [RUN]                   a run's work, as task changes (default: this run)
+  run deploy RUN                      have a run waiting for review deploy, as task deploy
 
   --task ID                           act on another task of this project instead of this
                                       session's (task, comments, comment, topic link/unlink,
@@ -323,13 +332,30 @@ interface Summary {
   task: Task;
   topics: Topic[];
   sessionId: string | null;
+  badge: WorkBadge | null;
 }
+
+/** CARD-6: what each board badge says. */
+const BADGE_LABEL: Record<WorkBadge, string> = { unpushed: "not pushed", open: "pull request open", deployed: "deployed" };
 
 function summariesOf(value: unknown): Summary[] {
   return listOf(value, "a task list", (item) => {
-    if (!isRecord(item) || (item.sessionId !== null && typeof item.sessionId !== "string")) throw unexpected("a task");
-    return { task: taskOf(item.task), topics: topicsOf(item.topics), sessionId: item.sessionId };
+    if (!isRecord(item) || (item.sessionId !== null && typeof item.sessionId !== "string")
+      || !(item.badge === null || item.badge === "unpushed" || item.badge === "open" || item.badge === "deployed")) {
+      throw unexpected("a task");
+    }
+    return { task: taskOf(item.task), topics: topicsOf(item.topics), sessionId: item.sessionId, badge: item.badge };
   });
+}
+
+/** A run of the project by its id or the 8 characters of its branch. */
+async function runNamed(project: Pick<Project, "id" | "name">, name: string): Promise<Session> {
+  const automations = listOf(await call("GET", `/projects/${project.id}/automations`), "a list of automations", (item) => automationOf(isRecord(item) ? item.automation : undefined));
+  const runs: Session[] = [];
+  for (const automation of automations) runs.push(...listOf(await call("GET", `/automations/${automation.id}/runs`), "a list of runs", sessionOf));
+  const found = runs.filter((session) => session.run !== null && (session.id === name || runShortId(session.id) === name));
+  if (found.length !== 1) throw new CliError(found.length === 0 ? `no run ${name} in ${project.name} (am automation show NAME lists runs)` : `${name} names several runs: give the run's whole id`);
+  return found[0];
 }
 
 /** TASK-12: a task's page: the task, its topics, and every session it has had, newest first. */
@@ -405,42 +431,99 @@ function historyEntryOf(value: unknown): HistoryEntry {
 
 function changedFileOf(value: unknown): ChangedFile {
   if (!isRecord(value) || typeof value.path !== "string"
-    || !(value.status === "added" || value.status === "modified" || value.status === "deleted" || value.status === "renamed")) {
+    || !(value.status === "added" || value.status === "modified" || value.status === "deleted" || value.status === "renamed")
+    || (value.added !== null && typeof value.added !== "number") || (value.deleted !== null && typeof value.deleted !== "number")) {
     throw unexpected("a changed file");
   }
-  return { path: value.path, status: value.status };
+  return { path: value.path, status: value.status, added: value.added, deleted: value.deleted };
+}
+
+function commitOf(value: unknown): WorkCommit {
+  if (!isRecord(value) || typeof value.sha !== "string" || typeof value.subject !== "string" || typeof value.body !== "string"
+    || typeof value.at !== "number" || typeof value.pushed !== "boolean" || (value.url !== null && typeof value.url !== "string")) {
+    throw unexpected("a commit");
+  }
+  return { sha: value.sha, subject: value.subject, body: value.body, at: value.at, pushed: value.pushed, url: value.url };
 }
 
 function pullRequestOf(value: unknown): PullRequest {
-  if (!isRecord(value) || typeof value.number !== "number" || typeof value.title !== "string" || typeof value.url !== "string") {
+  if (!isRecord(value) || typeof value.number !== "number" || typeof value.title !== "string" || typeof value.url !== "string"
+    || !(value.state === "open" || value.state === "merged" || value.state === "closed")) {
     throw unexpected("a pull request");
   }
-  return { number: value.number, title: value.title, url: value.url };
+  const checks = value.checks === null ? null : listOf(value.checks, "a list of checks", (check): { name: string; state: CheckState; url: string } => {
+    const state = isRecord(check) ? check.state : undefined;
+    if (!isRecord(check) || typeof check.name !== "string" || typeof check.url !== "string" || !(state === "passing" || state === "failing" || state === "pending")) {
+      throw unexpected("a check");
+    }
+    return { name: check.name, state, url: check.url };
+  });
+  return { number: value.number, title: value.title, url: value.url, state: value.state, checks };
 }
 
-/** CARD-3, CARD-4: a task's Changes view. */
-function changesOf(value: unknown): TaskChanges {
-  if (!isRecord(value)) throw unexpected("a task's changes");
-  const { branch, baseRef, committed, uncommitted, pullRequests, overlaps } = value;
-  if ((branch !== null && typeof branch !== "string") || (baseRef !== null && typeof baseRef !== "string") || (uncommitted !== null && !isStrings(uncommitted))) {
-    throw unexpected("a task's changes");
-  }
-  let onBranch: TaskChanges["committed"] = null;
-  if (committed !== null) {
-    if (!isRecord(committed) || !isStrings(committed.commits)) throw unexpected("a task's changes");
-    onBranch = { commits: committed.commits, files: listOf(committed.files, "a list of changed files", changedFileOf) };
+function isBranchState(value: unknown): value is BranchState {
+  return value === "nothing" || value === "uncommitted" || value === "unpushed" || value === "pushed";
+}
+
+/** CARD-3, CARD-4, AUTO-16: a task's or a run's Work section. */
+function workOf(value: unknown): Work {
+  if (!isRecord(value)) throw unexpected("a branch's work");
+  const { branch, baseRef, state, commits, files, uncommitted, pullRequests, overlaps, deployable } = value;
+  if ((branch !== null && typeof branch !== "string") || (baseRef !== null && typeof baseRef !== "string") || !isBranchState(state)
+    || (uncommitted !== null && !isStrings(uncommitted)) || typeof deployable !== "boolean") {
+    throw unexpected("a branch's work");
   }
   return {
     branch,
     baseRef,
-    committed: onBranch,
+    state,
+    commits: commits === null ? null : listOf(commits, "a list of commits", commitOf),
+    files: files === null ? null : listOf(files, "a list of changed files", changedFileOf),
     uncommitted,
     pullRequests: pullRequests === null ? null : listOf(pullRequests, "a list of pull requests", pullRequestOf),
     overlaps: listOf(overlaps, "a list of overlapping tasks", (item) => {
       if (!isRecord(item) || typeof item.taskId !== "string" || typeof item.title !== "string" || !isStrings(item.files)) throw unexpected("an overlapping task");
       return { taskId: item.taskId, title: item.title, files: item.files };
     }),
+    deployable,
   };
+}
+
+/** CARD-3: a Work section as text, as the page shows it. */
+function workText(work: Work): string {
+  if (work.branch === null) return "nothing yet: the first session creates the branch";
+  const commits = work.commits ?? [];
+  const unpushed = commits.filter((commit) => !commit.pushed).length;
+  const state: Record<BranchState, string> = {
+    nothing: "nothing yet",
+    uncommitted: `uncommitted changes in the running session: ${(work.uncommitted ?? []).join(", ")}`,
+    unpushed: `${unpushed} commit(s) not pushed`,
+    pushed: `${commits.length} commit(s) pushed`,
+  };
+  const indent = (lines: string[]) => lines.map((line) => `  ${line}`);
+  const lines = [`branch ${work.branch}${work.baseRef === null ? "" : ` from ${work.baseRef}`}: ${state[work.state]}`, "", "commits:"];
+  if (work.commits === null) lines.push("  the branch cannot be read on this machine");
+  else if (commits.length === 0) lines.push("  none");
+  for (const commit of commits) {
+    lines.push(`  ${commit.sha.slice(0, 7)} ${commit.subject}${commit.pushed ? "" : " (not pushed)"}\t${new Date(commit.at).toISOString()}${commit.url === null ? "" : `\t${commit.url}`}`);
+    if (commit.body !== "") lines.push(...indent(indent(commit.body.split("\n"))));
+  }
+  const files = work.files ?? [];
+  const added = files.reduce((sum, file) => sum + (file.added ?? 0), 0);
+  const deleted = files.reduce((sum, file) => sum + (file.deleted ?? 0), 0);
+  lines.push("", `${files.length} file(s) changed, +${added} -${deleted}:`, ...indent(files.map((file) => `${file.status}\t${file.path}\t+${file.added ?? "-"} -${file.deleted ?? "-"}`)));
+  lines.push("", "pull requests:");
+  if (work.pullRequests === null) lines.push("  pull requests unavailable");
+  else if (work.pullRequests.length === 0) lines.push("  none");
+  for (const pr of work.pullRequests ?? []) {
+    const checks = pr.checks === null ? "checks unavailable" : pr.checks.length === 0 ? "no checks" : pr.checks.map((check) => `${check.name} ${check.state}`).join(", ");
+    lines.push(`  #${pr.number} ${pr.title}\t${pr.state === "merged" ? "merged (deployed)" : pr.state}\t${checks}\t${pr.url}`);
+  }
+  if (work.overlaps.length > 0) {
+    lines.push("", "same files changed in:", ...indent(work.overlaps.map((overlap) => `${overlap.title} (${overlap.taskId}): ${overlap.files.join(", ")}`)));
+  }
+  if (work.deployable) lines.push("", "deployable: am task deploy (a run's: am run deploy RUN)");
+  return lines.join("\n");
 }
 
 /** CARD-1, CARD-4, CLOUDFLARE-2: what a running session's card shows. */
@@ -1046,25 +1129,13 @@ async function main(args: string[]): Promise<void> {
   }
   if (group === "task" && command === "changes" && rest.length === 0) {
     const answered = await call("GET", `/tasks/${taskId()}/changes`);
-    const { branch, baseRef, committed, uncommitted, pullRequests, overlaps } = changesOf(answered);
-    const indent = (lines: string[]) => lines.map((line) => `  ${line}`);
-    print(json, answered, () => {
-      if (branch === null) return "the task has no branch yet; its first session creates it";
-      const lines = [`branch ${branch}${baseRef === null ? "" : ` against ${baseRef}`}`, "", "committed on the branch:"];
-      if (committed === null) lines.push("  the branch cannot be read here");
-      else if (committed.files.length === 0) lines.push("  the branch has no changes against the default branch");
-      else lines.push(...indent(committed.commits), ...indent(committed.files.map((file) => `${file.status}\t${file.path}`)));
-      lines.push("", "uncommitted:");
-      if (uncommitted === null) lines.push("  no session is running; an ended session's uncommitted files wait for the next one");
-      else lines.push(...(uncommitted.length === 0 ? ["  no uncommitted files"] : indent(uncommitted)));
-      lines.push("", "pull requests:");
-      if (pullRequests === null) lines.push("  pull requests unavailable");
-      else lines.push(...(pullRequests.length === 0 ? ["  no open pull requests"] : indent(pullRequests.map((pr) => `#${pr.number} ${pr.title}\t${pr.url}`))));
-      if (overlaps.length > 0) {
-        lines.push("", "same files changed in:", ...indent(overlaps.map((overlap) => `${overlap.title} (${overlap.taskId}): ${overlap.files.join(", ")}`)));
-      }
-      return lines.join("\n");
-    });
+    const work = workOf(answered);
+    print(json, answered, () => workText(work));
+    return;
+  }
+  if (group === "task" && command === "deploy" && rest.length === 0) {
+    const told = sessionOf(await call("POST", `/tasks/${taskId()}/deploy`));
+    print(json, told, () => `told the agent of session ${told.id} to deploy`);
     return;
   }
   if (group === "task" && command === "create" && rest.length === 1) {
@@ -1113,7 +1184,7 @@ async function main(args: string[]): Promise<void> {
           summary.task.title,
           summary.topics.map((topic) => topic.name).join(", ") || "no topics",
           summary.task.assigneeId === null ? "nobody" : people.find((person) => person.id === summary.task.assigneeId)?.name ?? "someone no longer in the store",
-          sessionText(summary),
+          sessionText(summary) + (summary.badge === null ? "" : `; ${BADGE_LABEL[summary.badge]}`),
         ].join("\t")),
       ].join("\n");
     }).join("\n"));
@@ -1250,19 +1321,30 @@ async function main(args: string[]): Promise<void> {
   if (group === "run" && command === "task" && rest.length >= 1) {
     const options = optionsOf(rest, ["--title"], []);
     if (options.rest.length === 1) {
-      const name = options.rest[0];
-      const automations = listOf(await call("GET", `/projects/${me.project.id}/automations`), "a list of automations", (item) => automationOf(isRecord(item) ? item.automation : undefined));
-      const runs: Session[] = [];
-      for (const automation of automations) runs.push(...listOf(await call("GET", `/automations/${automation.id}/runs`), "a list of runs", sessionOf));
-      const found = runs.filter((session) => session.run !== null && (session.id === name || runShortId(session.id) === name));
-      if (found.length !== 1) throw new CliError(found.length === 0 ? `no run ${name} in ${me.project.name} (am automation show NAME lists runs)` : `${name} names several runs: give the run's whole id`);
+      const run = await runNamed(me.project, options.rest[0]);
       const title = options.values.get("--title");
-      const detail = await call("POST", `/runs/${found[0].id}/task`, title === undefined ? {} : { title });
+      const detail = await call("POST", `/runs/${run.id}/task`, title === undefined ? {} : { title });
       const { task } = taskDetailOf(detail);
-      print(json, detail, () => `made task "${task.title}" (${task.id}) of run ${runShortId(found[0].id)}: branch ${task.branch ?? "none yet"}; ` +
-        `the run's outputs are copied into its folder under runs/${runShortId(found[0].id)}/`);
+      print(json, detail, () => `made task "${task.title}" (${task.id}) of run ${runShortId(run.id)}: branch ${task.branch ?? "none yet"}; ` +
+        `the run's outputs are copied into its folder under runs/${runShortId(run.id)}/`);
       return;
     }
+  }
+
+  // AUTO-16: a run's work and its Deploy, as a task's.
+  if (group === "run" && command === "changes" && rest.length <= 1) {
+    const runId = rest.length === 1 ? (await runNamed(me.project, rest[0])).id : me.session.run === null ? null : me.session.id;
+    if (runId === null) throw new CliError("this session is no run of an automation: name the run (am run changes RUN)");
+    const answered = await call("GET", `/runs/${runId}/changes`);
+    const work = workOf(answered);
+    print(json, answered, () => workText(work));
+    return;
+  }
+  if (group === "run" && command === "deploy" && rest.length === 1) {
+    const run = await runNamed(me.project, rest[0]);
+    const told = sessionOf(await call("POST", `/runs/${run.id}/deploy`));
+    print(json, told, () => `told the agent of run ${runShortId(told.id)} to deploy`);
+    return;
   }
 
   if (group === "comments" && command === undefined) {

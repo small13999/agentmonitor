@@ -85,6 +85,8 @@ export interface TaskSummary {
   topics: Topic[];
   /** Its running session (TASK-5: at most one). */
   sessionId: string | null;
+  /** CARD-6: the board's one badge for its work; null on finished tasks and work with nothing to flag. */
+  badge: WorkBadge | null;
 }
 
 export interface TaskDetail {
@@ -282,34 +284,70 @@ export interface TopicLink {
   linkedAt: number;
 }
 
-/** CARD-3: a file the task's branch changed against the default branch. */
+/** CARD-3: a file the branch changed against the default branch, with its lines added and deleted (null for a binary file). */
 export interface ChangedFile {
   path: string;
   status: "added" | "modified" | "deleted" | "renamed";
+  added: number | null;
+  deleted: number | null;
 }
 
-/** CARD-3, CARD-4: what a task's branch changed, its uncommitted files, and who else changed the same files. */
-export interface TaskChanges {
+/** CARD-3: a commit of the branch since it left the default branch. */
+export interface WorkCommit {
+  sha: string;
+  subject: string;
+  /** The message after the subject line; empty when there is none. */
+  body: string;
+  /** When it was committed (ms since epoch). */
+  at: number;
+  /** A remote branch has it. */
+  pushed: boolean;
+  /** Its page on the remote's site; null when the remote is no web host. */
+  url: string | null;
+}
+
+/** CARD-3: where the branch's work is: nothing yet, uncommitted in the running session, committed but not pushed, or pushed. */
+export type BranchState = "nothing" | "uncommitted" | "unpushed" | "pushed";
+
+/** CARD-6: a card's one badge, the most important of: commits not pushed, a pull request open, a pull request merged (deployed). */
+export type WorkBadge = "unpushed" | "open" | "deployed";
+
+/**
+ * CARD-3, CARD-4, AUTO-16: the Work section of a task or a run: its branch's state, commits,
+ * files, and pull requests, and who else changed the same files.
+ */
+export interface Work {
   branch: string | null;
-  /** The default branch the task's branch started from. */
+  /** The default branch the branch started from. */
   baseRef: string | null;
-  /** Commits and files on the branch since it left the default branch; null: no branch here yet. */
-  committed: { commits: string[]; files: ChangedFile[] } | null;
+  state: BranchState;
+  /** The branch's commits since it left the default branch, newest first; null: the branch cannot be read here. */
+  commits: WorkCommit[] | null;
+  /** The files those commits changed; null as for `commits`. */
+  files: ChangedFile[] | null;
   /** The running session's uncommitted files; null without a running session's worktree. */
   uncommitted: string[] | null;
-  /** Open pull requests from the branch; null when GitHub cannot be asked. */
+  /** The pull requests from the branch, newest first; null when GitHub cannot be asked. */
   pullRequests: PullRequest[] | null;
   /** CARD-4: the other running tasks of the project that changed any of the same files. */
   overlaps: Array<{ taskId: string; title: string; files: string[] }>;
+  /** DEPLOY-1: Deploy is offered: the branch has commits and no pull request open or merged (a run's: only while it waits for review). */
+  deployable: boolean;
 }
 
 /** blocked: waits for you (red); working: a turn runs (orange); done: turn finished (green); stopped: no live agent. */
 export type TurnLight = "blocked" | "working" | "done" | "stopped";
 
+export type CheckState = "passing" | "failing" | "pending";
+
+/** CARD-3: a pull request from a branch, in any state, with its checks; a merged one is deployed. */
 export interface PullRequest {
   number: number;
   title: string;
   url: string;
+  state: "open" | "merged" | "closed";
+  /** Its head commit's GitHub Actions runs, each linking to its page; null when GitHub answers about the pull request but not its runs. */
+  checks: Array<{ name: string; state: CheckState; url: string }> | null;
 }
 
 export interface Card {
@@ -319,8 +357,6 @@ export interface Card {
   lastReply: string | null;
   /** Null when the worktree cannot be read. */
   git: { uncommitted: string[]; unpushed: number; changedFiles: string[] } | null;
-  /** Open pull requests from the session branch; null when GitHub cannot be asked. */
-  pullRequests: PullRequest[] | null;
   /** Other running sessions of the project that changed any of the same files. */
   overlaps: Array<{ sessionId: string; name: string; files: string[] }>;
   /** The agent's Cloudflare access; null when the project has no Cloudflare tokens. */

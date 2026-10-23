@@ -5,11 +5,12 @@ import { userInfo } from "node:os";
 import { basename, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
-import type { Automation, Card, EndedSession, HistoryEntry, TaskChanges, TaskDetail, UnpushedWork } from "../../shared/api.ts";
+import type { Automation, Card, EndedSession, HistoryEntry, TaskDetail, TaskSummary, UnpushedWork, Work } from "../../shared/api.ts";
 import { gatewayZone, hostOrigin } from "../../shared/hosts.ts";
 import { projectCards } from "../cards.ts";
+import { DEPLOY_INSTRUCTION } from "../deploy.ts";
 import { fileClock, systemClock, type Clock } from "../scheduler/clock.ts";
-import { taskChanges } from "../changes.ts";
+import { runWork, taskWork, withBadges } from "../work.ts";
 import { CLOUDFLARE_API_PREFIX, CloudflareBroker } from "../cloudflare.ts";
 import type { GatewayConfig } from "../config.ts";
 import {
@@ -27,6 +28,7 @@ import {
   type RestoredSnapshot,
 } from "../git.ts";
 import { branchPullRequests } from "../github.ts";
+import { ompRequest } from "../omp-channel.ts";
 import { HostRuntime } from "../runtime/host.ts";
 import { CONTAINER_FOLDER, PodmanRuntime } from "../runtime/podman.ts";
 import type { LaunchInput, Runtime, WorkspaceDirs } from "../runtime/runtime.ts";
@@ -149,13 +151,80 @@ export class StoreService implements StoreContext {
     const { task } = this.store.getTask(principal, taskId);
     const { repoPath } = this.store.getProject(principal, task.projectId);
     if (repoPath !== null && task.branch !== null) {
-      for (const pr of (await branchPullRequests(repoPath, task.branch, "all")) ?? []) this.store.recordPullRequest(task.id, pr, pr.createdAt);
+      for (const pr of (await branchPullRequests(repoPath, task.branch)) ?? []) this.store.recordPullRequest(task.id, pr, pr.createdAt);
     }
     return this.store.taskHistory(principal, taskId);
   }
 
-  taskChanges(principal: Principal, taskId: string): Promise<TaskChanges> {
-    return taskChanges(this.store, (id) => this.dirs(id), principal, taskId);
+  /** BOARD-1, BOARD-3, CARD-6: the project's tasks, each unfinished one with its board badge. */
+  async listTasks(principal: Principal, projectId: string, search: string): Promise<TaskSummary[]> {
+    return withBadges(this.store, (id) => this.dirs(id), principal, projectId, this.store.listTasks(principal, projectId, search));
+  }
+
+  taskWork(principal: Principal, taskId: string): Promise<Work> {
+    return taskWork(this.store, (id) => this.dirs(id), principal, taskId);
+  }
+
+  runWork(principal: Principal, runId: string): Promise<Work> {
+    const { session } = this.store.getSession(principal, runId);
+    if (session.run === null) throw new StoreError(404, `session ${session.name} is no run of an automation`);
+    return runWork(this.store, (id) => this.dirs(id), principal, runId);
+  }
+
+  /**
+   * DEPLOY-1, AUTO-16: has the agent of a task, or of a run waiting for review, deploy: sends it
+   * DEPLOY_INSTRUCTION as a person's prompt in its chat (AGENT-3). A task without a running
+   * session gets one, as its last session ran, starting on the instruction; a stopped session
+   * starts again on its last chat first (SESSION-10). Returns the session told.
+   */
+  async deploy(principal: Principal, target: { kind: "task" | "run"; id: string }): Promise<Session> {
+    let session: Session;
+    if (target.kind === "task") {
+      const { task, sessions } = this.store.getTask(principal, target.id);
+      if (task.branch === null) throw new StoreError(409, `task ${task.title} has no branch yet: there is nothing to deploy`);
+      const running = sessions.find((candidate) => candidate.endedAt === null);
+      if (running === undefined) {
+        // Sessions come newest first.
+        const last = sessions.find((candidate) => !candidate.checkout);
+        return this.startSession(principal, task.id, { model: last?.model ?? undefined, runtime: last?.runtime }, DEPLOY_INSTRUCTION);
+      }
+      session = running;
+    } else {
+      const { session: run } = this.store.getSession(principal, target.id);
+      if (run.run === null) throw new StoreError(404, `session ${run.name} is no run of an automation`);
+      if (run.endedAt !== null || run.run.outcome !== "review") throw new StoreError(409, `run ${runShortId(run.id)} does not wait for review`);
+      session = run;
+    }
+    const runtime = this.runtimes?.[session.runtime];
+    if (runtime === undefined) throw new StoreError(409, "sessions run without containers here");
+    await this.startIfStopped(runtime, session);
+    try {
+      await this.agentAnswers(runtime, session.id);
+      await runtime.prompt(session.id, DEPLOY_INSTRUCTION);
+    } catch (cause) {
+      throw new StoreError(500, `could not tell the agent of ${session.name} to deploy: ${failure(cause)}`);
+    }
+    return session;
+  }
+
+  /** Waits until the session's omp answers on its channel, so a prompt typed into its chat reaches a live agent. */
+  private async agentAnswers(runtime: Runtime, sessionId: string): Promise<void> {
+    for (const deadline = Date.now() + TERN_START_MS; ;) {
+      if ((await ompRequest(this.dirs(sessionId).run, "state"))?.ok === true) return;
+      if (!(await runtime.running(sessionId))) throw new Error("the session stopped while starting");
+      if (Date.now() > deadline) throw new Error(`the agent did not answer within ${TERN_START_MS / 1000} s`);
+      await sleep(200);
+    }
+  }
+
+  /** SESSION-10: the session's processes, started again on its newest chat when they have stopped; everyone asking waits on the one start. */
+  private async startIfStopped(runtime: Runtime, session: Session): Promise<void> {
+    let start = this.starts.get(session.id);
+    if (start === undefined && !(await runtime.running(session.id))) {
+      start = this.restart(runtime, session).finally(() => this.starts.delete(session.id));
+      this.starts.set(session.id, start);
+    }
+    await start;
   }
 
   /** The running session whose Cloudflare writes the owner allows or revokes (AUTH-3); its project must have a write token. */
@@ -192,12 +261,7 @@ export class StoreService implements StoreContext {
     if (known !== undefined) return known;
     const runtime = this.runtimes?.[session.runtime];
     if (runtime === undefined) throw new StoreError(409, "sessions run without containers here");
-    let start = this.starts.get(sessionId);
-    if (start === undefined && !(await runtime.running(sessionId))) {
-      start = this.restart(runtime, session).finally(() => this.starts.delete(sessionId));
-      this.starts.set(sessionId, start);
-    }
-    await start;
+    await this.startIfStopped(runtime, session);
     let address: string;
     try {
       address = await runtime.ternAddress(sessionId);
@@ -351,6 +415,10 @@ export class StoreService implements StoreContext {
       "## Folder",
       `The task's folder is the directory \`${folder}\`, outside the worktree and outside git.`,
     ];
+    // DEPLOY-1: a person telling the agent to deploy has it do what Deploy on the task's page sends.
+    if (checkout === null) {
+      sections.push("## Deploying", `When a person tells you to deploy, do what Deploy on the task's page sends you: ${DEPLOY_INSTRUCTION}`);
+    }
     if (restored.kind === "restored") {
       sections.push("## Restored work", "The task's previous session ended with uncommitted changes. They are back in the worktree, still uncommitted: commit what belongs to the task.");
     } else if (restored.kind === "conflicts") {
@@ -416,10 +484,10 @@ export class StoreService implements StoreContext {
    * Starts a session on the task (TASK-3, TASK-5): a worktree of the task's branch, which its
    * first session creates (TASK-4), with the previous session's uncommitted work restored
    * (SESSION-9), and its agent in a container or on the host (HOST-1). A checkout session
-   * works in the main checkout instead (HOST-6), among the user's omp chats (HOST-7). Undone
-   * if the launch fails.
+   * works in the main checkout instead (HOST-6), among the user's omp chats (HOST-7). Its chat
+   * waits for a person, or starts on `prompt` (DEPLOY-1). Undone if the launch fails.
    */
-  async startSession(principal: Principal, taskId: string, input: SessionInput): Promise<Session> {
+  async startSession(principal: Principal, taskId: string, input: SessionInput, prompt: string | null = null): Promise<Session> {
     const { task } = this.store.getTask(principal, taskId);
     const project = this.store.getProject(principal, task.projectId);
     const kind = input.runtime ?? "container";
@@ -461,7 +529,7 @@ export class StoreService implements StoreContext {
       await this.launch(runtime, repo, project, started, {
         model: input.model ?? null,
         resume: null,
-        prompt: null,
+        prompt,
         taskContext: this.taskContext(task.id, restored, created.checkout ? repo : null, kind),
       });
       return started;
