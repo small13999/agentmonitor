@@ -127,19 +127,19 @@ export class Gateway {
     rmSync(this.stateDir, { recursive: true, force: true });
   }
 
-  /** A human request through the gateway, as the web UI makes it. */
-  async api(method: string, path: string, body?: unknown): Promise<ApiResult> {
+  /** A human request through the gateway, as the web UI makes it; `headers` carry e.g. an Access token. */
+  async api(method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<ApiResult> {
     const response = await fetch(`${this.url}/api/store${path}`, {
       method,
-      headers: body === undefined ? {} : { "content-type": "application/json" },
+      headers: body === undefined ? headers : { ...headers, "content-type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     return { status: response.status, body: await response.json() as ApiResult["body"] };
   }
 
   /** Like `api`, but fails the test unless the request succeeded, and returns its data. */
-  async data<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const result = await this.api(method, path, body);
+  async data<T>(method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<T> {
+    const result = await this.api(method, path, body, headers);
     if (!result.body.ok) throw new Error(`${method} ${path} -> ${result.status} ${result.body.error}`);
     return result.body.data as T;
   }

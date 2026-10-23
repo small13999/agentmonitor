@@ -5,11 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before } from "node:test";
 import { chromium, type Browser } from "playwright";
-import type { Comment, FolderFile, Project, Session, StoreListing, Task, TaskDetail } from "../shared/api.ts";
+import type { Comment, FolderFile, Person, Project, Session, StoreListing, Task, TaskDetail } from "../shared/api.ts";
+import { AUDIENCE, FakeAccess } from "./fake-access.ts";
 import { buildApp, Gateway } from "./harness.ts";
 import { spec } from "./spec.ts";
 
-const TOKEN = "hub-access-token";
+/** The hub's owner, as Cloudflare Access names them. */
+const OWNER = "armin@example.com";
 
 /**
  * Cloudflare's edge in front of a hub: it turns the client's `cf-access-token` into the
@@ -48,17 +50,34 @@ async function startEdge(origin: string): Promise<{ url: string; tokens: string[
   };
 }
 
-/** A hub in local mode behind its edge, and a client whose hubs.json names it and a hub it cannot get a token for. */
+/**
+ * A hub in Access mode behind its edge, and a client whose hubs.json names it twice, once with
+ * the owner's token and once with the token of someone who is no person of the hub, and a hub it
+ * cannot get a token for.
+ */
 async function hubAndClient() {
-  const hub = await Gateway.start();
+  const hub = await Gateway.start({
+    runtime: "none",
+    env: {
+      AGENTMONITOR_AUTH_MODE: "access",
+      AGENTMONITOR_ACCESS_TEAM_DOMAIN: access.url,
+      AGENTMONITOR_ACCESS_AUD: AUDIENCE,
+      AGENTMONITOR_OWNER_EMAIL: OWNER,
+    },
+  });
   const edge = await startEdge(hub.url);
+  const ownerToken = access.token(OWNER);
+  const strangerToken = access.token("eve@example.com");
   const configDir = mkdtempSync(join(tmpdir(), "am-client-config-"));
   writeFileSync(join(configDir, "hubs.json"), JSON.stringify([
-    { name: "draftcoach", url: edge.url, tokenCommand: ["echo", TOKEN] },
+    { name: "draftcoach", url: edge.url, tokenCommand: ["echo", ownerToken] },
+    { name: "stranger", url: edge.url, tokenCommand: ["echo", strangerToken] },
     { name: "broken", url: "http://127.0.0.1:9", tokenCommand: ["sh", "-c", "echo 'not logged in' >&2; exit 1"] },
   ]));
   const client = await Gateway.start({ runtime: "none", env: { AGENTMONITOR_CONFIG_DIR: configDir } });
   stops.push(() => client.stop(), () => hub.stop(), async () => edge.close());
+  /** What the test sends the hub directly comes through the edge as the owner's. */
+  const asOwner = { "cf-access-jwt-assertion": ownerToken };
   /** The client's store API of hub `draftcoach`, as the app calls it. */
   const viaClient = async <T>(method: string, path: string, body?: unknown): Promise<{ status: number; ok: boolean; data: T; error?: string }> => {
     const response = await fetch(`${client.url}/api/hubs/draftcoach/store${path}`, {
@@ -72,33 +91,37 @@ async function hubAndClient() {
     const response = await fetch(`${client.url}/api/stores`);
     return (await response.json() as { data: StoreListing[] }).data;
   };
-  return { hub, edge, client, viaClient, stores };
+  return { hub, edge, client, viaClient, stores, asOwner, ownerToken, strangerToken };
 }
 
 const stops: Array<() => Promise<void>> = [];
 let chrome: Browser;
+let access: FakeAccess;
 
 before(async () => {
   buildApp();
-  chrome = await chromium.launch();
+  [chrome, access] = await Promise.all([chromium.launch(), FakeAccess.start()]);
 });
 after(async () => {
   await chrome?.close();
+  await access?.stop();
   for (const stop of stops) await stop();
 });
 
 spec("STORE-3", "a client lists its hubs' projects beside its own, shows a hub project as the hub's site does, and marks an unreachable hub unavailable", async () => {
-  const { hub, edge, client, viaClient, stores } = await hubAndClient();
+  const { hub, edge, client, viaClient, stores, asOwner, ownerToken, strangerToken } = await hubAndClient();
   const local = await client.data<Project>("POST", "/projects", { name: "agentmonitor" });
-  const project = await hub.data<Project>("POST", "/projects", { name: "draftcoach" });
-  const task = await hub.data<Task>("POST", `/projects/${project.id}/tasks`, { title: "Patch notes 26.21", description: "Translate the **JP** notes." });
-  await hub.data("POST", `/tasks/${task.id}/comments`, { body: "Notes are in the folder." });
+  const project = await hub.data<Project>("POST", "/projects", { name: "draftcoach" }, asOwner);
+  const task = await hub.data<Task>("POST", `/projects/${project.id}/tasks`, { title: "Patch notes 26.21", description: "Translate the **JP** notes." }, asOwner);
+  await hub.data("POST", `/tasks/${task.id}/comments`, { body: "Notes are in the folder." }, asOwner);
+  const owner = (await hub.data<{ person: Person }>("GET", "/me", undefined, asOwner)).person;
 
-  // Both stores' projects; the hub that gives no token says why.
+  // Both stores' projects; a hub that refuses the token, or gives none, says why.
   const listed = await stores();
   assert.deepEqual(listed.map((store) => [store.hub, store.projects.map((candidate) => candidate.id), store.unavailable]), [
     [null, [local.id], null],
     ["draftcoach", [project.id], null],
+    ["stranger", [], "the hub answered 403: eve@example.com is not a person of this hub: ask its owner to add you"],
     ["broken", [], "token command failed: not logged in"],
   ]);
 
@@ -112,6 +135,7 @@ spec("STORE-3", "a client lists its hubs' projects beside its own, shows a hub p
     [
       ["Agent Monitor", ["agentmonitor"]],
       ["draftcoach", ["draftcoach"]],
+      ["stranger (unavailable)", ["Unavailable: the hub answered 403: eve@example.com is not a person of this hub: ask its owner to add you"]],
       ["broken (unavailable)", ["Unavailable: token command failed: not logged in"]],
     ],
   );
@@ -125,23 +149,26 @@ spec("STORE-3", "a client lists its hubs' projects beside its own, shows a hub p
   const comments = page.getByRole("region", { name: "Comments" });
   await comments.locator(".comment", { hasText: "Notes are in the folder." }).waitFor();
 
-  // A comment written in the client is the hub's.
+  // A comment written in the client is the hub's, by the person the token names.
   await comments.getByRole("textbox", { name: "Comment", exact: true }).fill("Ship **after** QA");
   await comments.getByRole("button", { name: "Comment", exact: true }).click();
   await comments.locator(".comment strong", { hasText: "after" }).waitFor();
-  assert.deepEqual((await hub.data<Comment[]>("GET", `/tasks/${task.id}/comments`)).map((comment) => comment.body), ["Notes are in the folder.", "Ship **after** QA"]);
+  const written = await hub.data<Comment[]>("GET", `/tasks/${task.id}/comments`, undefined, asOwner);
+  assert.deepEqual(written.map((comment) => [comment.author, comment.body]), [
+    [{ kind: "person", personId: owner.id }, "Notes are in the folder."],
+    [{ kind: "person", personId: owner.id }, "Ship **after** QA"],
+  ]);
 
   // A folder's file goes to the hub and comes back as bytes.
   const uploaded = await fetch(`${client.url}/api/hubs/draftcoach/store/tasks/${task.id}/folder/notes/jp.txt`, { method: "PUT", body: "パッチノート" });
   assert.equal(uploaded.status, 200);
-  assert.deepEqual((await hub.data<FolderFile[]>("GET", `/tasks/${task.id}/folder`)).map((file) => file.path), ["notes/jp.txt"]);
+  assert.deepEqual((await hub.data<FolderFile[]>("GET", `/tasks/${task.id}/folder`, undefined, asOwner)).map((file) => file.path), ["notes/jp.txt"]);
   const downloaded = await fetch(`${client.url}/api/hubs/draftcoach/store/tasks/${task.id}/folder/notes/jp.txt`);
   assert.equal(await downloaded.text(), "パッチノート");
   assert.equal((await viaClient<TaskDetail>("GET", `/tasks/${task.id}`)).data.task.title, "Patch notes 26.21");
 
-  // Every request reached the hub with the client's token.
-  assert.ok(edge.tokens.length > 0);
-  assert.deepEqual([...new Set(edge.tokens)], [TOKEN]);
+  // Every request reached the hub with a token of the client's hubs.json, which the hub checked.
+  assert.deepEqual(new Set(edge.tokens), new Set([ownerToken, strangerToken]));
 
   // A stopped hub is unavailable, with why; its project stays listed and says so.
   await hub.stop();
@@ -155,14 +182,14 @@ spec("STORE-3", "a client lists its hubs' projects beside its own, shows a hub p
 });
 
 spec("STORE-4", "starting a session in a hub project starts it on the hub, and fails naming the hub when it is unreachable", async () => {
-  const { hub, viaClient } = await hubAndClient();
-  const project = await hub.data<Project>("POST", "/projects", { name: "draftcoach" });
-  const first = await hub.data<Task>("POST", `/projects/${project.id}/tasks`, { title: "Leaderboard" });
-  const second = await hub.data<Task>("POST", `/projects/${project.id}/tasks`, { title: "Client fixes" });
+  const { hub, viaClient, asOwner } = await hubAndClient();
+  const project = await hub.data<Project>("POST", "/projects", { name: "draftcoach" }, asOwner);
+  const first = await hub.data<Task>("POST", `/projects/${project.id}/tasks`, { title: "Leaderboard" }, asOwner);
+  const second = await hub.data<Task>("POST", `/projects/${project.id}/tasks`, { title: "Client fixes" }, asOwner);
 
   const started = await viaClient<Session>("POST", `/tasks/${first.id}/sessions`, {});
   assert.equal(started.ok, true, started.error ?? "");
-  assert.deepEqual((await hub.data<Session[]>("GET", `/projects/${project.id}/sessions`)).map((session) => session.id), [started.data.id]);
+  assert.deepEqual((await hub.data<Session[]>("GET", `/projects/${project.id}/sessions`, undefined, asOwner)).map((session) => session.id), [started.data.id]);
 
   await hub.stop();
   const refused = await viaClient<Session>("POST", `/tasks/${second.id}/sessions`, {});

@@ -97,8 +97,9 @@ Unnumbered intent; not testable, so not claims.
   with an error naming the store.
 - **STORE-5** Every action and every piece of data shown in the UI is available
   to agents as a tool backed by the same store API endpoint.
-- **STORE-6** Moving a store to another machine keeps every project, topic, task,
-  comment, folder, and chat.
+- **STORE-6** Moving a project to another store keeps its topics, tasks,
+  comments, folders, chats, and who did what; afterwards the project lives only in
+  the new store.
 
 ## Access
 

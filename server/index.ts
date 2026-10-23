@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { readFile, stat } from "node:fs/promises";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { handleApi, sendJson } from "./api.ts";
-import { AuthStore } from "./auth.ts";
+import { Auth, sendRefusal } from "./auth.ts";
 import { loadConfig } from "./config.ts";
 import { Hubs, loadHubs } from "./hubs.ts";
 import { StoreService } from "./store/service.ts";
@@ -47,11 +47,11 @@ async function serveStatic(request: IncomingMessage, response: ServerResponse, d
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const auth = new AuthStore(config);
   const hubs = new Hubs(loadHubs(config.configDir));
   const store = new StoreService(config.stateDir, config);
   await store.start();
-  const tern = new TernProxy({ config, auth, store });
+  const auth = new Auth(config, store.store);
+  const tern = new TernProxy({ auth, store });
   const distDir = resolve(process.cwd(), "dist");
   const bindHost = process.env.AGENTMONITOR_BIND_HOST ?? "127.0.0.1";
 
@@ -60,7 +60,12 @@ async function main(): Promise<void> {
       // Tern hosts first: they are sessions' chats, not the monitor.
       if (await tern.handleRequest(request, response)) return;
       if (await handleApi(request, response, { config, auth, store, hubs })) return;
-      if (auth.validHost(request, config.publicOrigin) && (await serveStatic(request, response, distDir))) return;
+      const visitor = await auth.identify(request);
+      if (visitor.kind === "refused") {
+        sendRefusal(response, visitor);
+        return;
+      }
+      if (await serveStatic(request, response, distDir)) return;
       sendJson(response, 404, { ok: false, error: "unknown endpoint" });
     } catch (cause) {
       console.error("gateway request failed", cause);
