@@ -45,8 +45,8 @@ function useRoute(): Route {
   return route;
 }
 
-/** UI-3: a new project; host sessions only where the user allows them (HOST-1). */
-function NewProject({ onCreated, onCancel }: { onCreated: (project: Project) => void; onCancel: (() => void) | null }) {
+/** UI-3: a new project; host sessions only where the store's owner allows them (HOST-1). */
+function NewProject({ owner, onCreated, onCancel }: { owner: boolean; onCreated: (project: Project) => void; onCancel: (() => void) | null }) {
   const [error, setError] = useState<string | null>(null);
   const submit = (event: SubmitEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -55,7 +55,7 @@ function NewProject({ onCreated, onCancel }: { onCreated: (project: Project) => 
     api<Project>("POST", "/projects", {
       name: String(form.get("name")).trim(),
       ...(repoPath === "" ? {} : { repoPath }),
-      hostSessions: form.get("hostSessions") === "on",
+      ...(owner ? { hostSessions: form.get("hostSessions") === "on" } : {}),
     }).then(onCreated, (cause: Error) => setError(cause.message));
   };
   return (
@@ -63,35 +63,17 @@ function NewProject({ onCreated, onCancel }: { onCreated: (project: Project) => 
       <h2>New project</h2>
       <label>Name<input name="name" required autoFocus placeholder="draftcoach" /></label>
       <label>Repository<input name="repoPath" placeholder="/home/you/projects/draftcoach" /></label>
-      <label className="check">
-        <input type="checkbox" name="hostSessions" />
-        Allow host sessions: agents may run on this machine as you, without a container
-      </label>
+      {owner && (
+        <label className="check">
+          <input type="checkbox" name="hostSessions" />
+          Allow host sessions: agents may run on this machine as you, without a container
+        </label>
+      )}
       {error && <p className="error">{error}</p>}
       <div className="actions">
         <button type="submit">Create project</button>
         {onCancel !== null && <button type="button" className="ghost" onClick={onCancel}>Cancel</button>}
       </div>
-    </form>
-  );
-}
-
-/** A remote gateway (AGENTMONITOR_AUTH_MODE=remote-cookie) asks for its login secret first. */
-function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
-  const [error, setError] = useState<string | null>(null);
-  const submit = (event: SubmitEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const secret = String(new FormData(event.currentTarget).get("secret"));
-    fetch("/api/auth/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ secret }) })
-      .then((response) => response.ok ? onLoggedIn() : setError(response.status === 429 ? "Too many attempts; wait a minute." : "Wrong secret."))
-      .catch((cause: Error) => setError(cause.message));
-  };
-  return (
-    <form className="panel new-project" onSubmit={submit}>
-      <h2>Agent Monitor</h2>
-      <label>Login secret<input name="secret" type="password" required autoFocus autoComplete="current-password" /></label>
-      {error && <p className="error">{error}</p>}
-      <button type="submit">Log in</button>
     </form>
   );
 }
@@ -172,12 +154,13 @@ function App() {
     window.location.hash = "#/";
   };
 
-  if (projects.error === "authentication required") return <main className="empty"><Login onLoggedIn={projects.refresh} /></main>;
+  const owner = me.data?.person.owner === true;
   if (projects.data === null) return <main className="empty">{projects.error ?? "Loading…"}</main>;
   if (project === null || creatingProject) {
     return (
       <main className="empty">
         <NewProject
+          owner={owner}
           onCreated={(created) => { projects.refresh(); choose(created.id); }}
           onCancel={project === null ? null : () => setCreatingProject(false)}
         />
@@ -247,7 +230,7 @@ function App() {
                 <TaskPage key={current.task.id} summary={current} card={currentCard} topics={topics.data ?? []} onChanged={refresh} />
               )}
               {current.sessionId === null && tab === "chat" && (
-                <StartSession task={current.task} hostSessions={project.hostSessions} onStarted={refresh} />
+                <StartSession task={current.task} hostSessions={project.hostSessions && owner} onStarted={refresh} />
               )}
               {tab === "settings" && <TaskSettings key={current.task.id} summary={current} card={currentCard} onChanged={refresh} />}
             </>
