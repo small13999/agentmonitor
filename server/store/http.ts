@@ -1,11 +1,16 @@
-import type { IncomingMessage, ServerResponse } from "node:http";
+import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from "node:http";
+import type { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { z } from "zod";
 import type { Card, EndedSession } from "../../shared/api.ts";
+import type { TaskFolders } from "./folders.ts";
 import { StoreError, type Principal, type Session, type Store, type Task } from "./store.ts";
 
 /** What a store route can touch: the database plus the session lifecycle owned by the gateway. */
 export interface StoreContext {
   store: Store;
+  /** FOLDER-1..3: every task's folder, files outside git. */
+  folders: TaskFolders;
   /** Records a session of the task and launches its worktree and container; undone if the launch fails. */
   startSession(principal: Principal, taskId: string, input: SessionInput): Promise<Session>;
   /** Ends the session and removes its workspace; its uncommitted work becomes the task's snapshot. */
@@ -47,7 +52,21 @@ export type SessionInput = z.infer<typeof sessionBody>;
 const statusBody = z.strictObject({ status: z.string().max(64 * 1024), baseRevision: z.int().min(0) });
 const notesBody = z.strictObject({ text: z.string().max(64 * 1024), baseRevision: z.int().min(0) });
 
-type Handler = (c: StoreContext, principal: Principal, params: string[], body: () => Promise<unknown>) => unknown;
+/** A route's answer that is a file's bytes instead of JSON. */
+export class FileResponse {
+  readonly status: number;
+  readonly headers: OutgoingHttpHeaders;
+  readonly body: Readable;
+
+  constructor(status: number, headers: OutgoingHttpHeaders, body: Readable) {
+    this.status = status;
+    this.headers = headers;
+    this.body = body;
+  }
+}
+
+/** `body` reads the request as JSON; `request` is there for the routes that stream it (FOLDER-1) or read its headers. */
+type Handler = (c: StoreContext, principal: Principal, params: string[], body: () => Promise<unknown>, request: IncomingMessage) => unknown;
 
 interface Route {
   method: string;
@@ -113,7 +132,27 @@ const routes: Route[] = [
     pattern: new RegExp(`^/tasks/${id}$`),
     handler: async (c, p, [taskId], body) => c.store.updateTask(p, taskId, taskUpdateBody.parse(await body())),
   },
-  { method: "GET", pattern: new RegExp(`^/tasks/${id}/history$`), handler: (c, p, [taskId]) => c.store.taskHistory(p, taskId) },
+  {
+    method: "GET",
+    pattern: new RegExp(`^/tasks/${id}/history$`),
+    // Files an agent wrote into the folder are history too (FOLDER-3).
+    handler: (c, p, [taskId]) => {
+      c.folders.list(p, taskId);
+      return c.store.taskHistory(p, taskId);
+    },
+  },
+  { method: "GET", pattern: new RegExp(`^/tasks/${id}/folder$`), handler: (c, p, [taskId]) => c.folders.list(p, taskId) },
+  { method: "GET", pattern: new RegExp(`^/tasks/${id}/folder\\.zip$`), handler: (c, p, [taskId]) => c.folders.zip(p, taskId) },
+  {
+    method: "GET",
+    pattern: new RegExp(`^/tasks/${id}/folder/(.+)$`),
+    // `?download` asks for an attachment instead of the file shown inline.
+    handler: (c, p, [taskId, path], _, request) =>
+      c.folders.download(p, taskId, path, request.headers.range, new URL(request.url ?? "/", "http://localhost").searchParams.has("download")),
+  },
+  // The body is the file's bytes, streamed into the folder: no JSON and no JSON size limit.
+  { method: "PUT", pattern: new RegExp(`^/tasks/${id}/folder/(.+)$`), handler: (c, p, [taskId, path], _, request) => c.folders.upload(p, taskId, path, request) },
+  { method: "DELETE", pattern: new RegExp(`^/tasks/${id}/folder/(.+)$`), handler: (c, p, [taskId, path]) => c.folders.remove(p, taskId, path) },
   {
     method: "POST",
     pattern: new RegExp(`^/tasks/${id}/finish$`),
@@ -211,7 +250,13 @@ export async function handleStoreApi(
   }
   try {
     const params = route.pattern.exec(path)?.slice(1) ?? [];
-    const data = await route.handler(context, principal, params, () => readBody(request));
+    const data = await route.handler(context, principal, params, () => readBody(request), request);
+    if (data instanceof FileResponse) {
+      response.writeHead(data.status, data.headers);
+      // Once the head is out, a failed read can only cut the response short.
+      await pipeline(data.body, response).catch(() => response.destroy());
+      return;
+    }
     send(response, 200, { ok: true, data });
   } catch (cause) {
     if (cause instanceof StoreError) {

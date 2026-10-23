@@ -70,7 +70,7 @@ spec("UI-2", "a task's workspace has Chat and Notes tabs, starts sessions, and h
   await page.goto(`${gateway.url}/#/t/${target.id}`);
   const tabs = page.getByRole("tablist", { name: "Workspace" });
   await tabs.getByRole("tab", { name: "Chat" }).waitFor();
-  assert.deepEqual(await tabs.getByRole("tab").allTextContents(), ["Chat", "Notes"]);
+  assert.deepEqual(await tabs.getByRole("tab").allTextContents(), ["Chat", "Notes", "Folder"]);
 
   // Without a session, the chat tab starts one.
   await page.getByRole("region", { name: "Start session" }).getByRole("button", { name: "Start session" }).click();

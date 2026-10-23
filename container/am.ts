@@ -2,9 +2,11 @@
 // or on the host. Talks to the session's store socket; the socket identifies the session, so
 // no credentials.
 import { execFileSync } from "node:child_process";
-import { request } from "node:http";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { createReadStream, createWriteStream, readFileSync, statSync } from "node:fs";
+import { request, type IncomingMessage } from "node:http";
+import { basename, dirname, join } from "node:path";
+import type { Writable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
 const USAGE = `usage: am [--json] COMMAND
 
@@ -31,6 +33,11 @@ const USAGE = `usage: am [--json] COMMAND
   topic link NAME...                  link this session's task to topics
   topic unlink NAME...                unlink this session's task from topics
   session show [ID]                   a session and its task (default: this one)
+  folder                              the files in the task's folder: who added each, when
+  folder add FILE [PATH]              put FILE into the folder as PATH (default: its name),
+                                      replacing a file there
+  folder get PATH [FILE]              write the folder's file PATH to FILE (default: stdout)
+  folder rm PATH                      delete the folder's file PATH
 
 environment: AM_SOCKET (default /run/agentmonitor/am.sock)`;
 
@@ -69,12 +76,66 @@ async function call(method: string, path: string, body?: unknown): Promise<unkno
   req.on("error", (error) => reject(new CliError(`cannot reach the store at ${socketPath}: ${error.message}`)));
   req.end(payload);
   const { text } = await promise;
+  return envelopeOf(text);
+}
+
+function envelopeOf(text: string): unknown {
   const envelope = JSON.parse(text) as Envelope;
   if (!envelope.ok) {
     const extra = envelope.currentRevision === undefined ? "" : ` (current revision ${envelope.currentRevision})`;
     throw new CliError(`${envelope.error ?? "request failed"}${extra}`);
   }
   return envelope.data;
+}
+
+/** A file in the task's folder, as the store's routes name it. */
+function folderRoute(taskId: string, path: string): string {
+  return `/tasks/${taskId}/folder/${path.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+/**
+ * FOLDER-1: a request whose body or answer is a file's bytes, streamed: `upload` is the file
+ * to send; `sink` opens where a successful answer goes. Refusals answer JSON, as `call`'s do.
+ */
+async function transfer(method: string, path: string, upload: string | null, sink: (() => Writable) | null): Promise<unknown> {
+  const { promise, resolve, reject } = Promise.withResolvers<IncomingMessage>();
+  const req = request({ socketPath, path: `/api/store${path}`, method }, resolve);
+  req.on("error", (error) => reject(new CliError(`cannot reach the store at ${socketPath}: ${error.message}`)));
+  if (upload === null) req.end();
+  else pipeline(createReadStream(upload), req).catch((error: unknown) => req.destroy(error instanceof Error ? error : undefined));
+  const response = await promise;
+  if (response.statusCode === 200 && sink !== null) {
+    const target = sink();
+    await pipeline(response, target, { end: target !== process.stdout });
+    return null;
+  }
+  let text = "";
+  response.setEncoding("utf8");
+  for await (const chunk of response) text += chunk;
+  return envelopeOf(text);
+}
+
+interface FolderFile {
+  path: string;
+  size: number;
+  addedBy: { kind: "person"; personId: string } | { kind: "agent"; sessionId: string } | null;
+  addedAt: number;
+}
+
+function folderFileOf(value: unknown): FolderFile {
+  if (!isRecord(value) || typeof value.path !== "string" || typeof value.size !== "number" || typeof value.addedAt !== "number") {
+    throw new CliError("the store answered with something that is not a folder file");
+  }
+  const by = value.addedBy;
+  const addedBy = isRecord(by) && by.kind === "person" && typeof by.personId === "string"
+    ? { kind: "person" as const, personId: by.personId }
+    : isRecord(by) && by.kind === "agent" && typeof by.sessionId === "string" ? { kind: "agent" as const, sessionId: by.sessionId } : null;
+  return { path: value.path, size: value.size, addedBy, addedAt: value.addedAt };
+}
+
+function folderFilesOf(value: unknown): FolderFile[] {
+  if (!Array.isArray(value)) throw new CliError("the store answered with something that is not a folder");
+  return value.map(folderFileOf);
 }
 
 interface Session {
@@ -341,6 +402,38 @@ async function main(args: string[]): Promise<void> {
       `branch ${typeof session.branch === "string" ? session.branch : "none"}`,
       typeof session.endedAt === "number" ? `ended ${new Date(session.endedAt).toISOString()}` : "running",
     ].join("\n"));
+    return;
+  }
+
+  if (group === "folder" && command === undefined) {
+    const files = folderFilesOf(await call("GET", `/tasks/${me.task.id}/folder`));
+    const people = new Map((await call("GET", "/people") as Array<{ id: string; name: string }>).map((person) => [person.id, person.name]));
+    const lines = files.map((file) => {
+      const by = file.addedBy;
+      const who = by === null
+        ? "unknown"
+        : by.kind === "person"
+          ? people.get(by.personId) ?? "someone"
+          : by.sessionId === me.session.id ? "this session's agent" : `the agent of session ${by.sessionId}`;
+      return `${file.path}\t${file.size} bytes\tadded by ${who}\t${new Date(file.addedAt).toISOString()}`;
+    });
+    print(json, files, () => lines.length === 0 ? "the folder is empty" : lines.join("\n"));
+    return;
+  }
+  if (group === "folder" && command === "add" && (rest.length === 1 || rest.length === 2)) {
+    if (!statSync(rest[0], { throwIfNoEntry: false })?.isFile()) throw new CliError(`${rest[0]} is not a file`);
+    const added = folderFileOf(await transfer("PUT", folderRoute(me.task.id, rest[1] ?? basename(rest[0])), rest[0], null));
+    print(json, added, () => `added ${added.path} (${added.size} bytes)`);
+    return;
+  }
+  if (group === "folder" && command === "get" && (rest.length === 1 || rest.length === 2)) {
+    const target = rest[1];
+    await transfer("GET", folderRoute(me.task.id, rest[0]), null, () => target === undefined ? process.stdout : createWriteStream(target));
+    return;
+  }
+  if (group === "folder" && command === "rm" && rest.length === 1) {
+    const left = folderFilesOf(await call("DELETE", folderRoute(me.task.id, rest[0])));
+    print(json, left, () => `deleted ${rest[0]}; ${left.length} file(s) left`);
     return;
   }
 

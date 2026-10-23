@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, ApiError, usePolled, type Session, type SessionRuntime, type Task, type TaskNotes } from "./api.ts";
 
-export type WorkspaceTab = "chat" | "notes";
+export type WorkspaceTab = "chat" | "notes" | "folder";
 
 /** Typing pauses this long before the notes are saved. */
 const SAVE_DELAY_MS = 500;
@@ -15,7 +15,7 @@ function GearIcon() {
   );
 }
 
-/** UI-2: the task workspace's tabs, Chat and Notes, and at the far right its settings. */
+/** UI-2: the task workspace's tabs, Chat, Notes, and Folder, and at the far right its settings. */
 export function WorkspaceTabs({ taskId, tab, settingsOpen, onSettings }: {
   taskId: string;
   tab: WorkspaceTab;
@@ -25,6 +25,7 @@ export function WorkspaceTabs({ taskId, tab, settingsOpen, onSettings }: {
   const tabs: Array<{ id: WorkspaceTab; label: string; href: string }> = [
     { id: "chat", label: "Chat", href: `#/t/${taskId}` },
     { id: "notes", label: "Notes", href: `#/t/${taskId}/notes` },
+    { id: "folder", label: "Folder", href: `#/t/${taskId}/folder` },
   ];
   return (
     <header className="workspace-tabs">

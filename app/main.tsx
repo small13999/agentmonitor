@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { api, usePolled, type Card, type Project, type TaskSummary, type Topic } from "./api.ts";
 import { Board } from "./Board.tsx";
 import { SessionFrames } from "./SessionFrames.tsx";
+import { TaskFolder } from "./Folder.tsx";
 import { TaskList } from "./TaskList.tsx";
 import { Notes, StartSession, WorkspaceTabs, type WorkspaceTab } from "./Workspace.tsx";
 import { WorkspaceSettings } from "./WorkspaceSettings.tsx";
@@ -14,11 +15,14 @@ interface Route {
   tab: WorkspaceTab;
 }
 
-/** `#/` is the board, `#/t` the task list, `#/t/<task id>` a task's chat, `#/t/<task id>/notes` its notes. */
+/**
+ * `#/` is the board, `#/t` the task list, `#/t/<task id>` a task's chat, `#/t/<task id>/notes`
+ * its notes, `#/t/<task id>/folder` its folder.
+ */
 function readRoute(): Route {
-  const match = /^#\/t(?:\/([0-9a-f-]{36})(\/notes)?)?$/.exec(window.location.hash);
+  const match = /^#\/t(?:\/([0-9a-f-]{36})(?:\/(notes|folder))?)?$/.exec(window.location.hash);
   if (match === null) return { page: "board", taskId: null, tab: "chat" };
-  return { page: "tasks", taskId: match[1] ?? null, tab: match[2] === undefined ? "chat" : "notes" };
+  return { page: "tasks", taskId: match[1] ?? null, tab: match[2] === "notes" || match[2] === "folder" ? match[2] : "chat" };
 }
 
 function useRoute(): Route {
@@ -188,6 +192,11 @@ function App() {
                 <StartSession task={current.task} hostSessions={project.hostSessions} onStarted={refresh} />
               )}
               <Notes key={current.task.id} taskId={current.task.id} hidden={tab !== "notes"} />
+              {tab === "folder" && (
+                <div className="workspace-page folder-tab">
+                  <TaskFolder key={current.task.id} taskId={current.task.id} />
+                </div>
+              )}
               {settingsOpen && (
                 <WorkspaceSettings
                   key={current.task.id}
