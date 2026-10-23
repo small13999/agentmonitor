@@ -5,7 +5,7 @@
 // Every client is also pushed {type:"turn", turn} whenever the main agent's turn changes.
 // The conversation itself reaches the web UI through Tern's chat (omp over ACP), not this channel.
 import { rmSync } from "node:fs";
-import { connect, createServer, type Server, type Socket } from "node:net";
+import { createServer, type Server, type Socket } from "node:net";
 
 // The slice of omp's extension API this file uses; omp's type package is not a dependency.
 interface Ctx {
@@ -27,7 +27,10 @@ interface ExtensionApi {
 /** done: no turn running; working: a turn is running; blocked: the turn waits for the user. */
 type Turn = "done" | "working" | "blocked";
 
-const socketPath = process.env.AGENTMONITOR_OMP_SOCKET ?? "/run/agentmonitor/omp.sock";
+// The session's chats get the channel's path from their launch (container/launch.ts), and every
+// omp the agent starts itself (a test suite, `omp -p`) inherits it with this extension. Only the
+// chat's omp, whose parent is acp-filter.ts, takes the channel; a newer chat takes it over.
+const socketPath = process.env.AGENTMONITOR_CHAT === String(process.ppid) ? process.env.AGENTMONITOR_OMP_SOCKET : undefined;
 
 const clients = new Set<Socket>();
 let server: Server | null = null;
@@ -73,8 +76,9 @@ function handle(socket: Socket, line: string): void {
   }
 }
 
-function listen(): void {
-  rmSync(socketPath, { force: true });
+function listen(path: string): void {
+  // A newer chat of the session (and omp's next session in this process) takes the channel over.
+  rmSync(path, { force: true });
   server = createServer((socket) => {
     clients.add(socket);
     socket.on("close", () => clients.delete(socket));
@@ -96,24 +100,7 @@ function listen(): void {
   });
   // An extension that throws takes the session down with it; a dead channel must not.
   server.on("error", (error) => console.error(`agentmonitor channel: ${error.message}`));
-  server.listen(socketPath);
-}
-
-/**
- * Takes the channel unless a live omp already answers on it: an omp the agent runs itself (a
- * test suite, `omp -p`) inherits the session's environment, this extension included, and must
- * leave the session's channel alone. A socket file nobody answers on is a dead session's.
- */
-function claim(): void {
-  let answered = false;
-  const probe = connect(socketPath);
-  probe.once("connect", () => {
-    answered = true;
-    probe.destroy();
-  });
-  probe.on("error", () => {
-    if (!answered) listen();
-  });
+  server.listen(path);
 }
 
 export default function agentmonitor(api: ExtensionApi): void {
@@ -134,7 +121,7 @@ export default function agentmonitor(api: ExtensionApi): void {
 
   main("session_start", (_event, ctx) => {
     live = ctx;
-    if (server === null) claim();
+    if (server === null && socketPath !== undefined) listen(socketPath);
   });
   track("agent_start", () => { running = true; });
   track("agent_end", () => {
