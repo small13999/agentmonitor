@@ -21,20 +21,23 @@ function GearIcon() {
 }
 
 /**
- * UI-2: a task's tabs: its Page, its Chat, and at the far right, with the gear, its Settings.
- * Each tab is a link, so a tab has its own address.
+ * UI-2: a task's or an automation's tabs: its Page, its Chat, and at the far right, with the
+ * gear, its Settings. Each tab is a link, so a tab has its own address: the page at `base`,
+ * settings at `<base>/settings`, the chat at `chat`; null: no chat to show, so no Chat tab.
  */
-export function WorkspaceTabs({ taskId, tab }: { taskId: string; tab: WorkspaceTab }) {
+export function WorkspaceTabs({ base, tab, chat }: { base: string; tab: WorkspaceTab; chat: string | null }) {
   return (
     <header className="workspace-tabs">
       <nav role="tablist" aria-label="Workspace">
-        <a role="tab" className="tab" aria-selected={tab === "page"} href={`#/t/${taskId}`}>
+        <a role="tab" className="tab" aria-selected={tab === "page"} href={base}>
           <Icon><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" /><path d="M14 3v5h5M9 13h6M9 17h4" /></Icon>Page
         </a>
-        <a role="tab" className="tab" aria-selected={tab === "chat"} href={`#/t/${taskId}/chat`}>
-          <Icon><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z" /></Icon>Chat
-        </a>
-        <a role="tab" className="tab settings-tab" aria-selected={tab === "settings"} href={`#/t/${taskId}/settings`}>
+        {chat !== null && (
+          <a role="tab" className="tab" aria-selected={tab === "chat"} href={chat}>
+            <Icon><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z" /></Icon>Chat
+          </a>
+        )}
+        <a role="tab" className="tab settings-tab" aria-selected={tab === "settings"} href={`${base}/settings`}>
           <GearIcon />Settings
         </a>
       </nav>

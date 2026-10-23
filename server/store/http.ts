@@ -171,7 +171,12 @@ function folderRoutes(kind: FolderOwner["kind"]): Route[] {
   const owner = (ownerId: string): FolderOwner => ({ kind, id: ownerId });
   return [
     { method: "GET", pattern: new RegExp(`${base}$`), handler: (c, p, [ownerId]) => c.folders.list(p, owner(ownerId)) },
-    { method: "GET", pattern: new RegExp(`${base}\\.zip$`), handler: (c, p, [ownerId]) => c.folders.zip(p, owner(ownerId)) },
+    // AUTO-7: `?path=<folder>` zips that subfolder only, e.g. a run's outputs `runs/<run>`.
+    {
+      method: "GET",
+      pattern: new RegExp(`${base}\\.zip$`),
+      handler: (c, p, [ownerId], _, __, query) => c.folders.zip(p, owner(ownerId), query.has("path") ? folderPath.parse(query.get("path")) : null),
+    },
     {
       method: "GET",
       pattern: new RegExp(`${base}/(.+)$`),

@@ -244,15 +244,15 @@ spec("AUTO-10", "a Wait for review run pushes its branch, deploys nothing, and w
   assert.equal(early.code, 1);
   assert.match(early.stderr, /is not merged into origin\/main/);
 
-  // UI-5: the header counts it among what waits on you, linking to its chat.
+  // UI-5: the header counts it among what waits on you, linking to its chat on the automation's page.
   chrome ??= await chromium.launch();
   const page = await chrome.newPage();
   page.setDefaultTimeout(15_000);
   await page.goto(`${gateway.url}/#/`);
   await page.getByTitle("Tasks and runs waiting on you").getByText("1").waitFor();
   await page.getByTitle("Tasks and runs waiting on you").click();
-  const link = page.getByRole("navigation", { name: "Waiting on you" }).getByRole("link", { name: `Weekly audit: run ${short(run)} waits for review` });
-  assert.equal(await link.getAttribute("href"), `http://am-t-${run.id}.localhost:${new URL(gateway.url).port}/`);
+  await page.getByRole("navigation", { name: "Waiting on you" }).getByRole("link", { name: `Weekly audit: run ${short(run)} waits for review` }).click();
+  await page.waitForURL(`${gateway.url}/#/a/${audit.id}/chat/${run.id}`);
   await page.close();
 });
 
