@@ -16,6 +16,8 @@ const USAGE = `usage: am [--json] COMMAND
                                       REV is the revision you read; a stale REV is refused
   task set-state STATE                open, in_progress, or in_review
   task create TITLE                   create another task (stdin: its description)
+  task search [WORDS...]              every task of this project, done and cancelled too,
+                                      whose title, description, or comments hold all of WORDS
   comments                            the task's comments, oldest first, with author and time
   comment                             comment on the task (stdin: Markdown); people read it
                                       on the task's page, never in a running chat
@@ -272,6 +274,13 @@ async function main(args: string[]): Promise<void> {
     const description = process.stdin.isTTY ? "" : readFileSync(0, "utf8");
     const created = taskOf(await call("POST", `/projects/${me.project.id}/tasks`, { title: rest[0], description }));
     print(json, created, () => `created task "${created.title}" (${created.id})`);
+    return;
+  }
+  if (group === "task" && command === "search") {
+    const found = await call("GET", `/projects/${me.project.id}/tasks?q=${encodeURIComponent(rest.join(" "))}`);
+    if (!Array.isArray(found)) throw new CliError("the store answered with something that is not a task list");
+    const tasks = found.map((summary: unknown) => taskOf(isRecord(summary) ? summary.task : undefined));
+    print(json, found, () => tasks.map((task) => `${task.id} ${task.state.padEnd(11)} ${task.title}`).join("\n") || "no tasks found");
     return;
   }
 

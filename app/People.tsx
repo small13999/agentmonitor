@@ -25,9 +25,13 @@ function agentColor(sessionId: string): string {
   return AGENT_COLORS[hash % AGENT_COLORS.length];
 }
 
-/** PERSON-1: a person's initials on their colour; the initials are drawn, not text, so they never join the name's text. */
-export function PersonAvatar({ person }: { person: Person }) {
-  return <span className="avatar" style={{ background: person.color }} data-initials={initials(person.name)} aria-hidden="true" />;
+/**
+ * PERSON-1: a person's initials on their colour; the initials are drawn, not text, so they
+ * never join a name shown beside them. Alone (a board card) it is labelled with the name.
+ */
+export function PersonAvatar({ person, alone = false }: { person: Person; alone?: boolean }) {
+  const label = alone ? { role: "img", "aria-label": person.name, title: person.name } : { "aria-hidden": true };
+  return <span className="avatar" style={{ background: person.color }} data-initials={initials(person.name)} {...label} />;
 }
 
 /**

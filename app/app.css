@@ -60,6 +60,20 @@ button.ghost:hover { color: var(--fg); }
 .menu { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 6px; color: var(--muted); }
 .menu:hover, .menu[aria-current="page"] { color: var(--fg); background: var(--surface-2); }
 .badge { background: var(--red); color: #111; border-radius: 10px; padding: 0 7px; font-size: 12px; font-weight: 700; }
+/* BOARD-3: task search; UI-5: the tasks waiting on you, on every page */
+.search { margin-left: auto; }
+.search input { width: 220px; padding: 3px 10px; }
+.waiting { position: relative; }
+.waiting summary { display: flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; color: var(--fg); font-size: 13px; }
+.waiting summary::-webkit-details-marker { display: none; }
+.waiting nav { position: absolute; right: 0; top: calc(100% + 8px); z-index: 10; display: grid; gap: 2px; min-width: 240px; padding: 6px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 10px 28px rgb(0 0 0 / 0.4); }
+
+/* UI-4: a topic's name in its own colour; PERSON-1: initials on a person's colour */
+.topic-name { display: inline-flex; align-items: center; padding: 0 8px; border-radius: 10px; font-size: 12px; font-weight: 600; background: color-mix(in srgb, currentColor 14%, transparent); border: 1px solid color-mix(in srgb, currentColor 35%, transparent); }
+.topic-name:hover { background: color-mix(in srgb, currentColor 24%, transparent); }
+.chip .topic-name { background: none; border: none; padding: 0; }
+.topic-panel { position: fixed; top: 52px; right: 8px; bottom: 8px; z-index: 5; width: 380px; max-width: calc(100vw - 16px); overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; box-shadow: -10px 0 28px rgb(0 0 0 / 0.4); }
+.topic-panel .task-link { justify-content: space-between; }
 
 /* Tasks: the task list beside the task's workspace; kept, hidden, while the board shows */
 .tasks-page { display: grid; grid-template-columns: 172px minmax(0, 1fr); min-height: 0; }
@@ -86,7 +100,8 @@ button.ghost:hover { color: var(--fg); }
 
 /* Board: the project's tasks in columns by state */
 .board-page { min-height: 0; overflow: auto; padding: 14px; }
-.board { display: grid; grid-template-columns: repeat(4, minmax(260px, 1fr)); gap: 12px; align-items: start; }
+.board { display: grid; grid-template-columns: repeat(3, minmax(260px, 1fr)); gap: 12px; align-items: start; }
+.board-bar { display: flex; justify-content: flex-end; margin-bottom: 10px; }
 .column { display: grid; gap: 10px; align-content: start; }
 .column h2 { margin: 0; font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
 .new-task input, .new-task textarea { width: 100%; }
@@ -95,21 +110,31 @@ button.ghost:hover { color: var(--fg); }
 .description { margin: 0; white-space: pre-wrap; }
 .start-session { display: grid; gap: 10px; align-content: start; justify-items: start; max-width: 640px; }
 .start-session h2 { margin: 0; }
-.card { display: grid; gap: 8px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; color: var(--fg); }
+/* BOARD-1: the card's title link covers the card; its topic names sit above it. */
+.card { position: relative; display: grid; gap: 8px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; color: var(--fg); }
 .card:hover { border-color: var(--grey); }
 .card-blocked { border-color: color-mix(in srgb, var(--red) 55%, var(--border)); }
 .card header { display: flex; align-items: center; gap: 8px; }
-.card header .state { margin-left: auto; color: var(--muted); font-size: 12px; }
+.card-link { flex: 1; color: var(--fg); font-weight: 600; }
+.card-link::after { content: ""; position: absolute; inset: 0; border-radius: inherit; }
+.card .topic-name, .card .avatar { position: relative; z-index: 1; }
+.card-session { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.machine { font: 11px/1.4 ui-monospace, "SF Mono", Menlo, monospace; }
+/* CARD-4: other running tasks changed the same files. */
+.overlap-mark { position: relative; z-index: 1; color: var(--orange); border: 1px solid color-mix(in srgb, var(--orange) 50%, transparent); border-radius: 4px; padding: 0 5px; cursor: help; }
 .meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; color: var(--muted); }
 .chip { display: inline-flex; align-items: center; gap: 4px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: 0 8px; font-size: 12px; }
 .chip-x { border: none; background: none; padding: 0 2px; color: var(--muted); }
-.said { margin: 0; display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap; }
-.said b { color: var(--muted); font-weight: 600; margin-right: 6px; }
-.said.you { -webkit-line-clamp: 2; }
-.said.agent { -webkit-line-clamp: 4; }
-.git-line { display: flex; gap: 10px; font-size: 12px; }
-.unsaved { color: var(--orange); }
 .overlap { margin: 0; font-size: 12px; color: var(--orange); }
+
+/* BOARD-3: every task, done and cancelled too */
+.all-tasks { display: grid; gap: 10px; max-width: 900px; }
+.all-tasks-head { display: flex; align-items: baseline; gap: 12px; }
+.all-tasks-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.all-tasks-row { display: grid; grid-template-columns: 9px minmax(0, 1fr) minmax(0, 260px) 90px 22px; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 6px; background: var(--surface); }
+.all-tasks-row .name { color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.all-tasks-row .state { color: var(--muted); font-size: 12px; }
+.all-tasks-row .assignee { display: flex; }
 
 /*
  * UI-2: the workspace, a small browser. The tabs' contents share one grid cell: the chat

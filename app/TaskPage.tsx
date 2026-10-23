@@ -6,6 +6,7 @@ import { HostMark, Light, LIGHT_LABEL, STATE_LABEL } from "./Board.tsx";
 import { InlineCreate } from "./InlineCreate.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { ActorName, PeopleDialog, PersonAvatar, useDirectory, type Directory } from "./People.tsx";
+import { TopicName } from "./Topics.tsx";
 
 const UNFINISHED: TaskState[] = ["open", "in_progress", "in_review"];
 
@@ -212,7 +213,7 @@ function TopicsField({ summary, topics, onChanged }: { summary: TaskSummary; top
         {linked.length === 0 && <span className="muted small">No topics.</span>}
         {linked.map((topic) => (
           <span key={topic.id} className="chip">
-            {topic.name}
+            <TopicName topic={topic} />
             <button type="button" className="chip-x" aria-label={`Unlink ${topic.name}`} onClick={() => change("DELETE", topic.id)}>×</button>
           </span>
         ))}

@@ -22,6 +22,12 @@ export function buildApp(): void {
   built = true;
 }
 
+/** A `#rrggbb` colour (a topic's, a person's) as `getComputedStyle` reports it. */
+export function rgb(hex: string): string {
+  const [r, g, b] = [1, 3, 5].map((start) => Number.parseInt(hex.slice(start, start + 2), 16));
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
 export interface ApiResult {
   status: number;
   body: { ok: boolean; data?: unknown; error?: string; [key: string]: unknown };

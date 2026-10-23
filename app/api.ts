@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import type {
-  Actor, ChangedFile, Card, Comment, EndedSession, HistoryEntry, Person, Project, Session, SessionRuntime, Task, TaskChanges, TaskDetail, TaskState, TaskSummary, Topic, UnpushedWork,
+  Actor, ChangedFile, Card, Comment, EndedSession, HistoryEntry, Person, Project, Session, SessionRuntime, Task, TaskChanges, TaskDetail, TaskState, TaskSummary, Topic, TopicLink, UnpushedWork,
 } from "../shared/api.ts";
 export type {
-  Actor, ChangedFile, Card, Comment, EndedSession, HistoryEntry, Person, Project, Session, SessionRuntime, Task, TaskChanges, TaskDetail, TaskState, TaskSummary, Topic, UnpushedWork,
+  Actor, ChangedFile, Card, Comment, EndedSession, HistoryEntry, Person, Project, Session, SessionRuntime, Task, TaskChanges, TaskDetail, TaskState, TaskSummary, Topic, TopicLink, UnpushedWork,
 };
 
 /** A refused call; `details` holds the error's extra fields, e.g. the files that block ending a session. */
