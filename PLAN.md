@@ -105,7 +105,8 @@ through Agent Monitor (dogfooding).
     ends the session once the agent's turn ends. nothing_to_deploy deletes the branch
     locally and on origin.
   - A run waiting for review counts as waiting on everyone: its card is blocked while
-    its agent is idle, and it appears in the header's count, linking to its chat.
+    its agent is idle, and it appears in the header's count, linking to its chat on
+    the automation page.
   - Time limit: a sweep every minute, whenever the clock jumps, and at gateway start,
     so it survives restarts. Runs waiting for review are exempt. A timed-out run keeps
     its work as a snapshot.
