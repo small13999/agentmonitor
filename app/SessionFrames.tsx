@@ -3,8 +3,17 @@ import { useEffect, useState } from "react";
 /** Sessions whose chats stay loaded after you leave them, so going back shows them at once. */
 const KEPT = 4;
 
-function ternUrl(sessionId: string): string {
-  return `${location.protocol}//tern-${sessionId}.localhost${location.port === "" ? "" : `:${location.port}`}/`;
+/**
+ * A session's chat: on this gateway, its Tern host; on a hub (STORE-3), the hub's own chat host
+ * for it (PREVIEW-2: `am.draftcoach.gg` has `am-t-<session>.draftcoach.gg`), which the browser
+ * reaches through Cloudflare Access itself.
+ */
+function chatUrl(sessionId: string, hub: string | null): string {
+  if (hub === null) return `${location.protocol}//tern-${sessionId}.localhost${location.port === "" ? "" : `:${location.port}`}/`;
+  const url = new URL(hub);
+  const [first, ...rest] = url.hostname.split(".");
+  url.hostname = [`${first}-t-${sessionId}`, ...rest].join(".");
+  return url.href;
 }
 
 /**
@@ -19,11 +28,13 @@ function ternUrl(sessionId: string): string {
  * workspace tab covers the frames by hiding them, which keeps them loaded and sized (UI-2); a
  * chat first loads when its Chat tab shows, so a task's page does not start its container.
  */
-export function SessionFrames({ current, covered, running, stopped }: {
+export function SessionFrames({ current, covered, running, stopped, hub }: {
   current: string | null;
   covered: boolean;
   running: ReadonlySet<string> | null;
   stopped: ReadonlySet<string>;
+  /** The hub's origin when the project is a hub's. */
+  hub: string | null;
 }) {
   const [frames, setFrames] = useState<{ order: string[]; used: string[] }>({ order: [], used: [] });
   const [loaded, setLoaded] = useState<ReadonlySet<string>>(new Set());
@@ -43,7 +54,7 @@ export function SessionFrames({ current, covered, running, stopped }: {
         <iframe
           key={id}
           className={id === current ? "session-frame current" : "session-frame"}
-          src={ternUrl(id)}
+          src={chatUrl(id, hub)}
           title={id === current ? "Session" : "Session (hidden)"}
           allow="clipboard-read; clipboard-write"
           onLoad={() => setLoaded((before) => new Set([...before, id]))}

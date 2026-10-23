@@ -16,7 +16,7 @@ let project: Project;
 let owner: Person;
 
 before(async () => {
-  buildApp();
+  await buildApp();
   [gateway, chrome] = await Promise.all([Gateway.start(), chromium.launch()]);
   page = await chrome.newPage();
   page.setDefaultTimeout(10_000);
@@ -62,7 +62,7 @@ spec("TASK-12", "opening a task from the board, the task list, or a link shows i
   await gateway.data("PUT", `/tasks/${target.id}/topics/${release.id}`);
   await gateway.data("POST", `/tasks/${target.id}/comments`, { body: "Wait for QA" });
   await start(target);
-  const jogi = await gateway.data<Person>("POST", "/people", { name: "Jogi" });
+  const jogi = await gateway.data<Person>("POST", "/people", { name: "Jogi", email: "jogi@example.com" });
 
   const taskPage = page.getByRole("article", { name: "Task page" });
   const opened = async () => {
@@ -123,7 +123,7 @@ spec("TASK-12", "opening a task from the board, the task list, or a link shows i
 
 spec("TASK-13", "a task's assignee is one person or nobody", async () => {
   const target = await task("Leaderboard filters");
-  const mia = await gateway.data<Person>("POST", "/people", { name: "Mia Wong" });
+  const mia = await gateway.data<Person>("POST", "/people", { name: "Mia Wong", email: "mia@example.com" });
   await page.goto(`${gateway.url}/#/t/${target.id}`);
   const field = page.getByRole("region", { name: "Assignee" });
   const assignee = field.getByRole("combobox", { name: "Assignee" });
@@ -152,7 +152,7 @@ spec("TASK-13", "a task's assignee is one person or nobody", async () => {
 spec("TASK-14", "a task's history lists its changes, topic links, sessions with their machine, and comments in time order, with who and when", async () => {
   const target = await task("History");
   const topic = await gateway.data<Topic>("POST", `/projects/${project.id}/topics`, { name: "Chronicle" });
-  const kim = await gateway.data<Person>("POST", "/people", { name: "Kim" });
+  const kim = await gateway.data<Person>("POST", "/people", { name: "Kim", email: "kim@example.com" });
   const session = await start(target);
   await gateway.data("PATCH", `/tasks/${target.id}`, { assigneeId: kim.id });
   assert.equal(gateway.am(session.id, ["topic", "link", "Chronicle"]).code, 0);
@@ -319,12 +319,14 @@ spec("PERSON-1", "the owner adds and renames people in the app; each shows as in
   await page.getByRole("region", { name: "Assignee" }).getByRole("button", { name: "People…" }).click();
   const dialog = page.getByRole("dialog", { name: "People" });
   await dialog.getByRole("button", { name: "+ Add person" }).click();
-  await dialog.getByRole("textbox", { name: "Add person" }).fill("Jonas Berg");
+  await dialog.getByRole("textbox", { name: "Name of the new person" }).fill("Jonas Berg");
+  await dialog.getByRole("textbox", { name: "Email of the new person" }).fill("Jonas@Example.com");
   await dialog.getByRole("button", { name: "Add" }).click();
   const name = dialog.getByRole("textbox", { name: "Name of Jonas Berg" });
   await name.waitFor();
   const added = (await gateway.data<Person[]>("GET", "/people")).find((person) => person.name === "Jonas Berg");
   assert.ok(added, "the person is in the store");
+  assert.equal(added.email, "jonas@example.com");
   const avatar = dialog.locator(".person", { has: page.getByRole("textbox", { name: "Name of Jonas Berg" }) }).locator(".avatar");
   assert.equal(await drawnInitials(avatar), "JB");
   assert.equal(await avatar.evaluate((element) => getComputedStyle(element).backgroundColor), rgb(added.color));

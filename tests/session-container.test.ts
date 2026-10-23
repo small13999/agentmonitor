@@ -51,7 +51,7 @@ let channelA: OmpChannel;
 
 before(async () => {
   buildImage({ quiet: true });
-  buildApp();
+  await buildApp();
   scratch = mkdtempSync(join(tmpdir(), "am-fixture-"));
   repo = join(scratch, "fixture");
   mkdirSync(repo);
@@ -386,7 +386,7 @@ spec("BOARD-2", "tasks waiting on you sort first in their column, and the header
   assert.equal(await waiting.textContent(), "1 waiting on you");
 
   // A task assigned to someone else waits on them, not on you.
-  const jogi = await gateway.data<{ id: string }>("POST", "/people", { name: "Jogi" });
+  const jogi = await gateway.data<{ id: string }>("POST", "/people", { name: "Jogi", email: "jogi@example.com" });
   await gateway.data("PATCH", `/tasks/${b.taskId}`, { assigneeId: jogi.id });
   await waiting.waitFor({ state: "detached" });
   assert.deepEqual(await column.locator(".card-link").allTextContents(), ["Patch Notes JP", "Client fixes"]);

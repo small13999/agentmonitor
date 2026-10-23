@@ -3,8 +3,9 @@ import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 import type { Plugin, PreviewServer, ViteDevServer } from "vite";
 import { handleApi } from "./server/api.ts";
-import { AuthStore } from "./server/auth.ts";
+import { Auth, sendRefusal } from "./server/auth.ts";
 import { loadConfig } from "./server/config.ts";
+import { Hubs, loadHubs } from "./server/hubs.ts";
 import { StoreService } from "./server/store/service.ts";
 import { TernProxy } from "./server/tern-proxy.ts";
 
@@ -25,23 +26,31 @@ function gateway(): Plugin {
     // do not pile up and its close does not delete the new store's sockets.
     globalThis.agentmonitorStore?.close();
     const config = loadConfig();
-    const auth = new AuthStore(config);
+    const hubs = new Hubs(loadHubs(config.configDir));
     const store = new StoreService(config.stateDir, config);
-    const tern = new TernProxy({ config, auth, store });
+    const auth = new Auth(config, store.store);
+    const tern = new TernProxy({ auth, store });
     globalThis.agentmonitorStore = store;
     await store.start();
     server.middlewares.use(async (request, response, next) => {
       // Tern hosts first: Vite would answer them with the monitor's own pages.
       if (await tern.handleRequest(request, response)) return;
-      if (await handleApi(request, response, { config, auth, store })) return;
-      next();
+      if (await handleApi(request, response, { config, auth, store, hubs })) return;
+      // AUTH-1: the app's pages and modules too.
+      const visitor = await auth.identify(request);
+      if (visitor.kind === "refused") sendRefusal(response, visitor);
+      else next();
     });
-    // Upgrades Tern does not take are Vite's own (HMR), so they are left alone.
+    // Upgrades Tern does not take are Vite's own (HMR), so they are left alone; in access mode
+    // Vite has no socket, so nothing would answer them.
     server.httpServer?.on("upgrade", (request, socket, head) => {
-      tern.handleUpgrade(request, socket, head).catch((cause: unknown) => {
-        console.error("upgrade handling failed", cause);
-        socket.destroy();
-      });
+      tern.handleUpgrade(request, socket, head).then(
+        (handled) => { if (!handled && config.authMode === "access") socket.destroy(); },
+        (cause: unknown) => {
+          console.error("upgrade handling failed", cause);
+          socket.destroy();
+        },
+      );
     });
   };
   return {
@@ -78,6 +87,8 @@ export default defineConfig({
     allowedHosts: [".localhost"],
     port: 5173,
     strictPort: true,
+    // AUTH-1: Vite's own socket (HMR) would take upgrades the gateway never checks.
+    ws: process.env.AGENTMONITOR_AUTH_MODE === "access" ? false : undefined,
   },
   preview: {
     allowedHosts: [".localhost"],

@@ -11,6 +11,20 @@ export interface Project {
   createdAt: number;
 }
 
+/**
+ * STORE-3: a store the app lists projects of: the gateway's own (`hub` null) or a hub of the
+ * client's hubs.json, whose projects stay listed from its last answer while it is unavailable.
+ */
+export interface StoreListing {
+  hub: string | null;
+  name: string;
+  /** The hub's origin; null for the gateway's own store. */
+  url: string | null;
+  projects: Project[];
+  /** Why the hub cannot be reached; null when it can. */
+  unavailable: string | null;
+}
+
 export interface Topic {
   id: string;
   projectId: string;
@@ -26,9 +40,11 @@ export interface Topic {
 export interface Person {
   id: string;
   name: string;
+  /** AUTH-2: what the person logs in with, lower-cased; null for an owner whose gateway names none (local mode). */
+  email: string | null;
   /** Initials on this colour stand in for an avatar, `#rrggbb`. */
   color: string;
-  /** The store's owner; until login exists every request is the owner. */
+  /** The store's owner; in local mode every request is the owner. */
   owner: boolean;
   createdAt: number;
 }

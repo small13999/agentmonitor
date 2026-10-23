@@ -45,8 +45,8 @@ description (Markdown), state, assignee, and topics, all edited in place; its
 status, folder, comments, history, and sessions, and the running session's
 state. The folder (`TaskFolder` in `app/Folder.tsx`) takes files dropped there
 or chosen, shows each inline by kind, and downloads one or all as a zip.
-People (the store's owner adds and renames them from the assignee's
-"People…") show as initials on their colour; an agent shows as its session's
+People (the store's owner adds them, each with the email they log in with, and
+renames them from the assignee's "People…") show as initials on their colour; an agent shows as its session's
 agent on the session's avatar, linking to the session. Chat (`#/t/<id>/chat`)
 is its running session's chat in Tern, or a Start session button. Settings
 (`#/t/<id>/settings`, the gear at the right of the tabs) is for the session:
@@ -228,6 +228,29 @@ file added later reaches a session when its container starts again.
 this. Tests point them at a scripted fake model (`tests/fake-model.ts`), a fake
 `gh`, fixture credentials, and a fake Cloudflare API.
 
+### Hubs
+
+A client lists the projects of the hubs in `<config dir>/hubs.json` beside its
+own (STORE-3), grouped by store in the project menu:
+
+```json
+[{ "name": "draftcoach", "url": "https://am.draftcoach.gg",
+   "tokenCommand": ["cloudflared", "access", "token", "-app=https://am.draftcoach.gg"] }]
+```
+
+`tokenCommand` is optional and defaults to that `cloudflared` call; the gateway
+reads the file when it starts (`server/hubs.ts`). The browser reaches a hub's
+store API only through the gateway, at `/api/hubs/<name>/store/*`, which adds
+`cf-access-token: <token>` (Cloudflare's edge turns it into
+`Cf-Access-Jwt-Assertion`); the token is asked for again after a minute or once
+the hub refuses it. A hub that cannot be reached (no answer, no token, 401, a
+redirect to Access's login, or an error page instead of the API's JSON) shows
+as unavailable with why, e.g. `log in: cloudflared access login
+https://am.draftcoach.gg`; its last listed projects stay in the menu, and what
+fails because of it names the hub (STORE-4). A hub session's chat loads from
+the hub's own chat host (`am-t-<session>.draftcoach.gg`, PREVIEW-2), where the
+browser logs in through Access itself.
+
 ## Gateway
 
 `server/` holds the gateway shared by the Vite dev plugin (`npm run dev`, port
@@ -235,12 +258,24 @@ this. Tests point them at a scripted fake model (`tests/fake-model.ts`), a fake
 gateway:build`, then `npm run gateway:start`; port `AGENTMONITOR_PORT`, default
 4173, serving `dist/`). Besides each session's Tern host, both serve:
 
-- `GET /api/health` (unauthenticated liveness plus `{ machine, auth }` flags).
-- `POST /api/auth/login|logout`, `GET /api/auth/status`: cookie sessions
-  (`__Host-agentmonitor`, Secure/HttpOnly/SameSite=Strict) in `remote-cookie`
-  mode, where the app asks for the login secret first. Local mode needs no login.
-- `/api/store/*`, the store API above.
+- `GET /api/health` (unauthenticated liveness: `{ machine, auth }`, `auth` the
+  auth mode).
+- `/api/store/*`, the store API above; `GET /api/stores`, the projects of this
+  gateway's store and of each hub (STORE-3); `/api/hubs/<name>/store/*`, a
+  hub's store API through the gateway.
 
-Remote mode (`AGENTMONITOR_AUTH_MODE=remote-cookie`) also requires
-`AGENTMONITOR_PUBLIC_ORIGIN` (exact https origin) and a 0600
-`AGENTMONITOR_LOGIN_SECRET_FILE`; only that host reaches the API and the app.
+Every other request, the app's pages, the store API and Tern hosts alike, goes
+through `Auth.identify` (`server/auth.ts`), which says which person it is or
+refuses it. `AGENTMONITOR_AUTH_MODE=local` (the default) is the user's PC: every
+request is the store's owner. `AGENTMONITOR_AUTH_MODE=access` is a hub behind a
+Cloudflare Tunnel and Access: the gateway verifies the Access token itself
+(the `Cf-Access-Jwt-Assertion` header, else the `CF_Authorization` cookie;
+RS256 against the team's keys, issuer, audience, expiry) and acts as the person
+with the token's email; other emails get a page saying they are no person of
+the hub. It requires `AGENTMONITOR_ACCESS_TEAM_DOMAIN` (the issuer, e.g.
+`https://draftcoach.cloudflareaccess.com`; keys at `/cdn-cgi/access/certs`),
+`AGENTMONITOR_ACCESS_AUD` (the Access application's audience tag) and
+`AGENTMONITOR_OWNER_EMAIL` (the owner's email, written to the store's owner on
+start). On a hub every person works on every project; only the owner adds
+people, allows and starts host sessions, and allows Cloudflare writes. Vite's
+dev server runs without its HMR socket in access mode.

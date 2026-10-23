@@ -17,7 +17,7 @@ let page: Page;
 let project: Project;
 
 before(async () => {
-  buildApp();
+  await buildApp();
   scratch = mkdtempSync(join(tmpdir(), "am-cli-"));
   const config = join(scratch, "config");
   mkdirSync(join(config, "cloudflare"), { recursive: true });
@@ -58,7 +58,7 @@ async function open(inProject: Project, hash: string): Promise<void> {
 spec("STORE-5", "am task history says what the task page's History says, entry by entry", async () => {
   const target = await task("History for agents");
   await gateway.data<Topic>("POST", `/projects/${project.id}/topics`, { name: "Chronicle" });
-  const kim = await gateway.data<Person>("POST", "/people", { name: "Kim" });
+  const kim = await gateway.data<Person>("POST", "/people", { name: "Kim", email: "kim@example.com" });
   const session = await start(target);
   await gateway.data("PATCH", `/tasks/${target.id}`, { assigneeId: kim.id });
   lines(gateway.am(session.id, ["topic", "link", "Chronicle"]));
@@ -88,7 +88,7 @@ spec("STORE-5", "am task history says what the task page's History says, entry b
 });
 
 spec("STORE-5", "am people lists the people the People dialog lists, the owner first", async () => {
-  await gateway.data<Person>("POST", "/people", { name: "Jogi" });
+  await gateway.data<Person>("POST", "/people", { name: "Jogi", email: "jogi@example.com" });
   const target = await task("People for agents");
   const session = await start(target);
   const said = lines(gateway.am(session.id, ["people"]));
@@ -97,14 +97,19 @@ spec("STORE-5", "am people lists the people the People dialog lists, the owner f
   await page.getByRole("region", { name: "Assignee" }).getByRole("button", { name: "People…" }).click();
   const dialog = page.getByRole("dialog", { name: "People" });
   await dialog.getByRole("textbox", { name: "Name of Jogi" }).waitFor();
-  const shown = await dialog.locator("li.person").evaluateAll((items) => items.map((item) => ({
-    name: item.querySelector("input")?.value ?? "",
-    owner: item.querySelector(".muted.small")?.textContent === "owner",
-  })));
+  const shown = await dialog.locator("li.person").evaluateAll((items) => items.map((item) => {
+    const notes = [...item.querySelectorAll(".muted.small")].map((note) => note.textContent ?? "");
+    return { name: item.querySelector("input")?.value ?? "", email: notes.find((note) => note !== "owner") ?? null, owner: notes.includes("owner") };
+  }));
   const people = await gateway.data<Person[]>("GET", "/people");
-  assert.deepEqual(said, people.map((person) => `${person.id} ${person.name}${person.owner ? " (owner)" : ""}`));
-  assert.deepEqual(people.map((person) => ({ name: person.name, owner: person.owner })), shown);
+  const parsed = said.map((line) => {
+    const [, id, name, email, owner] = /^(\S+) (.+?)(?: <([^>]+)>)?( \(owner\))?$/.exec(line) ?? [];
+    return { id, name, email: email ?? null, owner: owner !== undefined };
+  });
+  assert.deepEqual(parsed, people.map((person) => ({ id: person.id, name: person.name, email: person.email, owner: person.owner })));
+  assert.deepEqual(parsed.map(({ id: _id, ...person }) => person), shown);
   assert.equal(shown[0].owner, true);
+  assert.ok(shown.some((person) => person.email === "jogi@example.com"));
 });
 
 spec("STORE-5", "am project show says what the project settings page says, and follows its changes", async () => {
@@ -144,7 +149,7 @@ spec("STORE-5", "am project show says what the project settings page says, and f
 spec("STORE-5", "am board shows the board's columns with each card's title, topics, assignee, and session", async () => {
   const board = await gateway.data<Project>("POST", "/projects", { name: "board-fixture" });
   const copy = await gateway.data<Topic>("POST", `/projects/${board.id}/topics`, { name: "Copy" });
-  const lea = await gateway.data<Person>("POST", "/people", { name: "Lea" });
+  const lea = await gateway.data<Person>("POST", "/people", { name: "Lea", email: "lea@example.com" });
   const draft = await task("Draft the notes", board);
   await gateway.data("PUT", `/tasks/${draft.id}/topics/${copy.id}`);
   const write = await task("Write the notes", board);
@@ -189,7 +194,7 @@ spec("STORE-5", "am board shows the board's columns with each card's title, topi
 spec("STORE-5", "am changes and shows another task's title, description, state, assignee, and topics as its page shows them", async () => {
   const own = await task("The agent's own");
   const other = await task("Before");
-  await gateway.data<Person>("POST", "/people", { name: "Ines" });
+  await gateway.data<Person>("POST", "/people", { name: "Ines", email: "ines@example.com" });
   const session = await start(own);
   const onOther = ["--task", other.id];
   lines(gateway.am(session.id, ["task", "set-title", "After", ...onOther]));

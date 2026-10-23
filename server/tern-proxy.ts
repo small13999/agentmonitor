@@ -2,8 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import { setTimeout as sleep } from "node:timers/promises";
 import httpProxy from "http-proxy";
-import type { AuthStore } from "./auth.ts";
-import type { GatewayConfig } from "./config.ts";
+import { sendRefusal, validOrigin, type Auth } from "./auth.ts";
 import type { StoreService } from "./store/service.ts";
 import { StoreError } from "./store/store.ts";
 
@@ -18,10 +17,11 @@ const FONTS = /^\/fonts(?:\/|$)/;
  * A reload does exactly that, so a session's next socket waits out this much after the last one closed.
  */
 const RECONNECT_SETTLE_MS = 3_000;
+/** The browser's credentials for the gateway; an agent in the container could act as the person with them. */
+const CREDENTIAL_HEADERS = ["cookie", "authorization", "cf-access-jwt-assertion"];
 
 export interface TernProxyDeps {
-  config: Pick<GatewayConfig, "authMode">;
-  auth: AuthStore;
+  auth: Auth;
   store: StoreService;
 }
 
@@ -31,10 +31,10 @@ function reject(socket: Duplex, status: number, reason: string): void {
 
 /**
  * Each session's Tern web client on its own host, tern-<session id>.localhost, since
- * Tern's page loads everything from root paths. The gateway checks the browser and adds
- * what the container's `tern web serve` asks for, the token on /wire and /fonts and the
- * origin it accepts, so neither reaches the browser. Local mode only: *.localhost names
- * resolve on the browser's own machine.
+ * Tern's page loads everything from root paths. The gateway checks who the browser is
+ * (AUTH-1) and adds what the container's `tern web serve` asks for, the token on /wire and
+ * /fonts and the origin it accepts, so neither reaches the browser; the browser's
+ * credentials, its cookies and Access token, never reach the container.
  *
  * Tern sends every file uncacheable; the versioned script and wasm are marked immutable
  * instead. Chrome keeps the script but refetches the 60 MB wasm, likely over its cache's entry limit.
@@ -48,8 +48,10 @@ export class TernProxy {
   constructor(deps: TernProxyDeps) {
     this.deps = deps;
     this.proxy.on("proxyReq", (proxyRequest) => {
-      proxyRequest.removeHeader("cookie");
-      proxyRequest.removeHeader("authorization");
+      for (const name of CREDENTIAL_HEADERS) proxyRequest.removeHeader(name);
+    });
+    this.proxy.on("proxyReqWs", (proxyRequest) => {
+      for (const name of CREDENTIAL_HEADERS) proxyRequest.removeHeader(name);
     });
     this.proxy.on("proxyRes", (proxyResponse, request) => {
       if (proxyResponse.statusCode === 200 && VERSIONED_ASSET.test(request.url ?? "")) {
@@ -59,7 +61,6 @@ export class TernProxy {
   }
 
   private sessionId(request: IncomingMessage): string | null {
-    if (this.deps.config.authMode !== "local") return null;
     return TERN_HOST.exec(request.headers.host ?? "")?.[1] ?? null;
   }
 
@@ -71,12 +72,13 @@ export class TernProxy {
       response.writeHead(status, { "content-type": "text/plain; charset=utf-8" });
       response.end(message);
     };
-    if (!this.deps.auth.isAuthenticated(request)) {
-      fail(401, "Sign in to Agent Monitor first.");
+    const visitor = await this.deps.auth.identify(request);
+    if (visitor.kind === "refused") {
+      sendRefusal(response, visitor);
       return true;
     }
     // Tern serves fonts to its own page only; a page of another site gets no token added.
-    if (FONTS.test(new URL(request.url ?? "/", "http://localhost").pathname) && !this.deps.auth.validOrigin(request, null)) {
+    if (FONTS.test(new URL(request.url ?? "/", "http://localhost").pathname) && !validOrigin(request)) {
       fail(403, "This origin may not read Tern's fonts.");
       return true;
     }
@@ -120,9 +122,10 @@ export class TernProxy {
   async handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): Promise<boolean> {
     const sessionId = this.sessionId(request);
     if (sessionId === null) return false;
-    if (!this.deps.auth.isAuthenticated(request)) reject(socket, 401, "Unauthorized");
+    const visitor = await this.deps.auth.identify(request);
+    if (visitor.kind === "refused") reject(socket, visitor.status, "Refused");
     // Pages of other sites must not drive the session from the user's browser.
-    else if (request.headers.origin === undefined || !this.deps.auth.validOrigin(request, null)) reject(socket, 403, "Forbidden");
+    else if (request.headers.origin === undefined || !validOrigin(request)) reject(socket, 403, "Forbidden");
     else if (new URL(request.url ?? "/", "http://localhost").pathname !== "/wire") reject(socket, 404, "Not Found");
     else {
       try {

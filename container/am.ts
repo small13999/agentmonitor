@@ -288,10 +288,10 @@ function taskDetailOf(value: unknown): { task: Task; topics: Topic[]; sessions: 
 function peopleOf(value: unknown): Person[] {
   return listOf(value, "a list of people", (item) => {
     if (!isRecord(item) || typeof item.id !== "string" || typeof item.name !== "string" || typeof item.color !== "string"
-      || typeof item.owner !== "boolean" || typeof item.createdAt !== "number") {
+      || (item.email !== null && typeof item.email !== "string") || typeof item.owner !== "boolean" || typeof item.createdAt !== "number") {
       throw unexpected("a person");
     }
-    return { id: item.id, name: item.name, color: item.color, owner: item.owner, createdAt: item.createdAt };
+    return { id: item.id, name: item.name, email: item.email, color: item.color, owner: item.owner, createdAt: item.createdAt };
   });
 }
 
@@ -887,7 +887,11 @@ async function main(args: string[]): Promise<void> {
   if (group === "people" && command === undefined) {
     const listed = await call("GET", "/people");
     const people = peopleOf(listed);
-    print(json, listed, () => people.map((person) => `${person.id} ${person.name}${person.owner ? " (owner)" : ""}`).join("\n"));
+    print(json, listed, () => people.map((person) => [
+      `${person.id} ${person.name}`,
+      person.email === null ? "" : ` <${person.email}>`,
+      person.owner ? " (owner)" : "",
+    ].join("")).join("\n"));
     return;
   }
 

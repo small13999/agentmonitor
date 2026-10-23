@@ -112,7 +112,8 @@ CREATE TABLE IF NOT EXISTS people (
   name TEXT NOT NULL,
   color TEXT NOT NULL,
   owner INTEGER NOT NULL DEFAULT 0,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  email TEXT
 );
 CREATE TABLE IF NOT EXISTS comments (
   id TEXT PRIMARY KEY,
@@ -197,6 +198,7 @@ function person(row: Row): Person {
   return {
     id: String(row.id),
     name: String(row.name),
+    email: row.email === null ? null : String(row.email),
     color: String(row.color),
     owner: Number(row.owner) === 1,
     createdAt: Number(row.created_at),
@@ -296,6 +298,9 @@ export class Store {
       this.db.prepare("INSERT INTO people (id, name, color, owner, created_at) VALUES (?, ?, ?, 1, ?)").run(randomUUID(), ownerName, PALETTE[5], Date.now());
     }
     this.addColumn("tasks", "assignee_id", "TEXT REFERENCES people(id)");
+    // AUTH-2: people log in with their email, lower-cased, so unique regardless of case.
+    this.addColumn("people", "email", "TEXT");
+    this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS people_email ON people (email)");
     this.addColumn("topics", "color", "TEXT NOT NULL DEFAULT ''");
     for (const [index, row] of this.db.prepare("SELECT id FROM topics WHERE color = '' ORDER BY created_at").all().entries()) {
       this.db.prepare("UPDATE topics SET color = ? WHERE id = ?").run(PALETTE[index % PALETTE.length], String(row.id));
@@ -417,11 +422,24 @@ export class Store {
     if (principal.kind !== "human") throw new StoreError(403, "only a human can do this");
   }
 
-  /** PERSON-1: the store's owner, as whom every human request acts until login exists. */
+  /** The store's owner; every human request in local mode. */
   ownerPrincipal(): Principal {
     const row = this.db.prepare("SELECT id FROM people WHERE owner = 1").get();
     if (row === undefined) throw new Error("the store has no owner");
     return { kind: "human", personId: String(row.id) };
+  }
+
+  /** AUTH-2: the owner's email, from the gateway's configuration; no other person may have it. */
+  setOwnerEmail(email: string): void {
+    const taken = this.db.prepare("SELECT name FROM people WHERE email = ? AND owner = 0").get(email);
+    if (taken !== undefined) throw new Error(`the owner's email ${email} is already ${String(taken.name)}'s`);
+    this.db.prepare("UPDATE people SET email = ? WHERE owner = 1").run(email);
+  }
+
+  /** AUTH-2: the person who logs in with this email (lower-cased, as the store keeps them); null for anyone else. */
+  personByEmail(email: string): Principal | null {
+    const row = this.db.prepare("SELECT id FROM people WHERE email = ?").get(email.toLowerCase());
+    return row === undefined ? null : { kind: "human", personId: String(row.id) };
   }
 
   /** TASK-14: appends what happened to a task, by whom (null: no one, as a pull request seen on GitHub). */
@@ -460,12 +478,16 @@ export class Store {
     return this.db.prepare("SELECT * FROM people ORDER BY owner DESC, created_at").all().map(person);
   }
 
-  /** PERSON-1: only the owner adds people. */
-  createPerson(principal: Principal, name: string): Person {
+  /** PERSON-1, AUTH-3: only the owner adds people, each with the email they log in with. */
+  createPerson(principal: Principal, input: { name: string; email: string }): Person {
     this.requireOwner(principal);
+    if (this.db.prepare("SELECT 1 FROM people WHERE email = ?").get(input.email) !== undefined) {
+      throw new StoreError(409, `${input.email} is already a person of this store`);
+    }
     const count = Number(this.db.prepare("SELECT count(*) AS n FROM people").get()?.n ?? 0);
-    const created: Person = { id: randomUUID(), name, color: PALETTE[(5 + count) % PALETTE.length], owner: false, createdAt: Date.now() };
-    this.db.prepare("INSERT INTO people (id, name, color, owner, created_at) VALUES (?, ?, ?, 0, ?)").run(created.id, name, created.color, created.createdAt);
+    const created: Person = { id: randomUUID(), name: input.name, email: input.email, color: PALETTE[(5 + count) % PALETTE.length], owner: false, createdAt: Date.now() };
+    this.db.prepare("INSERT INTO people (id, name, email, color, owner, created_at) VALUES (?, ?, ?, ?, 0, ?)")
+      .run(created.id, created.name, created.email, created.color, created.createdAt);
     return created;
   }
 
@@ -485,7 +507,8 @@ export class Store {
     return this.db.prepare("SELECT 1 FROM people WHERE id = ? AND owner = 1").get(principal.personId) !== undefined;
   }
 
-  private requireOwner(principal: Principal): void {
+  /** AUTH-3: what only the store's owner does. */
+  requireOwner(principal: Principal): void {
     if (!this.isOwner(principal)) throw new StoreError(403, "only the store's owner can do this");
   }
 
@@ -851,7 +874,9 @@ export class Store {
    * session (HOST-6) is a host session, one per project, and works on no branch of the task.
    */
   createSession(principal: Principal, taskId: string, input: { machine?: string; model?: string; runtime: SessionRuntime; checkout?: boolean }): Session {
-    this.requireHuman(principal);
+    // AUTH-3: only the owner starts host sessions.
+    if (input.runtime === "host") this.requireOwner(principal);
+    else this.requireHuman(principal);
     return this.transaction(() => {
       const owner = this.visibleTask(principal, taskId);
       if (owner.state === "done" || owner.state === "cancelled") {
