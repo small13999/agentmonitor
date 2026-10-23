@@ -61,8 +61,13 @@ function forTern(line: string): string {
   return JSON.stringify(message);
 }
 
-// Tern writes to omp directly; only omp's output passes through here.
-const omp = spawn("omp", ["acp", "--auto-approve"], { stdio: ["inherit", "pipe", "inherit"] });
+// Tern writes to omp directly; only omp's output passes through here. AGENTMONITOR_CHAT names this
+// process as the chat omp's parent, so its extension takes the session's channel and nothing the
+// agent starts does (container/omp-extension.ts).
+const omp = spawn("omp", ["acp", "--auto-approve"], {
+  stdio: ["inherit", "pipe", "inherit"],
+  env: { ...process.env, AGENTMONITOR_CHAT: String(process.pid) },
+});
 for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.on(signal, () => omp.kill(signal));
 const exited = once(omp, "exit");
 for await (const line of createInterface({ input: omp.stdout, crlfDelay: Infinity })) {
