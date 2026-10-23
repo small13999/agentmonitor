@@ -20,7 +20,7 @@ through Agent Monitor (dogfooding).
 | 2 | Bootstrap: host sessions, "+ Project", agentmonitor project in the store on the user's PC | Done: HOST-1..7, UI-3; the integrator runs as a main-checkout session of project `agentmonitor` |
 | 3 | SPEC draft for steps 4–8, reviewed by the user; its Concepts section is agreed | Done: step 4 claims in SPEC.md (`c55171c`); steps 5–8 stay in `SPEC-DRAFT.md` until their step |
 | 4 | Redesign from a clean slate: task page, comments, attachments (folder), people and assignee, board, session Settings tab, topic reader, visual identity; done through Agent Monitor itself | Done: slices merged (`cfb952a`), Studio (`5ff8e0e`, `4ffc0d2`); leftovers (project settings, `am` history/people/changes) in a step 5 slice |
-| 5 | Hub on Hetzner for draftcoach: Cloudflare Tunnel + Access, login, teammate access, flat hosts; the user's local Agent Monitor lists the hub's projects | In progress: claims in SPEC.md; slices (topic Hub): hub auth, per-session hosts, hub projects in the client, step 4 leftovers; the integrator deploys on the draftcoach box as user `agentmonitor` |
+| 5 | Hub on Hetzner for draftcoach: Cloudflare Tunnel + Access, login, teammate access, flat hosts; the user's local Agent Monitor lists the hub's projects | In progress: AUTH-1..3, STORE-3/6, PREVIEW-2, project settings merged (`a9731fb`); deploying on the draftcoach box as user `agentmonitor` (Cloudflare through a draftcoach task), then moving draftcoach there |
 | 6 | Preview tab per task (and the draftcoach preview login), Deploy changes | |
 | 7 | Automations | |
 | 8 | Agent commits every turn and Agent Monitor pushes the task branch (replaces snapshots), idle stop, "Run session locally" | |
