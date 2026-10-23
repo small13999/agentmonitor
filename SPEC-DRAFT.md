@@ -70,31 +70,52 @@ Moved into SPEC.md: AUTH-1..3, HOST-1/2, STORE-3, PREVIEW-2, STORE-6.
 ## Step 7: automations
 
 - **AUTO-1** changed: An automation has a name, instructions, a model, triggers,
-  an end mode, a folder (shared by all its runs, also its memory), and an on/off
-  switch; an automation that is off starts no runs.
-- **AUTO-2** stays: a schedule fires at most once per scheduled time, also across
-  restarts.
+  an end mode, a time limit, a folder (shared by all its runs: `memory.md` and each
+  run's outputs in `runs/<run>/`), and an on/off switch; an automation that is off
+  starts no runs.
+- **AUTO-2** changed: A schedule (cron, with a timezone; default Europe/Budapest)
+  fires at most once per scheduled time, also across restarts; times missed while
+  the store was down fire once as soon as it is back.
 - **AUTO-8** new: A trigger is a schedule, optionally with a guard (code in the
-  folder, run first) and a check (a prompt in the folder, answered by a cheap
-  model); a run starts only when both pass. An automation has any number of
-  triggers.
+  folder, run in the session image; exit 0 passes, its output goes on) and a check
+  (a prompt in the folder that a cheap model answers with read-only tools: the web
+  and the folder; it says yes or no and why). A run starts only when both pass,
+  and every firing records what the guard and check said. An automation has any
+  number of triggers.
+- **AUTO-13** new: A run's prompt holds the automation's instructions, what its
+  trigger's guard and check found, and the folder's `memory.md`.
 - **AUTO-9** new: Each run is a session of the automation on its own branch
-  `am/<automation>-<run>` from the default branch, never a task.
+  `am/<automation>-<run>` from the default branch, never a task. A firing while a
+  run of the automation is still going is skipped and recorded as such.
 - **AUTO-10** new: End mode Finish (default): the run writes its outputs into the
-  folder, deploys nothing, and its session ends. End mode Wait for review: its
-  session stays open and the run counts as waiting on you.
-- **AUTO-11** new: A run can be followed up by going on in its session, or by
-  starting a session on the automation, optionally from a run (its branch and
-  outputs).
+  folder, deploys its work (a pull request it merges once checks pass, MERGE-2),
+  and its session ends; a run with nothing to deploy deletes its branch. End mode
+  Wait for review: the run writes its outputs and pushes its branch, deploys
+  nothing, its session stays open, and it counts as waiting on you.
+- **AUTO-14** new: A run that reaches its automation's time limit (default 120
+  minutes) is stopped and recorded as timed out.
+- **AUTO-11** new: A run can be followed up by going on in its session (for
+  example to deploy what was reviewed), or by starting a session on the
+  automation, optionally from a run (its branch and outputs).
 - **AUTO-12** new: Making a task from a run gives the task the run's branch and
   links the run's outputs.
 - **AUTO-7** changed: An automation's page shows first what its runs produced and
-  what waits for review, then its runs with time, session, and outcome.
+  what waits for review, then its runs and firings with time, session, and outcome.
+- **AUTO-15** new: People create and change automations on the site; agents do the
+  same with `am automation`, so an agent can set one up with a person.
 - **SESSION-5** changed: A session belongs to one task or one automation and runs
   in one workspace on one machine at a time.
 - **AUTO-3, AUTO-4, AUTO-5, AUTO-6** retired: event triggers and dedupe are not in
   the design (Deferred mentions events); AUTO-6 is replaced by end modes.
 - REVIEW-1..3 (inbox) stay.
+
+First automation (draftcoach, set up with `am automation` once built): "Patch
+review". A schedule every 15 minutes; no guard; a check that reads Riot
+Phroxzon's posts and answers yes when there is a patch preview or an update newer
+than the one in `memory.md`. The run updates the patch preview pages (all
+locales, as Patch 26.21 was done by hand: `web/src/data/patch-notes`,
+`web/tools/patch-cards/specs`) and renders the social cards into
+`runs/<run>/`. End mode Wait for review.
 
 ## Step 8: commits, stops, local runs
 
