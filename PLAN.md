@@ -102,6 +102,20 @@ Still open:
   `am-t-<session>.draftcoach.gg`. No Kubernetes, no Tailscale, no new domain.
   Commits under the user's identity.
 
+### Chat: our own UI on `omp acp`, replacing Tern (decided, not scheduled)
+- omp is what matters (the harness); Tern is only used as the chat, and its
+  terminal, file blocks, and built-in features are not wanted.
+- Tern costs us: an extra layer of nesting, waiting on upstream fixes, harder
+  integration with our own pages, a font we cannot change (the web client draws on
+  a canvas with fonts built into its wasm).
+- Plan: the app draws the chat itself from `omp acp` (transcript, streaming,
+  tools, questions, subagents, `/sessions`), the way the user's chat wrapper for
+  kiro cli at work does. AGENT-1..7 move from Tern to it.
+- Until then: never open a Markdown file in Tern's web client. It panics the wasm
+  and freezes the whole chat, again on every reload, until the file block is
+  closed (`tern close <block>` with the session's `TERN_DAEMON_SOCKET` and
+  `TERN_CONFIG_DIR`). Upstream: stencil-hq/tern-sdk#78, open in 0.9.4 and 0.9.5.
+
 ## Backlog
 - Per-turn snapshots (TURN-1); TRANSCRIPT claims.
 - A failed turn (for example an expired model key) shows on the card as an error,
