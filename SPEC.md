@@ -56,9 +56,11 @@ Unnumbered intent; not testable, so not claims.
 | Concept | Meaning |
 |---|---|
 | Store | One Agent Monitor server and its SQLite database |
-| Project | Repos, topics, tasks, sessions, automations; lives in one store |
-| Topic | Long-lived area of work (an epic) with a short status and linked history |
-| Task | Requested work with a state, a branch, a status, notes, and the sessions that worked on it |
+| Topic | Long-lived area of work (an epic) with a short status, a colour, and linked history |
+| Task | Requested work with a state, an assignee, a branch, a status, comments, a folder, and the sessions that worked on it |
+| Person | Someone who uses a store: its owner, or a teammate the owner added |
+| Comment | Discussion between people (and agents) on a task; never part of a running chat |
+| Folder | A task's (later an automation's) files, kept in the store, not in git |
 | Session | One agent run on a task: a workspace and the agent chats in it |
 | Chat | One omp conversation; a session can start any number of them |
 | Workspace | Where a running session lives: its worktree and its container, or its host processes, on one machine |
@@ -169,14 +171,14 @@ Unnumbered intent; not testable, so not claims.
 
 ## Session cards
 
-- **CARD-1** Each running session's card shows whether it is waiting on you,
-  working, idle, or stopped.
+- **CARD-1** A task's card and page show its running session as waiting on you,
+  working, idle, or stopped; working pulses.
 - **CARD-2** Each session card shows the last user message and the agent's last
   reply.
-- **CARD-3** Each session card shows its uncommitted changes, unpushed commits,
-  and open pull requests.
-- **CARD-4** Each session card names the other running sessions in its project
-  that changed any of the same files.
+- **CARD-3** A task's Changes view shows what its branch changed against the
+  default branch, its uncommitted files, and its open pull requests.
+- **CARD-4** A task's Changes view names the other running tasks of the project
+  that changed any of the same files, and its card marks that it has them.
 - **CARD-5** Sessions waiting on you sort first.
 
 ## Tasks
@@ -191,7 +193,7 @@ Unnumbered intent; not testable, so not claims.
   every session of the task works on that branch, which outlives them.
 - **TASK-5** A task has at most one running session.
 - **TASK-6** A session's first chat starts with its task's title, description,
-  status, and notes in context.
+  status, and comments in context.
 - **TASK-7** A task has a status of at most 50 lines that its agents keep
   current; a status write based on a stale revision is rejected.
 - **TASK-8** A task has notes. The user writes them in the task's Notes tab,
@@ -204,14 +206,56 @@ Unnumbered intent; not testable, so not claims.
   session's name, branch, topic links, and notes.
 - **TASK-11** `am check` lists a session's uncommitted files, unpushed commits,
   and untracked files that look like secrets, and fails while there are any.
+- **TASK-12** Opening a task (from the board, the task list, a link) shows its
+  page: title, description, state, assignee, topics, folder, comments, history,
+  and its sessions; title, description, state, assignee, and topics are edited in
+  place.
+- **TASK-13** A task's assignee is one person or nobody.
+- **TASK-14** A task's history lists in time order its state and assignee
+  changes, topic links, sessions started and ended (with their machine),
+  comments, files added, and pull requests, each with who and when.
+- **TASK-15** Every task's notes became a comment by the store's owner, dated
+  when the notes were last written.
+
+## People
+
+- **PERSON-1** A store has people, each with a name and an avatar; its owner
+  adds them. Every human action (comment, state change, upload, start or end of a
+  session) is recorded with the person who did it. Until login exists every
+  request is the store's owner.
+- **PERSON-2** An agent's actions are recorded as the agent of its session,
+  shown with the session's avatar and linking to the session.
+
+## Comments
+
+- **COMMENT-1** People comment on a task from its page, agents with `am
+  comment`; a comment is Markdown, shows rendered, and shows its author and time.
+- **COMMENT-2** A comment's author can edit or delete it; an edited comment says
+  so.
+- **COMMENT-3** Comments are discussion between people and never reach a running
+  session's chat; its agent reads them when its session starts (TASK-6) and when
+  it asks (`am comments`).
+
+## Folders
+
+- **FOLDER-1** Every task has a folder in the store, not in git. People add files
+  by dropping them on the task's page, agents with `am folder`.
+- **FOLDER-2** A folder's files show inline by kind (images, video, PDF,
+  Markdown, text), each with who added it and when; one file or the whole folder
+  downloads, the folder as a zip.
+- **FOLDER-3** A session's agent finds its task's folder as a directory in its
+  workspace; what it writes there shows on the page within seconds, and the
+  reverse.
 
 ## Board
 
-- **BOARD-1** The board shows the project's tasks in columns by state; each card
-  shows the task's title and topics, and its running session's light, last
-  messages, and changes.
+- **BOARD-1** The board shows the project's tasks in Open, In progress, and In
+  review; each card shows the task's title, topic names, assignee, and its
+  running session's state and machine.
 - **BOARD-2** Tasks waiting on you sort first in their column, and the header
   counts them.
+- **BOARD-3** Done and cancelled tasks leave the board; search and the All tasks
+  list find every task by title, description, and comments.
 
 ## Review inbox
 
@@ -282,12 +326,16 @@ Unnumbered intent; not testable, so not claims.
 - **UI-1** The app's header names Agent Monitor and its menus, Board and Tasks.
   The Tasks page lists the project's open and in-progress tasks beside a
   workspace that shows the chosen task.
-- **UI-2** A task's workspace has a Chat tab, showing its running session's chat
-  or starting a session, and a Notes tab; at the right of its tabs a settings
-  button shows the task's state, topic links, status, changes, Cloudflare writes,
-  ending its session, and finishing it. Switching tabs keeps the chat loaded.
+- **UI-2** A task has three tabs: Page, Chat (its running session's chat, or
+  starting one), and Settings, a full tab at the right of the tabs with subtabs
+  Changes, Previews, Cloudflare, and End session. Switching tabs keeps the chat
+  loaded.
 - **UI-3** The Tasks page's project menu creates a project from its name, its
   repository, and whether it allows host sessions.
+- **UI-4** A topic's name shows the same everywhere, in the topic's own colour;
+  clicking it opens a panel with its rendered status and linked tasks.
+- **UI-5** The header counts the tasks waiting on you, on every page, and links
+  to them.
 
 ## Agent interface
 
