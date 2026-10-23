@@ -49,27 +49,7 @@ comes first, and the user picks before it is built in.
 
 ## Step 5: hub on Hetzner
 
-- **AUTH-1** new: Every request to the hub, its session hosts, and its previews
-  needs a valid Cloudflare Access token for the hub; the hub checks the token
-  itself, so a request that bypasses the tunnel is refused.
-- **AUTH-2** new: A person logs in through Cloudflare Access with their email and
-  acts as the person with that email; an email that is not a person of the store
-  is refused.
-- **AUTH-3** new: Every person of a hub sees and works on all its projects; only
-  its owner adds people, starts host sessions, and allows Cloudflare writes.
-- **HOST-1** changed: A session runs its agent in a container, or on the host when
-  its project allows host sessions; a project allows them only when its store's
-  owner says so.
-- **HOST-2** changed: "on the gateway's machine" becomes "on the machine that runs
-  it, as that machine's user".
-- **STORE-3** changed: A client configured with hubs lists their projects beside
-  its own, shows each hub project as the hub's site does, and marks unreachable
-  hubs as unavailable.
-- **PREVIEW-2** changed: The UI, each session's chat, and each preview are each
-  their own origin: `am.draftcoach.gg`, `am-t-<session>.draftcoach.gg`,
-  `am-p-<task>.draftcoach.gg`.
-- **STORE-6** new: Moving a store to another machine keeps every project, topic,
-  task, comment, folder, and chat.
+Moved into SPEC.md: AUTH-1..3, HOST-1/2, STORE-3, PREVIEW-2, STORE-6.
 
 ## Step 6: previews
 
@@ -153,4 +133,3 @@ comes first, and the user picks before it is built in.
 ## Not drafted yet
 
 - How the integrator pulls in other tasks' branches.
-- Switching host sessions on for an existing project (project settings, step 4).

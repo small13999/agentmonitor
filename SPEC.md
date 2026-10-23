@@ -55,7 +55,10 @@ Unnumbered intent; not testable, so not claims.
 
 | Concept | Meaning |
 |---|---|
-| Store | One Agent Monitor server and its SQLite database |
+| Store | One Agent Monitor server and its SQLite database: projects, topics, tasks, comments, folders, chats; a project lives in exactly one store |
+| Hub | A store that people other than its owner reach over the network (`am.draftcoach.gg`) |
+| Client | The user's local Agent Monitor, which also shows the projects of the hubs it is configured with |
+| Machine | Where a session's workspace runs; a store's own machine runs its sessions |
 | Topic | Long-lived area of work (an epic) with a short status, a colour, and linked history |
 | Task | Requested work with a state, an assignee, a branch, a status, comments, a folder, and the sessions that worked on it |
 | Person | Someone who uses a store: its owner, or a teammate the owner added |
@@ -64,7 +67,8 @@ Unnumbered intent; not testable, so not claims.
 | Session | One agent run on a task: a workspace and the agent chats in it |
 | Chat | One omp conversation; a session can start any number of them |
 | Workspace | Where a running session lives: its worktree and its container, or its host processes, on one machine |
-| Host session | A session whose agent runs on the machine itself as the user, without a container |
+| Host session | A session whose agent runs as the machine's user, without a container; on a hub only its owner starts them |
+| Integrator | A project's host session in its main checkout, where other tasks' branches are merged |
 | Automation | Trigger (schedule or event) that starts a session |
 | Event | Fact emitted by an agent or the system, with a dedupe key |
 | Lease | Exclusive hold on a named resource |
@@ -86,12 +90,26 @@ Unnumbered intent; not testable, so not claims.
 - **STORE-1** Every record belongs to exactly one store, the store of its
   project.
 - **STORE-2** A record can link only to records in the same store.
-- **STORE-3** A client configured with several stores lists the projects of
-  every reachable store and marks unreachable stores as unavailable.
+- **STORE-3** A client configured with hubs lists their projects beside its own,
+  shows each hub project as the hub's site does, and marks unreachable hubs as
+  unavailable.
 - **STORE-4** Starting a session in a project whose store is unreachable fails
   with an error naming the store.
 - **STORE-5** Every action and every piece of data shown in the UI is available
   to agents as a tool backed by the same store API endpoint.
+- **STORE-6** Moving a store to another machine keeps every project, topic, task,
+  comment, folder, and chat.
+
+## Access
+
+- **AUTH-1** Every request to the hub, its session hosts, and its previews needs a
+  valid Cloudflare Access token for the hub; the hub checks the token itself, so a
+  request that bypasses the tunnel is refused.
+- **AUTH-2** A person logs in through Cloudflare Access with their email and acts
+  as the person with that email; an email that is not a person of the store is
+  refused.
+- **AUTH-3** Every person of a hub sees and works on all its projects; only its
+  owner adds people, starts host sessions, and allows Cloudflare writes.
 
 ## Sessions
 
@@ -124,11 +142,12 @@ Unnumbered intent; not testable, so not claims.
 ## Host sessions
 
 - **HOST-1** A session runs its agent in a container, or on the host when its
-  project allows host sessions; a project allows them only when a human says so.
-- **HOST-2** A host session's agent runs on the gateway's machine as the user,
-  in the session's own worktree, with the user's tools, git identity, ssh keys
-  and GitHub CLI login, and can start processes of its own; ending the session
-  stops all of them.
+  project allows host sessions; a project allows them only when its store's owner
+  says so.
+- **HOST-2** A host session's agent runs on the machine that runs it, as that
+  machine's user, in the session's own worktree, with the user's tools, git
+  identity, ssh keys and GitHub CLI login, and can start processes of its own;
+  ending the session stops all of them.
 - **HOST-3** A host session is marked red on its board card, its task list row,
   and its task's settings.
 - **HOST-4** A host session's chat, task context, `am`, card, and restart on
@@ -267,8 +286,9 @@ Unnumbered intent; not testable, so not claims.
 
 - **PREVIEW-1** Each running session's service ports are reachable at
   authenticated URLs from outside the machine running it.
-- **PREVIEW-2** Each preview URL has its own origin, separate from the Agent
-  Monitor UI and other previews.
+- **PREVIEW-2** The UI, each session's chat, and each preview are each their own
+  origin: `am.draftcoach.gg`, `am-t-<session>.draftcoach.gg`,
+  `am-p-<task>.draftcoach.gg`.
 - **PREVIEW-3** A preview whose container is stopped shows as stopped with an
   action to start the session's container again.
 
