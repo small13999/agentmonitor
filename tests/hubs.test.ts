@@ -99,7 +99,7 @@ let chrome: Browser;
 let access: FakeAccess;
 
 before(async () => {
-  buildApp();
+  await buildApp();
   [chrome, access] = await Promise.all([chromium.launch(), FakeAccess.start()]);
 });
 after(async () => {

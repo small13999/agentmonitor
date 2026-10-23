@@ -56,7 +56,7 @@ function userConfig(): Map<string, string> {
 }
 
 before(async () => {
-  buildApp();
+  await buildApp();
   scratch = mkdtempSync(join(tmpdir(), "am-host-"));
   repo = join(scratch, "fixture");
   mkdirSync(repo);

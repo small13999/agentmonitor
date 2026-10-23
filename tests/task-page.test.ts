@@ -16,7 +16,7 @@ let project: Project;
 let owner: Person;
 
 before(async () => {
-  buildApp();
+  await buildApp();
   [gateway, chrome] = await Promise.all([Gateway.start(), chromium.launch()]);
   page = await chrome.newPage();
   page.setDefaultTimeout(10_000);

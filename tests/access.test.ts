@@ -24,7 +24,7 @@ function edge(token: string): Record<string, string> {
 }
 
 before(async () => {
-  buildApp();
+  await buildApp();
   access = await FakeAccess.start();
   configDir = mkdtempSync(join(tmpdir(), "am-access-config-"));
   mkdirSync(join(configDir, "cloudflare"));
