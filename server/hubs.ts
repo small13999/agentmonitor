@@ -88,6 +88,11 @@ class Hub {
         resolve(token);
         return;
       }
+      // A command that is not installed needs installing, not a login.
+      if (error !== null && "code" in error && error.code === "ENOENT") {
+        reject(new HubUnavailable(`token command not found: ${command}`));
+        return;
+      }
       const detail = stderr.trim().split("\n").pop() || (error?.message ?? "printed no token");
       reject(new HubUnavailable(this.loginHint(`token command failed: ${detail}`)));
     });
