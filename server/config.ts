@@ -7,7 +7,7 @@ export type AuthMode = "local" | "remote-cookie";
 export interface GatewayConfig {
   /** "local" preserves current open-loopback behavior; "remote-cookie" requires login. */
   authMode: AuthMode;
-  /** Exact public origin, e.g. https://hetzner-dev.<tail>.ts.net. Remote mode only. */
+  /** Exact public origin of the UI, e.g. https://am.draftcoach.gg; chat and preview hosts derive from it (shared/hosts.ts). */
   publicOrigin: string | null;
   /** Path to the 0600 login-secret file. Remote mode only; env carries the path, never the value. */
   loginSecretFile: string | null;
@@ -21,7 +21,7 @@ export interface GatewayConfig {
   workspaceRuntime: "podman" | "none";
   /** Memory limit of each workspace container. */
   workspaceMemoryMib: number;
-  /** Port the gateway listens on; workspace Tern origins are derived from it. */
+  /** Port the gateway listens on. */
   port: number;
   /** The omp agent directory whose credentials (agent.db) and providers (models.db, models.yml) workspaces use. */
   ompAgentDir: string;
@@ -58,19 +58,25 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig 
     throw new Error(`AGENTMONITOR_AUTH_MODE must be "local" or "remote-cookie"`);
   }
   const remote = authMode === "remote-cookie";
-  const publicOrigin = env.AGENTMONITOR_PUBLIC_ORIGIN ?? null;
+  const configuredOrigin = env.AGENTMONITOR_PUBLIC_ORIGIN ?? null;
   const loginSecretFile = env.AGENTMONITOR_LOGIN_SECRET_FILE ?? null;
-  if (remote && (publicOrigin === null || loginSecretFile === null)) {
+  if (remote && (configuredOrigin === null || loginSecretFile === null)) {
     throw new Error("remote-cookie mode requires AGENTMONITOR_PUBLIC_ORIGIN and AGENTMONITOR_LOGIN_SECRET_FILE");
   }
-  if (remote) {
+  let publicOrigin: string | null = null;
+  if (configuredOrigin !== null) {
     let origin: URL;
     try {
-      origin = new URL(publicOrigin as string);
+      origin = new URL(configuredOrigin);
     } catch {
       throw new Error("AGENTMONITOR_PUBLIC_ORIGIN must be an absolute URL");
     }
-    if (origin.protocol !== "https:") throw new Error("AGENTMONITOR_PUBLIC_ORIGIN must be https:");
+    // The UI is `am.<zone>`; chats and previews are `am-t-…` and `am-p-…` beside it.
+    if (!origin.hostname.startsWith("am.")) throw new Error("AGENTMONITOR_PUBLIC_ORIGIN must name the host am.<zone>");
+    if (remote && origin.protocol !== "https:") throw new Error("AGENTMONITOR_PUBLIC_ORIGIN must be https:");
+    publicOrigin = origin.origin;
+  }
+  if (remote) {
     // Fail closed on a world/group-readable secret file at startup.
     const mode = statSync(loginSecretFile as string).mode & 0o777;
     if (mode & 0o077) {

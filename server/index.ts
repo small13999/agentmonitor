@@ -4,6 +4,7 @@ import { extname, join, normalize, resolve, sep } from "node:path";
 import { handleApi, sendJson } from "./api.ts";
 import { AuthStore } from "./auth.ts";
 import { loadConfig } from "./config.ts";
+import { handlePreview } from "./previews.ts";
 import { StoreService } from "./store/service.ts";
 import { TernProxy } from "./tern-proxy.ts";
 
@@ -55,8 +56,9 @@ async function main(): Promise<void> {
 
   const server = createServer(async (request, response) => {
     try {
-      // Tern hosts first: they are sessions' chats, not the monitor.
+      // Chat and preview hosts first: they are sessions' chats and tasks' previews, not the monitor.
       if (await tern.handleRequest(request, response)) return;
+      if (handlePreview(request, response, config)) return;
       if (await handleApi(request, response, { config, auth, store })) return;
       if (auth.validHost(request, config.publicOrigin) && (await serveStatic(request, response, distDir))) return;
       sendJson(response, 404, { ok: false, error: "unknown endpoint" });

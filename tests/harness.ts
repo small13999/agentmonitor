@@ -1,10 +1,12 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { watch } from "node:fs/promises";
+import { createServer as createHttpsServer, type Server as HttpsServer } from "node:https";
 import { connect, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import httpProxy from "http-proxy";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -154,6 +156,53 @@ export class Gateway {
   /** The gateway's channel into a session's live omp chat, once omp has started it. */
   async omp(sessionId: string): Promise<OmpChannel> {
     return OmpChannel.open(join(this.stateDir, "sessions", sessionId, "run"));
+  }
+}
+
+/**
+ * Cloudflare's tunnel in front of a hub, as the browser and the gateway see it: TLS ends before
+ * the gateway, which gets the browser's Host. Chromium reaches it under the hub's names with
+ * `chromeArgs`, in a context that accepts its self-signed certificate (`ignoreHTTPSErrors`).
+ */
+export class Tunnel {
+  readonly port: number;
+  private readonly server: HttpsServer;
+
+  private constructor(port: number, server: HttpsServer) {
+    this.port = port;
+    this.server = server;
+  }
+
+  static async start(gateway: Gateway): Promise<Tunnel> {
+    const dir = mkdtempSync(join(tmpdir(), "am-tunnel-"));
+    const made = spawnSync("openssl", [
+      "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-days", "1",
+      "-subj", "/CN=tunnel", "-keyout", join(dir, "key.pem"), "-out", join(dir, "cert.pem"),
+    ], { encoding: "utf8" });
+    if (made.status !== 0) throw new Error(`openssl failed:\n${made.stderr}`);
+    const tls = { key: readFileSync(join(dir, "key.pem")), cert: readFileSync(join(dir, "cert.pem")) };
+    rmSync(dir, { recursive: true, force: true });
+    const proxy = httpProxy.createProxyServer({ target: gateway.url });
+    const server = createHttpsServer(tls, (request, response) => proxy.web(request, response));
+    server.on("upgrade", (request, socket, head) => proxy.ws(request, socket, head));
+    const { promise, resolve } = Promise.withResolvers<number>();
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      resolve(typeof address === "object" && address !== null ? address.port : 0);
+    });
+    return new Tunnel(await promise, server);
+  }
+
+  /** Chromium's arguments that send every name under `zone` to the tunnel. */
+  chromeArgs(zone: string): string[] {
+    return [`--host-resolver-rules=MAP *.${zone} 127.0.0.1:${this.port}`];
+  }
+
+  async stop(): Promise<void> {
+    const { promise, resolve } = Promise.withResolvers<void>();
+    this.server.close(() => resolve());
+    this.server.closeAllConnections();
+    await promise;
   }
 }
 

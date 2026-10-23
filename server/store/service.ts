@@ -6,6 +6,7 @@ import { basename, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
 import type { Card, EndedSession, HistoryEntry, TaskChanges, UnpushedWork } from "../../shared/api.ts";
+import { gatewayZone, hostOrigin } from "../../shared/hosts.ts";
 import { projectCards } from "../cards.ts";
 import { taskChanges } from "../changes.ts";
 import { CLOUDFLARE_API_PREFIX, CloudflareBroker } from "../cloudflare.ts";
@@ -34,7 +35,7 @@ import { Store, StoreError, type Principal, type Session, type SessionRuntime, t
 
 type ServiceConfig = Pick<
   GatewayConfig,
-  "workspaceRuntime" | "workspaceMemoryMib" | "machineName" | "ompAgentDir" | "credentialsHome" | "configDir" | "cloudflareApi"
+  "workspaceRuntime" | "workspaceMemoryMib" | "machineName" | "ompAgentDir" | "credentialsHome" | "configDir" | "cloudflareApi" | "publicOrigin"
 >;
 
 export interface TernUpstream {
@@ -197,7 +198,7 @@ export class StoreService implements StoreContext {
         // A resumed chat keeps the model it last ran.
         model: resume === null ? session.model : null,
         resume,
-        ternOrigin: `http://tern-${session.id}.localhost`,
+        ternOrigin: hostOrigin(gatewayZone(this.config.publicOrigin), { kind: "chat", sessionId: session.id }),
         cloudflare: this.cloudflare.tokens(project.name) !== null,
         taskContext: this.taskContext(session.taskId, { kind: "none" }, session.checkout ? project.repoPath : null, session.runtime),
       });
@@ -360,7 +361,7 @@ export class StoreService implements StoreContext {
         folder: this.folders.dir(task.id),
         model: input.model ?? null,
         resume: null,
-        ternOrigin: `http://tern-${created.id}.localhost`,
+        ternOrigin: hostOrigin(gatewayZone(this.config.publicOrigin), { kind: "chat", sessionId: created.id }),
         cloudflare: this.cloudflare.tokens(project.name) !== null,
         taskContext: this.taskContext(task.id, restored, created.checkout ? repo : null, kind),
       });

@@ -2,12 +2,12 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import { setTimeout as sleep } from "node:timers/promises";
 import httpProxy from "http-proxy";
+import { hostRole } from "../shared/hosts.ts";
 import type { AuthStore } from "./auth.ts";
 import type { GatewayConfig } from "./config.ts";
 import type { StoreService } from "./store/service.ts";
 import { StoreError } from "./store/store.ts";
 
-const TERN_HOST = /^tern-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.localhost(?::\d+)?$/;
 /** The image names Tern's script and wasm with a content version (container/tern-web-assets.ts). */
 const VERSIONED_ASSET = /^\/pkg\/[^?]+\?v=[0-9a-f]+$/;
 /** Tern's fallback fonts for characters its built-in faces lack: `/fonts?chars=…` names them, `/fonts/<id>` serves one. */
@@ -20,7 +20,7 @@ const FONTS = /^\/fonts(?:\/|$)/;
 const RECONNECT_SETTLE_MS = 3_000;
 
 export interface TernProxyDeps {
-  config: Pick<GatewayConfig, "authMode">;
+  config: Pick<GatewayConfig, "publicOrigin">;
   auth: AuthStore;
   store: StoreService;
 }
@@ -30,11 +30,10 @@ function reject(socket: Duplex, status: number, reason: string): void {
 }
 
 /**
- * Each session's Tern web client on its own host, tern-<session id>.localhost, since
- * Tern's page loads everything from root paths. The gateway checks the browser and adds
- * what the container's `tern web serve` asks for, the token on /wire and /fonts and the
- * origin it accepts, so neither reaches the browser. Local mode only: *.localhost names
- * resolve on the browser's own machine.
+ * Each session's Tern web client on its own host, the session's chat host `am-t-<session id>`
+ * (shared/hosts.ts), since Tern's page loads everything from root paths. The gateway checks the
+ * browser and adds what the container's `tern web serve` asks for, the token on /wire and /fonts
+ * and the origin it accepts, so neither reaches the browser.
  *
  * Tern sends every file uncacheable; the versioned script and wasm are marked immutable
  * instead. Chrome keeps the script but refetches the 60 MB wasm, likely over its cache's entry limit.
@@ -59,8 +58,8 @@ export class TernProxy {
   }
 
   private sessionId(request: IncomingMessage): string | null {
-    if (this.deps.config.authMode !== "local") return null;
-    return TERN_HOST.exec(request.headers.host ?? "")?.[1] ?? null;
+    const role = hostRole(request.headers.host, this.deps.config.publicOrigin);
+    return role?.kind === "chat" ? role.sessionId : null;
   }
 
   /** Serves a request for a Tern host; false for every other host. */
@@ -76,7 +75,7 @@ export class TernProxy {
       return true;
     }
     // Tern serves fonts to its own page only; a page of another site gets no token added.
-    if (FONTS.test(new URL(request.url ?? "/", "http://localhost").pathname) && !this.deps.auth.validOrigin(request, null)) {
+    if (FONTS.test(new URL(request.url ?? "/", "http://localhost").pathname) && !this.deps.auth.validOrigin(request, this.deps.config.publicOrigin)) {
       fail(403, "This origin may not read Tern's fonts.");
       return true;
     }
@@ -122,7 +121,7 @@ export class TernProxy {
     if (sessionId === null) return false;
     if (!this.deps.auth.isAuthenticated(request)) reject(socket, 401, "Unauthorized");
     // Pages of other sites must not drive the session from the user's browser.
-    else if (request.headers.origin === undefined || !this.deps.auth.validOrigin(request, null)) reject(socket, 403, "Forbidden");
+    else if (request.headers.origin === undefined || !this.deps.auth.validOrigin(request, this.deps.config.publicOrigin)) reject(socket, 403, "Forbidden");
     else if (new URL(request.url ?? "/", "http://localhost").pathname !== "/wire") reject(socket, 404, "Not Found");
     else {
       try {

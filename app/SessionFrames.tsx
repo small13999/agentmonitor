@@ -1,16 +1,13 @@
 import { useEffect, useState } from "react";
+import { hostOrigin, zoneOf } from "../shared/hosts.ts";
 
 /** Sessions whose chats stay loaded after you leave them, so going back shows them at once. */
 const KEPT = 4;
 
-function ternUrl(sessionId: string): string {
-  return `${location.protocol}//tern-${sessionId}.localhost${location.port === "" ? "" : `:${location.port}`}/`;
-}
-
 /**
  * The running sessions' chats: Tern's chat on omp, in Tern's web client, which the gateway
- * serves for each session on its own host (server/tern-proxy.ts). *.localhost names resolve
- * on the browser's own machine, so this needs the monitor in local mode.
+ * serves for each session on its own chat host beside the UI's, `am-t-<session id>`
+ * (shared/hosts.ts, server/tern-proxy.ts).
  *
  * Starting Tern's client takes a second or two, so the last few sessions' clients stay
  * loaded, hidden, and the current one shows. Frames keep the order they opened in: moving an
@@ -43,7 +40,7 @@ export function SessionFrames({ current, covered, running, stopped }: {
         <iframe
           key={id}
           className={id === current ? "session-frame current" : "session-frame"}
-          src={ternUrl(id)}
+          src={`${hostOrigin(zoneOf(location), { kind: "chat", sessionId: id })}/`}
           title={id === current ? "Session" : "Session (hidden)"}
           allow="clipboard-read; clipboard-write"
           onLoad={() => setLoaded((before) => new Set([...before, id]))}

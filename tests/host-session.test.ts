@@ -168,7 +168,7 @@ async function asAgent(target: Session, method: string, path: string, body: unkn
 /** Asks the gateway for the session's Tern page, as the session's frame does: the response's status. */
 async function ternPage(sessionId: string): Promise<number> {
   const { promise, resolve, reject } = Promise.withResolvers<number>();
-  get({ host: "127.0.0.1", port: new URL(gateway.url).port, path: "/", headers: { host: `tern-${sessionId}.localhost` } }, (response) => {
+  get({ host: "127.0.0.1", port: new URL(gateway.url).port, path: "/", headers: { host: `am-t-${sessionId}.localhost` } }, (response) => {
     response.resume();
     resolve(response.statusCode ?? 0);
   }).on("error", reject);

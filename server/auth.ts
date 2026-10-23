@@ -1,6 +1,7 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { gatewayZone, hostOrigin, hostRole } from "../shared/hosts.ts";
 import type { GatewayConfig } from "./config.ts";
 
 export const SESSION_COOKIE = "__Host-agentmonitor";
@@ -40,28 +41,25 @@ export class AuthStore {
     return this.secret !== null;
   }
 
-  /** Exact-origin check for cookie-authenticated state changes and upgrades. No reflected Host. */
+  /**
+   * Exact-origin check for cookie-authenticated state changes and upgrades: the page asking is
+   * on the host it asks (shared/hosts.ts). No reflected Host in a hub: its hosts are known.
+   */
   validOrigin(request: IncomingMessage, publicOrigin: string | null): boolean {
+    const origin = request.headers.origin;
+    const host = request.headers.host;
     if (publicOrigin === null) {
       // Local mode preserves the existing same-host Origin behavior.
-      const origin = request.headers.origin;
       if (origin === undefined) return true;
-      const host = request.headers.host;
       return host !== undefined && (origin === `http://${host}` || origin === `https://${host}`);
     }
-    return request.headers.origin === publicOrigin;
+    const role = hostRole(host, publicOrigin);
+    return role !== null && origin === hostOrigin(gatewayZone(publicOrigin), role);
   }
 
-  /** Exact-host check: preview/subdomain hosts must never reach monitor APIs. */
+  /** Exact-host check: chat, preview, and unknown hosts must never reach monitor APIs. */
   validHost(request: IncomingMessage, publicOrigin: string | null): boolean {
-    if (publicOrigin === null) return true;
-    const host = request.headers.host;
-    if (host === undefined) return false;
-    try {
-      return host.toLowerCase() === new URL(publicOrigin).host.toLowerCase();
-    } catch {
-      return false;
-    }
+    return hostRole(request.headers.host, publicOrigin)?.kind === "ui";
   }
 
   sessionId(request: IncomingMessage): string | null {
