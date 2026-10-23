@@ -10,7 +10,8 @@ import { Gateway } from "./harness.ts";
 import { spec } from "./spec.ts";
 
 // Each claim runs its own gateway, whose scheduler goes by the time the test sets (the harness's
-// clock file). Test gateways start at 2030-01-07T06:00Z, a Monday: 07:00 in Budapest.
+// clock file). AUTO-2 and AUTO-8 start at 2030-01-07T06:00Z, a Monday: 07:00 in Budapest.
+const MONDAY = "2030-01-07T06:00:00.000Z";
 
 let scratch: string;
 /** omp's agent directory for the gateways: the scripted model is the `tiny` role, which checks use. */
@@ -33,8 +34,8 @@ after(async () => {
   if (scratch !== undefined) rmSync(scratch, { recursive: true, force: true });
 });
 
-async function gatewayWithProject(): Promise<{ gateway: Gateway; projectId: string }> {
-  const gateway = await Gateway.start({ runtime: "none", env: { AGENTMONITOR_OMP_AGENT_DIR: agentDir } });
+async function gatewayWithProject(clock?: string): Promise<{ gateway: Gateway; projectId: string }> {
+  const gateway = await Gateway.start({ runtime: "none", clock, env: { AGENTMONITOR_OMP_AGENT_DIR: agentDir } });
   const projectId = (await gateway.data<{ id: string }>("POST", "/projects", { name: "draftcoach" })).id;
   return { gateway, projectId };
 }
@@ -56,11 +57,11 @@ async function automation(
 
 /** Resolves once the gateway says what became of the automation's firing for `scheduled`, with that line. */
 function fired(gateway: Gateway, name: string, scheduled: string): Promise<string> {
-  return gateway.logged(new RegExp(`automation "${name}" fired for ${scheduled.replaceAll(".", "\\.")}`));
+  return gateway.logged(new RegExp(`automation "${name}" fired for ${scheduled.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
 }
 
 spec("AUTO-2", "a schedule in its timezone fires once per time, also across a restart, and a time missed while down fires once when back", async () => {
-  let { gateway, projectId } = await gatewayWithProject();
+  const { gateway, projectId } = await gatewayWithProject(MONDAY);
   try {
     // 08:00 every day, in Budapest (the default) and in UTC.
     const budapest = await automation(gateway, projectId, "Budapest", { cron: "0 8 * * *" });
@@ -85,14 +86,14 @@ spec("AUTO-2", "a schedule in its timezone fires once per time, also across a re
     await endRun(budapest.automation.id);
 
     // A restart fires nothing again, neither at once nor later that day.
-    gateway = await gateway.restart();
+    await gateway.restart();
     gateway.setClock("2030-01-07T08:00:30.000Z");
     assert.match(await fired(gateway, "UTC", "2030-01-07T08:00:00.000Z"), /: started/);
     assert.deepEqual((await firingsOf(budapest.automation.id)).map((found) => found.id), [onTime.id]);
     await endRun(utc.automation.id);
 
     // Down over two days: each trigger fires once, for the latest time it missed, as caught up.
-    gateway = await gateway.restart("2030-01-09T09:30:00.000Z");
+    await gateway.restart("2030-01-09T09:30:00.000Z");
     assert.match(await fired(gateway, "Budapest", "2030-01-09T07:00:00.000Z (caught up)"), /: started/);
     assert.match(await fired(gateway, "UTC", "2030-01-09T08:00:00.000Z (caught up)"), /: started/);
     const times = async (id: string) => (await firingsOf(id)).map((found) => [new Date(found.scheduledAt).toISOString(), found.caughtUp, found.outcome]);
@@ -109,7 +110,7 @@ spec("AUTO-2", "a schedule in its timezone fires once per time, also across a re
 });
 
 spec("AUTO-8", "a firing runs its guard, then its check; a run starts only when both pass, and every firing records what they said", async () => {
-  const { gateway, projectId } = await gatewayWithProject();
+  const { gateway, projectId } = await gatewayWithProject(MONDAY);
   try {
     const guarded = await automation(gateway, projectId, "Guarded", { cron: "0 8 * * *", guardPath: "guard.sh", checkPath: "check.md" }, {
       "guard.sh": "#!/bin/bash\necho no patch yet\nexit 1\n",
@@ -144,21 +145,15 @@ spec("AUTO-8", "a firing runs its guard, then its check; a run starts only when 
       ["check", { passed: true, output: "patch 26.20\n" }, { passed: false, output: "26.20-was-reviewed" }, []],
     );
 
-    // Both pass: a run starts, holding what they said.
+    // Both pass: a run starts, its prompt holding the time and what they said.
     const started = await outcome(passing.automation.id);
     const guard = { passed: true, output: `say:{"answer":"yes","why":"26.21-is-new"}\n` };
     const check = { passed: true, output: "26.21-is-new" };
     assert.deepEqual([started.firing.outcome, started.firing.guard, started.firing.check, started.firing.sessionId], ["started", guard, check, started.runs[0]?.id]);
-    assert.deepEqual(started.runs[0].run?.triggerContext, {
-      firingId: started.firing.id,
-      triggerId: passing.trigger.id,
-      cron: "0 8 * * *",
-      timezone: "Europe/Budapest",
-      scheduledAt: Date.parse(scheduled),
-      caughtUp: false,
-      guard,
-      check,
-    });
+    const context = started.runs[0].run?.triggerContext ?? "";
+    assert.match(context, /`0 8 \* \* \*` \(Europe\/Budapest\), for 2030-01-07 08:00 there \(2030-01-07T07:00:00\.000Z\)\./);
+    assert.ok(context.includes(`passed. What it printed:\n\n~~~~\nsay:{"answer":"yes","why":"26.21-is-new"}\n~~~~`), context);
+    assert.match(context, /check, `check\.md` in the folder, said yes: 26\.21-is-new/);
 
     // Agents see the firings with am.
     const task = await gateway.data<Task>("POST", `/projects/${projectId}/tasks`, { title: "Patch review setup" });
@@ -172,12 +167,17 @@ spec("AUTO-8", "a firing runs its guard, then its check; a run starts only when 
 });
 
 spec("AUTO-9", "a firing while a run of the automation is still going is skipped and recorded as such", async () => {
-  const { gateway, projectId } = await gatewayWithProject();
+  // The run going started by the real time, and keeps within its time limit (AUTO-14) only if the
+  // firing comes soon after: the next minute, in UTC.
+  const start = Date.now();
+  const { gateway, projectId } = await gatewayWithProject(new Date(start).toISOString());
   try {
-    const busy = await automation(gateway, projectId, "Busy", { cron: "0 8 * * *", guardPath: "guard.sh" }, { "guard.sh": "echo would pass\n" });
+    const next = new Date(Math.floor(start / 60_000) * 60_000 + 60_000);
+    const cron = `${next.getUTCMinutes()} ${next.getUTCHours()} * * *`;
+    const busy = await automation(gateway, projectId, "Busy", { cron, timezone: "UTC", guardPath: "guard.sh" }, { "guard.sh": "echo would pass\n" });
     const going = await gateway.data<Session>("POST", `/automations/${busy.automation.id}/runs`, {});
-    gateway.setClock("2030-01-07T07:00:30.000Z");
-    assert.match(await fired(gateway, "Busy", "2030-01-07T07:00:00.000Z"), /: running/);
+    gateway.setClock(new Date(next.getTime() + 30_000).toISOString());
+    assert.match(await fired(gateway, "Busy", next.toISOString()), /: running/);
     const [firing] = await gateway.data<Firing[]>("GET", `/automations/${busy.automation.id}/firings`);
     // Skipped before its guard ran; the run going is still the only one.
     assert.deepEqual([firing.outcome, firing.guard, firing.check, firing.sessionId], ["running", null, null, null]);

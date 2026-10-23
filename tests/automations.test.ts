@@ -72,6 +72,7 @@ spec("AUTO-1", "an automation has a name, instructions, a model, triggers, an en
     startedBy: { kind: "person", personId: owner.id },
     triggerContext: null,
     outcome: null,
+    reason: null,
     endedBy: null,
   }]);
   assert.equal((await gateway.api("POST", `/automations/${created.id}/runs`, {})).status, 409, "one run at a time");

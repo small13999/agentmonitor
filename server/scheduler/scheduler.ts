@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { z } from "zod";
-import type { Automation, Firing, FiringOutcome, Trigger, TriggerContext } from "../../shared/api.ts";
+import type { Automation, Firing, FiringOutcome, FiringVerdict, Trigger } from "../../shared/api.ts";
 import type { Folders } from "../store/folders.ts";
 import type { RunInput } from "../store/http.ts";
 import { StoreError, type Session, type Store } from "../store/store.ts";
@@ -156,18 +156,35 @@ export class Scheduler {
     if (guard !== null && !guard.passed) return { ...nothing, guard, outcome: "guard" };
     const check = trigger.checkPath === null ? null : await runCheck(this.gates, { ...gate, path: trigger.checkPath, guardOutput: guard?.output ?? null });
     if (check !== null && !check.passed) return { ...nothing, guard, check, outcome: "check" };
-    const triggerContext: TriggerContext = {
-      firingId: claimed.id, triggerId: trigger.id, cron: trigger.cron, timezone: trigger.timezone,
-      scheduledAt: claimed.scheduledAt, caughtUp: claimed.caughtUp, guard, check,
-    };
     try {
-      const run = await this.context.startRun(null, automation.id, { triggerContext });
+      const run = await this.context.startRun(null, automation.id, { triggerContext: firingContext(claimed, trigger, guard, check) });
       return { ...nothing, guard, check, outcome: "started", sessionId: run.id };
     } catch (cause) {
       // While the guard and check ran, the automation may have gone off or started a run.
       const now = this.context.store.getAutomation(this.context.store.ownerPrincipal(), automation.id);
-      const outcome: FiringOutcome = !now.automation.enabled ? "off" : now.runs.some((run) => run.endedAt === null) ? "running" : "failed";
+      const outcome: FiringOutcome = !now.automation.enabled ? "off" : now.runs.some((run) => run.run !== null && run.endedAt === null) ? "running" : "failed";
       return { ...nothing, guard, check, outcome, error: outcome === "failed" ? message(cause) : null };
     }
   }
+}
+
+/** How much of the guard's output the run's prompt holds; the prompt is one command-line argument (128 KiB at most). */
+const PROMPT_GUARD_OUTPUT = 16 * 1024;
+
+/** AUTO-13: the run's trigger context, as its first prompt shows it: the schedule and time that fired, and what the guard and check said. */
+function firingContext(firing: Firing, trigger: Trigger, guard: FiringVerdict | null, check: FiringVerdict | null): string {
+  const local = new Intl.DateTimeFormat("sv-SE", { timeZone: trigger.timezone, dateStyle: "short", timeStyle: "short" }).format(firing.scheduledAt);
+  const sections = [
+    `A trigger of the automation fired: its schedule \`${trigger.cron}\` (${trigger.timezone}), for ${local} there (${new Date(firing.scheduledAt).toISOString()})` +
+      (firing.caughtUp ? ", caught up: that time passed while Agent Monitor was down, and it fired once it was back." : "."),
+  ];
+  if (guard === null) {
+    sections.push("The trigger has no guard.");
+  } else {
+    const output = guard.output.trimEnd();
+    const shown = output.length > PROMPT_GUARD_OUTPUT ? `${output.slice(0, PROMPT_GUARD_OUTPUT)}\n(cut: the guard printed ${output.length} characters)` : output;
+    sections.push(`Its guard, \`${trigger.guardPath}\` in the folder, passed. What it printed:\n\n~~~~\n${shown === "" ? "(nothing)" : shown}\n~~~~`);
+  }
+  sections.push(check === null ? "The trigger has no check." : `Its check, \`${trigger.checkPath}\` in the folder, said yes: ${check.output.trim()}`);
+  return sections.join("\n\n");
 }

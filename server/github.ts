@@ -43,3 +43,21 @@ export async function openPullRequests(cwd: string, branch: string): Promise<Pul
   const prs = await branchPullRequests(cwd, branch, "open");
   return prs === null ? null : prs.map((pr) => ({ number: pr.number, title: pr.title, url: pr.url }));
 }
+
+/**
+ * AUTO-10: whether GitHub CLI finds a merged pull request from `branch` (a squash merge leaves the
+ * branch's own commits off the default branch); false when GitHub cannot be asked. Never cached:
+ * the answer decides whether a run may say it deployed.
+ */
+export async function hasMergedPullRequest(cwd: string, branch: string): Promise<boolean> {
+  try {
+    const { stdout } = await run(
+      process.env.AGENTMONITOR_GH ?? "gh",
+      ["pr", "list", "--head", branch, "--state", "merged", "--json", "number"],
+      { cwd, encoding: "utf8", timeout: 10_000 },
+    );
+    return z.array(z.object({ number: z.number() })).parse(JSON.parse(stdout)).length > 0;
+  } catch {
+    return false;
+  }
+}

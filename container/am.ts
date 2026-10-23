@@ -89,6 +89,12 @@ const USAGE = `usage: am [--json] COMMAND [--task ID]
                                       own branch, its instructions as the first prompt
   automation folder NAME [add FILE [PATH] | get PATH [FILE] | rm PATH]
                                       the automation's folder, as folder above
+  run end finished|nothing_to_deploy|review|failed [--why TEXT]
+                                      end this run, saying how it went (failed needs --why);
+                                      refused while the run's work does not bear it out
+  run task RUN [--title TITLE]        make a task of a run (its id, or the 8 characters of its
+                                      branch): the task takes over the run's branch, and the
+                                      run's outputs are copied into the task's folder
 
   --task ID                           act on another task of this project instead of this
                                       session's (task, comments, comment, topic link/unlink,
@@ -236,6 +242,8 @@ interface Session {
   checkout: boolean;
   startedAt: number;
   endedAt: number | null;
+  /** AUTO-9: what a run has; null for a task's session and for a session on an automation that is no run (AUTO-11). */
+  run: { outcome: string | null; reason: string | null } | null;
 }
 
 function sessionOf(value: unknown): Session {
@@ -256,7 +264,16 @@ function sessionOf(value: unknown): Session {
     checkout: value.checkout,
     startedAt: value.startedAt,
     endedAt: value.endedAt,
+    run: runOf(value.run),
   };
+}
+
+function runOf(value: unknown): Session["run"] {
+  if (value === null) return null;
+  if (!isRecord(value)) throw unexpected("a run");
+  const { outcome, reason } = value;
+  if ((outcome !== null && typeof outcome !== "string") || (reason !== null && typeof reason !== "string")) throw unexpected("a run");
+  return { outcome, reason };
 }
 
 interface Task {
@@ -832,10 +849,7 @@ async function automationCommand(json: boolean, me: Me, command: string | undefi
     if (!isRecord(detail) || !Array.isArray(firings)) throw unexpected("an automation");
     const shown = automationOf(detail.automation);
     const triggers = listOf(detail.triggers, "a list of triggers", triggerOf);
-    const runs = listOf(detail.runs, "a list of runs", (item) => {
-      const outcome = isRecord(item) && isRecord(item.run) && typeof item.run.outcome === "string" ? item.run.outcome : null;
-      return { session: sessionOf(item), outcome };
-    });
+    const runs = listOf(detail.runs, "a list of runs", sessionOf);
     print(json, { ...detail, firings }, () => [
       automationText(shown),
       "",
@@ -846,11 +860,15 @@ async function automationCommand(json: boolean, me: Me, command: string | undefi
       shown.instructions.trimEnd() || "(none)",
       "",
       "runs:",
-      ...(runs.length === 0 ? ["  (none)"] : runs.map(({ session, outcome }) => [
+      ...(runs.length === 0 ? ["  (none)"] : runs.map((session) => [
         `  ${session.id}`,
-        session.endedAt === null ? "going" : `ended ${new Date(session.endedAt).toISOString()}${outcome === null ? "" : ` (${outcome})`}`,
+        session.run === null ? "session on it, no run" : `run ${runShortId(session.id)}`,
+        session.endedAt === null
+          ? `going${session.run?.outcome == null ? "" : ` (${session.run.outcome})`}`
+          : `ended ${new Date(session.endedAt).toISOString()}${session.run?.outcome == null ? "" : ` (${session.run.outcome})`}`,
         `started ${new Date(session.startedAt).toISOString()}`,
         session.branch ?? "no branch",
+        ...(session.run?.reason == null ? [] : [`why: ${session.run.reason}`]),
       ].join("\t"))),
       "",
       `firings${firings.length > SHOWN_FIRINGS ? ` (the newest ${SHOWN_FIRINGS} of ${firings.length}; all with am --json)` : ""}:`,
@@ -931,9 +949,9 @@ async function main(args: string[]): Promise<void> {
   }
   const me = await whoami();
   const ownTask = option.task ?? me.task?.id ?? null;
-  // SESSION-5: a run of an automation belongs to no task; task commands then name one.
+  // SESSION-5: a session of an automation belongs to no task; task commands then name one.
   const taskId = (): string => {
-    if (ownTask === null) throw new CliError("this session is a run of an automation and belongs to no task: name one with --task ID (am task search finds it)");
+    if (ownTask === null) throw new CliError("this session is an automation's and belongs to no task: name one with --task ID (am task search finds it)");
     return ownTask;
   };
 
@@ -942,7 +960,7 @@ async function main(args: string[]): Promise<void> {
       `project ${me.project.name}`,
       me.task !== null
         ? `task    ${me.task.title} (${me.task.id}, ${me.task.state})`
-        : `automation ${me.automation?.name ?? "unknown"} (${me.automation?.id ?? "unknown"}), run ${runShortId(me.session.id)}`,
+        : `automation ${me.automation?.name ?? "unknown"} (${me.automation?.id ?? "unknown"}), ${me.session.run === null ? "a session on it, no run" : `run ${runShortId(me.session.id)}`}`,
       `session ${me.session.id}`,
       `branch  ${me.session.branch ?? "none"}`,
     ].join("\n"));
@@ -1191,7 +1209,10 @@ async function main(args: string[]): Promise<void> {
       : undefined;
     print(json, { ...(isRecord(detail) ? detail : {}), card: card ?? null }, () => [
       `session ${session.id}`,
-      task !== null ? `task ${task.title} (${task.id}, ${task.state})` : `automation ${automation?.name ?? "unknown"} (${automation?.id ?? "unknown"}), run ${runShortId(session.id)}`,
+      task !== null
+        ? `task ${task.title} (${task.id}, ${task.state})`
+        : `automation ${automation?.name ?? "unknown"} (${automation?.id ?? "unknown"}), ${session.run === null ? "a session on it, no run" : `run ${runShortId(session.id)}`}`,
+      ...(session.run?.outcome == null ? [] : [`outcome ${session.run.outcome}${session.run.reason === null ? "" : `: ${session.run.reason}`}`]),
       `branch ${session.branch ?? "none"}`,
       `machine ${session.machine ?? "unknown"} (${runsIn(session)})`,
       session.endedAt === null ? `running${card === undefined ? "" : `: ${LIGHT_LABEL[card.turn]}`}` : `ended ${new Date(session.endedAt).toISOString()}`,
@@ -1208,6 +1229,41 @@ async function main(args: string[]): Promise<void> {
   }
 
   if (group === "automation" && await automationCommand(json, me, command, rest)) return;
+
+  // AUTO-10: this run says how it went.
+  if (group === "run" && command === "end" && rest.length >= 1) {
+    const options = optionsOf(rest, ["--why"], []);
+    const [outcome, ...extra] = options.rest;
+    if (extra.length === 0 && (outcome === "finished" || outcome === "nothing_to_deploy" || outcome === "review" || outcome === "failed")) {
+      if (me.session.run === null) throw new CliError("this session is no run of an automation: only a run ends with an outcome");
+      const why = options.values.get("--why");
+      if (outcome === "failed" && why === undefined) throw new CliError("a failed run says why: am run end failed --why \"WHY\"");
+      const ended = sessionOf(await call("POST", `/runs/${me.session.id}/end`, { outcome, ...(why === undefined ? {} : { reason: why }) }));
+      print(json, ended, () => outcome === "review"
+        ? `run ${runShortId(ended.id)} waits for review; its session stays open for a person`
+        : `run ${runShortId(ended.id)} ended as ${outcome}; its session ends when this turn ends`);
+      return;
+    }
+  }
+
+  // AUTO-12: a task that takes over a run's branch and its outputs.
+  if (group === "run" && command === "task" && rest.length >= 1) {
+    const options = optionsOf(rest, ["--title"], []);
+    if (options.rest.length === 1) {
+      const name = options.rest[0];
+      const automations = listOf(await call("GET", `/projects/${me.project.id}/automations`), "a list of automations", (item) => automationOf(isRecord(item) ? item.automation : undefined));
+      const runs: Session[] = [];
+      for (const automation of automations) runs.push(...listOf(await call("GET", `/automations/${automation.id}/runs`), "a list of runs", sessionOf));
+      const found = runs.filter((session) => session.run !== null && (session.id === name || runShortId(session.id) === name));
+      if (found.length !== 1) throw new CliError(found.length === 0 ? `no run ${name} in ${me.project.name} (am automation show NAME lists runs)` : `${name} names several runs: give the run's whole id`);
+      const title = options.values.get("--title");
+      const detail = await call("POST", `/runs/${found[0].id}/task`, title === undefined ? {} : { title });
+      const { task } = taskDetailOf(detail);
+      print(json, detail, () => `made task "${task.title}" (${task.id}) of run ${runShortId(found[0].id)}: branch ${task.branch ?? "none yet"}; ` +
+        `the run's outputs are copied into its folder under runs/${runShortId(found[0].id)}/`);
+      return;
+    }
+  }
 
   if (group === "comments" && command === undefined) {
     const listed = await call("GET", `/tasks/${taskId()}/comments`);

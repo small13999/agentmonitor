@@ -92,39 +92,28 @@ async function freePort(): Promise<number> {
   return promise;
 }
 
-export type GatewayOptions = { runtime: "podman" | "none"; env?: Record<string, string>; stateDir?: string; hub?: boolean };
-
 /**
- * AUTO-2: the time a test gateway's scheduler reads (AGENTMONITOR_CLOCK_FILE) until a test moves
- * it with `setClock`, so no test fires a trigger by the real clock.
+ * AUTO-2: `clock` is the time the gateway's clock (AGENTMONITOR_CLOCK_FILE) stands at when it
+ * starts; by default the real time then. It stands still until a test moves it with `setClock`,
+ * so no test fires a trigger by the real clock, and runs' time limits (AUTO-14) hold.
  */
-const TEST_TIME = "2030-01-07T06:00:00.000Z";
+export type GatewayOptions = { runtime: "podman" | "none"; env?: Record<string, string>; stateDir?: string; hub?: boolean; clock?: string };
 
 /** A real gateway process with its own state directory, driven the way the UI and agents drive it. */
 export class Gateway {
   readonly stateDir: string;
   readonly url: string;
-  private readonly child: ChildProcess;
-  private readonly options: GatewayOptions;
-  /** Everything the gateway printed so far. */
+  private child: ChildProcess;
+  private readonly env: NodeJS.ProcessEnv;
+  /** Everything the gateway printed so far, across restarts. */
   private log = "";
   private logWaiters: Array<{ pattern: RegExp; resolve: (line: string) => void }> = [];
 
-  private constructor(stateDir: string, url: string, child: ChildProcess, options: GatewayOptions) {
+  private constructor(stateDir: string, url: string, child: ChildProcess, env: NodeJS.ProcessEnv) {
     this.stateDir = stateDir;
     this.url = url;
     this.child = child;
-    this.options = options;
-    const append = (chunk: string) => {
-      this.log += chunk;
-      this.logWaiters = this.logWaiters.filter(({ pattern, resolve }) => {
-        const line = this.loggedLine(pattern);
-        if (line !== undefined) resolve(line);
-        return line === undefined;
-      });
-    };
-    child.stdout?.setEncoding("utf8").on("data", append);
-    child.stderr?.setEncoding("utf8").on("data", append);
+    this.env = env;
   }
 
   /**
@@ -137,35 +126,50 @@ export class Gateway {
   static async start(options: GatewayOptions = { runtime: "none" }): Promise<Gateway> {
     const stateDir = options.stateDir ?? mkdtempSync(join(tmpdir(), "am-gw-"));
     const clock = join(stateDir, "test-clock");
-    if (!existsSync(clock)) writeFileSync(clock, TEST_TIME);
+    if (!existsSync(clock)) writeFileSync(clock, options.clock ?? new Date().toISOString());
     const port = await freePort();
     const url = options.hub === true ? `http://am.localhost:${port}` : `http://127.0.0.1:${port}`;
-    const child = spawn(process.execPath, [join(root, "server", "index.ts")], {
-      cwd: root,
-      env: {
-        ...process.env,
-        AGENTMONITOR_PORT: String(port),
-        AGENTMONITOR_STATE_DIR: stateDir,
-        AGENTMONITOR_AUTH_MODE: "local",
-        AGENTMONITOR_WORKSPACE_RUNTIME: options.runtime,
-        // Never the user's settings, e.g. the hubs of their hubs.json (STORE-3).
-        AGENTMONITOR_CONFIG_DIR: join(stateDir, "config"),
-        AGENTMONITOR_CLOCK_FILE: clock,
-        ...(options.hub === true ? { AGENTMONITOR_PUBLIC_ORIGIN: url } : {}),
-        ...options.env,
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const gateway = new Gateway(stateDir, url, child, options);
-    const exited = Promise.withResolvers<never>();
-    child.once("exit", (code) => exited.reject(new Error(`gateway exited with ${code}:\n${gateway.log}`)));
+    const env = {
+      ...process.env,
+      AGENTMONITOR_PORT: String(port),
+      AGENTMONITOR_STATE_DIR: stateDir,
+      AGENTMONITOR_AUTH_MODE: "local",
+      AGENTMONITOR_WORKSPACE_RUNTIME: options.runtime,
+      // Never the user's settings, e.g. the hubs of their hubs.json (STORE-3).
+      AGENTMONITOR_CONFIG_DIR: join(stateDir, "config"),
+      AGENTMONITOR_CLOCK_FILE: clock,
+      ...(options.hub === true ? { AGENTMONITOR_PUBLIC_ORIGIN: url } : {}),
+      ...options.env,
+    };
+    const child = spawn(process.execPath, [join(root, "server", "index.ts")], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
+    const gateway = new Gateway(stateDir, url, child, env);
     try {
-      await Promise.race([gateway.logged(/agentmonitor gateway/), exited.promise]);
+      await gateway.listening();
     } catch (error) {
       await gateway.stop();
       throw error;
     }
     return gateway;
+  }
+
+  /** Takes in what the gateway's current process prints; resolves once it says it listens, fails if it exits first. */
+  private async listening(): Promise<void> {
+    const started = this.log.length;
+    const { promise, resolve, reject } = Promise.withResolvers<void>();
+    const append = (chunk: string) => {
+      this.log += chunk;
+      if (this.log.slice(started).includes("agentmonitor gateway")) resolve();
+      this.logWaiters = this.logWaiters.filter(({ pattern, resolve: found }) => {
+        const line = this.loggedLine(pattern);
+        if (line !== undefined) found(line);
+        return line === undefined;
+      });
+    };
+    this.child.stdout?.setEncoding("utf8").on("data", append);
+    this.child.stderr?.setEncoding("utf8").on("data", append);
+    // Once it listens, its exit (a stop, a restart) settles nothing.
+    this.child.once("exit", (code) => reject(new Error(`gateway exited with ${code}:\n${this.log.slice(started)}`)));
+    await promise;
   }
 
   private loggedLine(pattern: RegExp): string | undefined {
@@ -199,13 +203,14 @@ export class Gateway {
   }
 
   /**
-   * The gateway stops and another starts on its state directory, as a restart does; containers
-   * and host sessions go on. `clock`: the time it is when the new one starts (AUTO-2: downtime).
+   * Stops the gateway's process and starts it again on the same state, port, and settings;
+   * sessions go on running meanwhile. `clock`: the time it is when it is back (AUTO-2: downtime).
    */
-  async restart(clock?: string): Promise<Gateway> {
+  async restart(clock?: string): Promise<void> {
     await this.kill();
     if (clock !== undefined) this.setClock(clock);
-    return Gateway.start({ ...this.options, stateDir: this.stateDir });
+    this.child = spawn(process.execPath, [join(root, "server", "index.ts")], { cwd: root, env: this.env, stdio: ["ignore", "pipe", "pipe"] });
+    await this.listening();
   }
 
   async stop(): Promise<void> {
