@@ -1,3 +1,6 @@
+import "@fontsource-variable/bricolage-grotesque/opsz.css";
+import "@fontsource/dm-mono/400.css";
+import "@fontsource/dm-mono/500.css";
 import { StrictMode, useEffect, useState, type SubmitEvent } from "react";
 import { createRoot } from "react-dom/client";
 import { AllTasks } from "./AllTasks.tsx";
@@ -134,7 +137,7 @@ function WaitingOnYou({ waiting }: { waiting: TaskSummary[] }) {
 function AppHeader({ route, waiting }: { route: Route; waiting: TaskSummary[] }) {
   return (
     <header className="app-header">
-      <a className="brand" href="#/">Agent Monitor</a>
+      <a className="brand" href="#/"><span className="brand-mark" aria-hidden="true" />Agent Monitor</a>
       <nav className="menus" aria-label="Menus">
         <a className="menu" href="#/" aria-current={route.page === "board" ? "page" : undefined}>Board</a>
         <a className="menu" href="#/t" aria-current={route.page === "tasks" ? "page" : undefined}>Tasks</a>
@@ -207,7 +210,10 @@ function App() {
       {page === "board" && (
         <main className="board-page">
           {error && <p className="error banner">{error}</p>}
-          <nav className="board-bar" aria-label="Board views"><a href="#/all">All tasks</a></nav>
+          <header className="board-head">
+            <h1>{project.name}</h1>
+            <nav className="board-bar" aria-label="Board views"><a className="button" href="#/all">All tasks</a></nav>
+          </header>
           <Board project={project} tasks={tasks.data} cards={cardsBySession} people={peopleById} meId={meId} onChanged={refresh} />
         </main>
       )}

@@ -22,6 +22,11 @@ export function Light({ turn }: { turn: Card["turn"] }) {
   return <span className={`light light-${turn}`} title={LIGHT_LABEL[turn]} aria-label={LIGHT_LABEL[turn]} />;
 }
 
+/** CARD-1: the running session's light and its state in words, as one pill. */
+export function TurnPill({ turn }: { turn: Card["turn"] }) {
+  return <span className={`turn turn-${turn}`}><Light turn={turn} />{LIGHT_LABEL[turn]}</span>;
+}
+
 /** HOST-3: a session whose agent runs on this machine without a container; HOST-6: in the main checkout. */
 export function HostMark({ card }: { card: Card | null | undefined }) {
   if (card?.session.runtime !== "host") return null;
@@ -60,8 +65,7 @@ function TaskCard({ summary, card, assignee }: { summary: TaskSummary; card: Car
         {card === null && <span className="muted">{summary.sessionId === null ? "No session" : "Starting…"}</span>}
         {card !== null && (
           <>
-            <Light turn={card.turn} />
-            <span>{LIGHT_LABEL[card.turn]}</span>
+            <TurnPill turn={card.turn} />
             {card.session.machine !== null && <span className="machine" title="Machine">{card.session.machine}</span>}
             <HostMark card={card} />
             <OverlapMark card={card} />
@@ -135,7 +139,7 @@ export function Board({ project, tasks, cards, people, meId, onChanged }: {
           .toSorted((a, b) => waiting(a) - waiting(b) || a.task.createdAt - b.task.createdAt);
         return (
           <section key={column.label} className="column" aria-label={column.label}>
-            <h2>{column.label} <span className="muted small">{shown.length}</span></h2>
+            <h2>{column.label} <span className="count">{shown.length}</span></h2>
             {column.state === "open" && <NewTask project={project} onCreated={onChanged} />}
             {shown.map((summary) => (
               <TaskCard
