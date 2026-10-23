@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { constants, createWriteStream, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, rmSync, unlinkSync } from "node:fs";
+import { constants, createWriteStream, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, rmSync, unlinkSync, utimesSync } from "node:fs";
 import { open, readlink, type FileHandle } from "node:fs/promises";
 import { basename, dirname, extname, join, sep } from "node:path";
 import { Readable } from "node:stream";
@@ -215,6 +215,28 @@ export class TaskFolders {
   /** The task's files as its folder holds them now, by path. */
   sync(taskId: string): FolderFile[] {
     return this.store.syncFolder(taskId, scan(this.dir(taskId)));
+  }
+
+  /**
+   * STORE-6: `from`, a directory on this filesystem holding a moved task's folder, becomes the
+   * task's folder, its files modified when the records say; refused when the task has files here.
+   */
+  adopt(taskId: string, from: string, files: Array<{ path: string; updatedAt: number }>): void {
+    mkdirSync(this.root, { recursive: true });
+    try {
+      renameSync(from, join(this.root, taskId));
+    } catch (cause) {
+      throw new StoreError(409, `task ${taskId} already has a folder here: ${String(cause)}`);
+    }
+    for (const file of files) {
+      const path = join(this.root, taskId, file.path);
+      if (lstatSync(path, { throwIfNoEntry: false })?.isFile()) utimesSync(path, file.updatedAt / 1000, file.updatedAt / 1000);
+    }
+  }
+
+  /** STORE-6: removes the folder of a task that is no longer in this store. */
+  delete(taskId: string): void {
+    rmSync(join(this.root, taskId), { recursive: true, force: true });
   }
 
   list(principal: Principal, taskId: string): FolderFile[] {

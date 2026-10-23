@@ -4,6 +4,7 @@ import { pipeline } from "node:stream/promises";
 import { z } from "zod";
 import type { Card, EndedSession, HistoryEntry, TaskChanges } from "../../shared/api.ts";
 import type { TaskFolders } from "./folders.ts";
+import type { ProjectMoves } from "./move.ts";
 import { StoreError, type Principal, type Session, type Store, type Task } from "./store.ts";
 
 /** What a store route can touch: the database plus the session lifecycle owned by the gateway. */
@@ -11,6 +12,8 @@ export interface StoreContext {
   store: Store;
   /** FOLDER-1..3: every task's folder, files outside git. */
   folders: TaskFolders;
+  /** STORE-6: moving a project to another store, from either end. */
+  moves: ProjectMoves;
   /** Records a session of the task and launches its worktree and container; undone if the launch fails. */
   startSession(principal: Principal, taskId: string, input: SessionInput): Promise<Session>;
   /** Ends the session and removes its workspace; its uncommitted work becomes the task's snapshot. */
@@ -55,6 +58,11 @@ const sessionBody = z.strictObject({
 export type SessionInput = z.infer<typeof sessionBody>;
 const statusBody = z.strictObject({ status: z.string().max(64 * 1024), baseRevision: z.int().min(0) });
 const commentBody = z.strictObject({ body: z.string().trim().min(1).max(64 * 1024) });
+// STORE-6: `confirm` leaves behind the work a move cannot take along (MoveLeftBehind).
+const exportBody = z.strictObject({ confirm: z.boolean().optional() });
+const importBody = z.strictObject({ repoPath: z.string().startsWith("/").optional() });
+const movedBody = z.strictObject({ digest: z.string().regex(/^[0-9a-f]{64}$/) });
+const offsetQuery = z.string().regex(/^\d+$/, "offset must be a byte count").transform(Number);
 
 /** A route's answer that is a file's bytes instead of JSON. */
 export class FileResponse {
@@ -108,6 +116,28 @@ const routes: Route[] = [
     method: "PATCH",
     pattern: new RegExp(`^/projects/${id}$`),
     handler: async (c, p, [projectId], body) => c.store.updateProject(p, projectId, projectUpdateBody.parse(await body())),
+  },
+  // STORE-6: the source exports a bundle, the target receives it in parts and imports it, and the source deletes the project.
+  {
+    method: "POST",
+    pattern: new RegExp(`^/projects/${id}/export$`),
+    handler: async (c, p, [projectId], body) => c.moves.export(p, projectId, exportBody.parse(await body()).confirm === true),
+  },
+  {
+    method: "PUT",
+    pattern: new RegExp(`^/imports/${id}$`),
+    // The body is a part of the bundle's bytes, streamed: no JSON and no JSON size limit.
+    handler: (c, p, [uploadId], _, request, query) => c.moves.receive(p, uploadId, offsetQuery.parse(query.get("offset")), request),
+  },
+  {
+    method: "POST",
+    pattern: new RegExp(`^/imports/${id}$`),
+    handler: async (c, p, [uploadId], body) => c.moves.import(p, uploadId, importBody.parse(await body()).repoPath ?? null),
+  },
+  {
+    method: "POST",
+    pattern: new RegExp(`^/projects/${id}/moved$`),
+    handler: async (c, p, [projectId], body) => c.moves.deleteMoved(p, projectId, movedBody.parse(await body()).digest),
   },
   { method: "GET", pattern: new RegExp(`^/projects/${id}/topics$`), handler: (c, p, [projectId]) => c.store.listTopics(p, projectId) },
   {

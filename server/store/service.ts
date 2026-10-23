@@ -29,6 +29,7 @@ import { CONTAINER_FOLDER, PodmanRuntime } from "../runtime/podman.ts";
 import type { Runtime, WorkspaceDirs } from "../runtime/runtime.ts";
 import { newestTranscript } from "../transcript.ts";
 import { TaskFolders } from "./folders.ts";
+import { ProjectMoves } from "./move.ts";
 import { handleStoreApi, type SessionInput, type StoreContext } from "./http.ts";
 import { Store, StoreError, type Principal, type Session, type SessionRuntime, type Task } from "./store.ts";
 
@@ -66,6 +67,7 @@ function failure(cause: unknown): string {
 export class StoreService implements StoreContext {
   readonly store: Store;
   readonly folders: TaskFolders;
+  readonly moves: ProjectMoves;
   private readonly servers = new Map<string, Server>();
   /** Asking podman for a container's port takes a quarter second, so each page load would wait on it. */
   private readonly ternUpstreams = new Map<string, TernUpstream>();
@@ -89,6 +91,14 @@ export class StoreService implements StoreContext {
       : null;
     this.config = config;
     this.cloudflare = new CloudflareBroker({ configDir: config.configDir, upstream: config.cloudflareApi });
+    this.moves = new ProjectMoves({
+      store: this.store,
+      folders: this.folders,
+      dirs: (sessionId) => this.dirs(sessionId),
+      running: async (session) => this.runtimes === null || await this.runtimes[session.runtime].running(session.id),
+      endSession: (principal, sessionId) => this.endSession(principal, sessionId),
+      repo: (project) => (this.runtimes === null ? null : project.repoPath),
+    }, join(stateDir, "moves"));
   }
 
   dirs(sessionId: string): WorkspaceDirs {

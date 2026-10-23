@@ -209,3 +209,26 @@ export interface EndedSession {
   session: Session;
   kept: string[];
 }
+
+/**
+ * STORE-6: a task's work that moving its project would leave on the source machine: its
+ * snapshot (SESSION-9) and a stopped session's uncommitted files, which the move deletes, and
+ * commits of its branch no remote has, which stay on that machine's branch.
+ */
+export interface MoveLeftBehind {
+  taskId: string;
+  title: string;
+  snapshot: boolean;
+  uncommitted: string[];
+  unpushed: string[];
+}
+
+/** STORE-6: what the store a project moved to answers once it holds it. */
+export interface MoveReceipt {
+  project: Project;
+  /** SHA-256 of the bundle's records as this store read them; the source deletes the project only for this digest. */
+  digest: string;
+  /** People this store did not have, added for the records that name them. */
+  added: Person[];
+  counts: { topics: number; tasks: number; comments: number; sessions: number; files: number; chats: number };
+}

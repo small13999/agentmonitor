@@ -116,6 +116,11 @@ export function snapshotRef(taskId: string): string {
   return `refs/agentmonitor/snapshots/${taskId}`;
 }
 
+/** SESSION-9, STORE-6: the task's snapshot refs, its latest and those kept beside it when they did not apply cleanly. */
+export async function taskSnapshots(repo: string, taskId: string): Promise<string[]> {
+  return (await git(repo, ["for-each-ref", "--format=%(refname)", `${snapshotRef(taskId)}*`])).split("\n").filter(Boolean);
+}
+
 /**
  * SESSION-9: records the worktree's uncommitted changes, untracked files included and
  * ignored files not, as a commit on top of HEAD at `ref`, through a scratch index so the
