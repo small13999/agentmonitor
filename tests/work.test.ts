@@ -209,6 +209,9 @@ function originHas(subject: string): boolean {
 /** What the agent does when told to deploy (DEPLOY_INSTRUCTION), the way its instruction says. */
 const DEPLOYS = "bash:git push -q -u origin HEAD && gh pr create --title 'Ship it' --body 'What changed and why' && gh pr checks --watch && gh pr merge --merge";
 
+/** Each claim waits out gh's kept answers (10 s) and the page's polling (5 s) several times: longer than npm test's 30 s default. */
+const WAITS = { timeout: 180_000 };
+
 spec("CARD-3", "a task's Work section shows its branch's state, its commits with their descriptions, its pull requests with their checks, and the files it changed", async () => {
   const notes = await task("Patch notes");
   const page = await openPage(`#/t/${notes.id}`);
@@ -273,7 +276,7 @@ spec("CARD-3", "a task's Work section shows its branch's state, its commits with
   await state.filter({ hasText: /^1 commit pushed\.$/ }).waitFor();
   github((current) => { current.actionsDenied = false; current.offline = false; });
   await page.close();
-});
+}, WAITS);
 
 spec("CARD-6", "a board card shows one badge for its work: not pushed before a pull request open before deployed", async () => {
   const fixes = await task("Client fixes");
@@ -302,7 +305,7 @@ spec("CARD-6", "a board card shows one badge for its work: not pushed before a p
   await shown.filter({ hasText: /^Deployed$/ }).waitFor();
   assert.equal(await page.getByRole("article", { name: "Client fixes" }).locator(".work-badge").count(), 1);
   await page.close();
-});
+}, WAITS);
 
 spec("DEPLOY-1", "Deploy sends the task's running session the fixed instruction, and the pull request its agent opens and merges shows as deployed", async () => {
   fake.when(DEPLOY_INSTRUCTION, DEPLOYS);
@@ -320,7 +323,7 @@ spec("DEPLOY-1", "Deploy sends the task's running session the fixed instruction,
   assert.ok(originHas("Ship notes 8b1f"), "merged into origin's main");
   await view.getByRole("button", { name: "Deploy" }).waitFor({ state: "detached" });
   await page.close();
-});
+}, WAITS);
 
 spec("DEPLOY-1", "Deploy on a task without a running session starts one on the fixed instruction, which its context also gives for a person's \"deploy\"", async () => {
   fake.when(DEPLOY_INSTRUCTION, DEPLOYS);
@@ -343,7 +346,7 @@ spec("DEPLOY-1", "Deploy on a task without a running session starts one on the f
   const deployed = await until(() => gateway.data<Work>("GET", `/tasks/${ship.id}/changes`), (found) => found.pullRequests?.some((pr) => pr.state === "merged") === true, "deployed");
   assert.equal(deployed.deployable, false);
   assert.ok(originHas("Ship docs 2c7a"), "merged into origin's main");
-});
+}, WAITS);
 
 spec("AUTO-16", "a run waiting for review shows its work with Deploy, which has its agent deploy; every run's work opens from its row", async () => {
   fake.when(DEPLOY_INSTRUCTION, `${DEPLOYS} && am run end finished`);
@@ -378,4 +381,4 @@ spec("AUTO-16", "a run waiting for review shows its work with Deploy, which has 
   await reloaded.getByRole("region", { name: "Runs and firings" }).getByRole("region", { name: "Work" }).locator(".pull-request .pr-state", { hasText: "Deployed" }).waitFor();
   await page.close();
   await reloaded.close();
-});
+}, WAITS);
