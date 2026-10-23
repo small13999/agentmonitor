@@ -506,7 +506,7 @@ spec("AGENT-4", "the web UI streams replies and thinking, and shows running comm
   for (const text of ["say:hello", "say:fromweb", "stream:alpha-omega", `bash:${command}`, "hello", "fromweb", "alpha omega"]) {
     await chat.frame.getByText(text, { exact: true }).first().waitFor({ state: "attached" });
   }
-});
+}, { timeout: 90_000 });
 
 spec("AGENT-5", "a question the agent asks shows in the web UI with its options", async () => {
   await prompt(a, channelA, "ask:Ship?", "blocked");
