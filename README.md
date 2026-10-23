@@ -183,15 +183,20 @@ worktree, open pull requests from `gh` (cached 30 s), and the other sessions
 that changed the same files.
 
 A task's Chat tab shows its session's chat in Tern's web client, framed from the
-session's own host, `tern-<id>.localhost:<monitor port>`, since the client
-loads everything from root paths. The gateway proxies that host to the
-container's published port (`server/tern-proxy.ts`) and adds what `tern web
-serve` asks for: the token from `run/tern-token` on `/wire` and `/fonts` and
-the origin it accepts, so neither reaches the browser. It opens `/wire` and
-`/fonts` only for pages on that Tern host. `/fonts` serves the image's fallback
-fonts (Noto CJK, Noto core scripts, DejaVu) for characters the client's
-built-in faces lack. `*.localhost` names resolve on the browser's own machine,
-so this needs the monitor in local mode; WebGPU needs Chrome or Edge.
+session's own host, since the client loads everything from root paths. The UI,
+each session's chat, and each task's preview are each their own origin, flat
+hosts under one zone (`shared/hosts.ts`): `am.<zone>` the UI, `am-t-<session
+id>.<zone>` a chat, `am-p-<task id>.<zone>` a preview, which says "no preview
+yet" until previews exist. A hub's zone is its `AGENTMONITOR_PUBLIC_ORIGIN`
+after `am.`; a local monitor's is `localhost` on the monitor's port
+(`am-t-<id>.localhost:<port>`), names that resolve on the browser's own machine.
+The gateway proxies a chat host to the container's published port
+(`server/tern-proxy.ts`) and adds what `tern web serve` asks for: the token from
+`run/tern-token` on `/wire` and `/fonts` and the origin it accepts, so neither
+reaches the browser. It opens `/wire` and `/fonts` only for pages on that chat
+host. `/fonts` serves the image's fallback fonts (Noto CJK, Noto core scripts,
+DejaVu) for characters the client's built-in faces lack. WebGPU needs Chrome or
+Edge.
 
 The app keeps the last four sessions' clients loaded and hidden, so going back
 to one is instant. The image names the client's script and wasm by content
@@ -242,5 +247,6 @@ gateway:build`, then `npm run gateway:start`; port `AGENTMONITOR_PORT`, default
 - `/api/store/*`, the store API above.
 
 Remote mode (`AGENTMONITOR_AUTH_MODE=remote-cookie`) also requires
-`AGENTMONITOR_PUBLIC_ORIGIN` (exact https origin) and a 0600
-`AGENTMONITOR_LOGIN_SECRET_FILE`; only that host reaches the API and the app.
+`AGENTMONITOR_PUBLIC_ORIGIN` (exact https origin of the UI, host `am.<zone>`)
+and a 0600 `AGENTMONITOR_LOGIN_SECRET_FILE`; only the UI's host reaches the API
+and the app, and its cookie stays on that host.
