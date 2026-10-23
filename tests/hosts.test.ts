@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { after, before } from "node:test";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
-import { ACCESS_AUDIENCE, buildApp, FakeAccess, Gateway, Tunnel } from "./harness.ts";
+import { AUDIENCE, FakeAccess } from "./fake-access.ts";
+import { buildApp, Gateway, Tunnel } from "./harness.ts";
 import { spec } from "./spec.ts";
 
 const ZONE = "draftcoach.gg";
@@ -15,14 +16,14 @@ let context: BrowserContext;
 let page: Page;
 
 before(async () => {
-  buildApp();
+  await buildApp();
   access = await FakeAccess.start();
   gateway = await Gateway.start({
     runtime: "none",
     env: {
       AGENTMONITOR_AUTH_MODE: "access",
       AGENTMONITOR_ACCESS_TEAM_DOMAIN: access.url,
-      AGENTMONITOR_ACCESS_AUD: ACCESS_AUDIENCE,
+      AGENTMONITOR_ACCESS_AUD: AUDIENCE,
       AGENTMONITOR_OWNER_EMAIL: "armin@example.com",
       AGENTMONITOR_PUBLIC_ORIGIN: UI,
     },

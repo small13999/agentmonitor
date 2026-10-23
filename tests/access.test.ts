@@ -7,7 +7,8 @@ import { join } from "node:path";
 import { after, before } from "node:test";
 import { chromium, type Browser } from "playwright";
 import type { Comment, Person, Project, Session, Task } from "../shared/api.ts";
-import { ACCESS_AUDIENCE, buildApp, FakeAccess, Gateway, signingKey } from "./harness.ts";
+import { AUDIENCE, FakeAccess, signingKey } from "./fake-access.ts";
+import { buildApp, Gateway } from "./harness.ts";
 import { spec } from "./spec.ts";
 
 let access: FakeAccess;
@@ -23,7 +24,7 @@ function edge(token: string): Record<string, string> {
 }
 
 before(async () => {
-  buildApp();
+  await buildApp();
   access = await FakeAccess.start();
   configDir = mkdtempSync(join(tmpdir(), "am-access-config-"));
   mkdirSync(join(configDir, "cloudflare"));
@@ -35,7 +36,7 @@ before(async () => {
       env: {
         AGENTMONITOR_AUTH_MODE: "access",
         AGENTMONITOR_ACCESS_TEAM_DOMAIN: access.url,
-        AGENTMONITOR_ACCESS_AUD: ACCESS_AUDIENCE,
+        AGENTMONITOR_ACCESS_AUD: AUDIENCE,
         AGENTMONITOR_OWNER_EMAIL: "Armin@Example.com",
         AGENTMONITOR_CONFIG_DIR: configDir,
       },

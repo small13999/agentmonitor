@@ -7,7 +7,8 @@ const KEPT = 4;
 /**
  * The running sessions' chats: Tern's chat on omp, in Tern's web client, which the gateway
  * serves for each session on its own chat host beside the UI's, `am-t-<session id>`
- * (shared/hosts.ts, server/tern-proxy.ts).
+ * (shared/hosts.ts, server/tern-proxy.ts). A hub's project (STORE-3) has its chats on the hub's
+ * chat hosts, which the browser reaches through Cloudflare Access itself.
  *
  * Starting Tern's client takes a second or two, so the last few sessions' clients stay
  * loaded, hidden, and the current one shows. Frames keep the order they opened in: moving an
@@ -16,11 +17,13 @@ const KEPT = 4;
  * workspace tab covers the frames by hiding them, which keeps them loaded and sized (UI-2); a
  * chat first loads when its Chat tab shows, so a task's page does not start its container.
  */
-export function SessionFrames({ current, covered, running, stopped }: {
+export function SessionFrames({ current, covered, running, stopped, hub }: {
   current: string | null;
   covered: boolean;
   running: ReadonlySet<string> | null;
   stopped: ReadonlySet<string>;
+  /** The hub's origin when the project is a hub's. */
+  hub: string | null;
 }) {
   const [frames, setFrames] = useState<{ order: string[]; used: string[] }>({ order: [], used: [] });
   const [loaded, setLoaded] = useState<ReadonlySet<string>>(new Set());
@@ -40,7 +43,7 @@ export function SessionFrames({ current, covered, running, stopped }: {
         <iframe
           key={id}
           className={id === current ? "session-frame current" : "session-frame"}
-          src={`${hostOrigin(zoneOf(location), { kind: "chat", sessionId: id })}/`}
+          src={`${hostOrigin(zoneOf(hub === null ? location : new URL(hub)), { kind: "chat", sessionId: id })}/`}
           title={id === current ? "Session" : "Session (hidden)"}
           allow="clipboard-read; clipboard-write"
           onLoad={() => setLoaded((before) => new Set([...before, id]))}

@@ -1,5 +1,5 @@
 import { useEffect, useState, type DragEvent } from "react";
-import { api, usePolled, type FolderFile } from "./api.ts";
+import { api, storeUrl, usePolled, type FolderFile } from "./api.ts";
 import { Markdown } from "./Markdown.tsx";
 import { ActorName, type Directory } from "./People.tsx";
 
@@ -47,7 +47,7 @@ function TextPreview({ url, markdown }: { url: string; markdown: boolean }) {
 /** FOLDER-2: a file shown inline by its kind. */
 function Preview({ taskId, file }: { taskId: string; file: FolderFile }) {
   // The modification time in the URL shows a file again once it changed.
-  const url = `/api/store${fileRoute(taskId, file.path)}?v=${file.updatedAt}`;
+  const url = `${storeUrl(fileRoute(taskId, file.path))}?v=${file.updatedAt}`;
   const type = file.contentType.split(";")[0];
   if (type.startsWith("image/")) return <img className="folder-media" src={url} alt={file.path} />;
   if (type.startsWith("video/")) return <video className="folder-media" src={url} controls aria-label={file.path} />;
@@ -117,7 +117,7 @@ export function TaskFolder({ taskId, directory }: { taskId: string; directory: D
           Add files
           <input type="file" multiple hidden onChange={(event) => { void upload([...(event.target.files ?? [])]); event.target.value = ""; }} />
         </label>
-        {list.length > 0 && <a className="button" href={`/api/store/tasks/${taskId}/folder.zip`} download>Download all (.zip)</a>}
+        {list.length > 0 && <a className="button" href={storeUrl(`/tasks/${taskId}/folder.zip`)} download>Download all (.zip)</a>}
       </header>
       {error && <p className="error">{error}</p>}
       {files.error && <p className="error">{files.error}</p>}
@@ -141,7 +141,7 @@ export function TaskFolder({ taskId, directory }: { taskId: string; directory: D
                 <td>{file.addedBy === null ? <span className="muted">unknown</span> : <ActorName actor={file.addedBy} directory={directory} />}</td>
                 <td className="muted"><time dateTime={new Date(file.addedAt).toISOString()}>{new Date(file.addedAt).toLocaleString()}</time></td>
                 <td className="file-actions">
-                  <a href={`/api/store${fileRoute(taskId, file.path)}?download`} download={file.path.split("/").pop()} aria-label={`Download ${file.path}`}>Download</a>
+                  <a href={`${storeUrl(fileRoute(taskId, file.path))}?download`} download={file.path.split("/").pop()} aria-label={`Download ${file.path}`}>Download</a>
                   <button type="button" className="ghost danger" aria-label={`Delete ${file.path}`} onClick={() => remove(file.path)}>Delete</button>
                 </td>
               </tr>

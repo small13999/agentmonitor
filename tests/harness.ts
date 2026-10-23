@@ -1,8 +1,6 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { generateKeyPairSync, randomBytes, sign, type KeyObject } from "node:crypto";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, watch as watchDir, writeFileSync } from "node:fs";
 import { watch } from "node:fs/promises";
-import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
 import { createServer as createHttpsServer, type Server as HttpsServer } from "node:https";
 import { connect, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -12,18 +10,59 @@ import httpProxy from "http-proxy";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-let built = false;
+// `node --test` runs each test file in its own process, all children of one runner. Each
+// building dist/ itself would empty it under the gateways of the others, so the first one
+// builds, under a lock, and stamps the build with the runner's pid; the others wait for it.
+const buildDir = join(tmpdir(), `agentmonitor-build-${root.replaceAll(/[^a-zA-Z0-9]/g, "_")}`);
+const stampFile = join(buildDir, "stamp");
+const lockDir = join(buildDir, "lock");
+const lockRun = join(lockDir, "run");
+let built: Promise<void> | null = null;
 
-/** Build the web app into dist/, which the gateway serves; once per test process. */
-export function buildApp(): void {
-  if (built) return;
-  const result = spawnSync(process.execPath, [join(root, "node_modules", "vite", "bin", "vite.js"), "build", "--logLevel", "error"], {
-    cwd: root,
-    encoding: "utf8",
-    timeout: 30_000,
+/** Build the web app into dist/, which the gateway serves; once per test run. */
+export function buildApp(): Promise<void> {
+  built ??= buildOnce(String(process.ppid));
+  return built;
+}
+
+async function buildOnce(run: string): Promise<void> {
+  mkdirSync(buildDir, { recursive: true });
+  const read = (file: string) => (existsSync(file) ? readFileSync(file, "utf8") : null);
+  for (;;) {
+    if (read(stampFile) === run) return;
+    try {
+      mkdirSync(lockDir);
+    } catch {
+      const holder = read(lockRun);
+      // A lock of another run is left by one that died while building.
+      if (holder !== null && holder !== run) rmSync(lockDir, { recursive: true, force: true });
+      else await untilChanged(() => read(stampFile) === run || !existsSync(lockDir));
+      continue;
+    }
+    try {
+      writeFileSync(lockRun, run);
+      const result = spawnSync(process.execPath, [join(root, "node_modules", "vite", "bin", "vite.js"), "build", "--logLevel", "error"], {
+        cwd: root,
+        encoding: "utf8",
+        timeout: 30_000,
+      });
+      if (result.status !== 0) throw new Error(`vite build failed:\n${result.stdout}${result.stderr}`);
+      writeFileSync(stampFile, run);
+    } finally {
+      rmSync(lockDir, { recursive: true, force: true });
+    }
+    return;
+  }
+}
+
+/** Resolves once `done` holds, checked on every change in the build directory. */
+function untilChanged(done: () => boolean): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  const watcher = watchDir(buildDir, { recursive: true }, () => {
+    if (done()) resolve();
   });
-  if (result.status !== 0) throw new Error(`vite build failed:\n${result.stdout}${result.stderr}`);
-  built = true;
+  if (done()) resolve();
+  return promise.finally(() => watcher.close());
 }
 
 /** A `#rrggbb` colour (a topic's, a person's) as `getComputedStyle` reports it. */
@@ -87,6 +126,8 @@ export class Gateway {
         AGENTMONITOR_AUTH_MODE: "local",
         AGENTMONITOR_WORKSPACE_RUNTIME: options.runtime,
         ...(options.hub === true ? { AGENTMONITOR_PUBLIC_ORIGIN: url } : {}),
+        // Never the user's settings, e.g. the hubs of their hubs.json (STORE-3).
+        AGENTMONITOR_CONFIG_DIR: join(stateDir, "config"),
         ...options.env,
       },
       stdio: ["ignore", "pipe", "pipe"],
@@ -110,7 +151,8 @@ export class Gateway {
   }
 
   async stop(): Promise<void> {
-    if (this.child.exitCode === null) {
+    // A gateway already stopped (by a test, then again after it) exited on its signal: no exit code.
+    if (this.child.exitCode === null && this.child.signalCode === null) {
       const { promise, resolve } = Promise.withResolvers<void>();
       this.child.once("exit", () => resolve());
       this.child.kill();
@@ -210,66 +252,6 @@ export class Tunnel {
     this.server.close(() => resolve());
     this.server.closeAllConnections();
     await promise;
-  }
-}
-
-export const ACCESS_AUDIENCE = "4714c1358e65fe4b408ad6d432a5f878f08194bdb4752441fd56faefa9b2b6f2";
-
-export interface SigningKey {
-  kid: string;
-  privateKey: KeyObject;
-  publicKey: KeyObject;
-}
-
-export function signingKey(): SigningKey {
-  const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
-  return { kid: randomBytes(16).toString("hex"), privateKey, publicKey };
-}
-
-/** A Cloudflare Access team domain: its keys at /cdn-cgi/access/certs, and tokens signed with them. */
-export class FakeAccess {
-  readonly url: string;
-  private readonly server: HttpServer;
-  /** The keys the team domain publishes. */
-  readonly keys: SigningKey[];
-
-  private constructor(url: string, server: HttpServer, keys: SigningKey[]) {
-    this.url = url;
-    this.server = server;
-    this.keys = keys;
-  }
-
-  static async start(): Promise<FakeAccess> {
-    const keys = [signingKey()];
-    const server = createHttpServer((req, res) => {
-      if (req.url !== "/cdn-cgi/access/certs") {
-        res.writeHead(404).end();
-        return;
-      }
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ keys: keys.map((key) => ({ ...key.publicKey.export({ format: "jwk" }), kid: key.kid, alg: "RS256", use: "sig" })) }));
-    });
-    const { promise, resolve } = Promise.withResolvers<void>();
-    server.listen(0, "127.0.0.1", () => resolve());
-    await promise;
-    const address = server.address();
-    const port = typeof address === "object" && address !== null ? address.port : 0;
-    return new FakeAccess(`http://127.0.0.1:${port}`, server, keys);
-  }
-
-  /** A token as Cloudflare Access issues one for `email`; `claims` and `key` change it. */
-  token(email: string, claims: Record<string, unknown> = {}, key: SigningKey = this.keys[0]): string {
-    const now = Math.floor(Date.now() / 1_000);
-    const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
-    const head = encode({ alg: "RS256", kid: key.kid, typ: "JWT" });
-    const body = encode({ aud: [ACCESS_AUDIENCE], email, exp: now + 3_600, iat: now, nbf: now, iss: this.url, type: "app", sub: email, ...claims });
-    return `${head}.${body}.${sign("RSA-SHA256", Buffer.from(`${head}.${body}`), key.privateKey).toString("base64url")}`;
-  }
-
-  stop(): Promise<void> {
-    const { promise, resolve } = Promise.withResolvers<void>();
-    this.server.close(() => resolve());
-    return promise;
   }
 }
 

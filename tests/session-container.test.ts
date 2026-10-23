@@ -51,7 +51,7 @@ let channelA: OmpChannel;
 
 before(async () => {
   buildImage({ quiet: true });
-  buildApp();
+  await buildApp();
   scratch = mkdtempSync(join(tmpdir(), "am-fixture-"));
   repo = join(scratch, "fixture");
   mkdirSync(repo);
