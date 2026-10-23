@@ -4,7 +4,7 @@ import "@fontsource/dm-mono/500.css";
 import { StrictMode, useEffect, useState, type SubmitEvent } from "react";
 import { createRoot } from "react-dom/client";
 import { AllTasks } from "./AllTasks.tsx";
-import { api, chooseStore, LOCAL_STORE, usePolled, type Card, type Person, type Project, type StoreListing, type TaskSummary, type Topic } from "./api.ts";
+import { api, chooseStore, LOCAL_STORE, storeOf, usePolled, type Card, type Person, type Project, type StoreListing, type TaskDetail, type TaskSummary, type Topic } from "./api.ts";
 import { Board, waitsOnYou } from "./Board.tsx";
 import { ProjectSettings } from "./ProjectSettings.tsx";
 import { SessionFrames } from "./SessionFrames.tsx";
@@ -45,6 +45,18 @@ function useRoute(): Route {
     return () => window.removeEventListener("hashchange", onChange);
   }, []);
   return route;
+}
+
+/**
+ * TASK-12: the project of the task a link names, in this gateway's store or a reachable hub's
+ * (STORE-3); null when none of them has it.
+ */
+async function projectOfTask(stores: StoreListing[], taskId: string): Promise<string | null> {
+  const found = await Promise.all(stores.filter((store) => store.unavailable === null).map(async (store) => {
+    const detail = await api<TaskDetail>("GET", `/tasks/${taskId}`, undefined, storeOf(store.hub)).catch(() => null);
+    return detail !== null && store.projects.some((project) => project.id === detail.task.projectId) ? detail.task.projectId : null;
+  }));
+  return found.find((projectId) => projectId !== null) ?? null;
 }
 
 /** UI-3: a new project; host sessions only where the store's owner allows them (HOST-1). */
@@ -165,12 +177,30 @@ function App() {
   // A topic's panel belongs to the page it was opened on.
   useEffect(() => setOpenTopic(null), [route]);
 
-  const choose = (id: string) => {
+  const select = (id: string) => {
     localStorage.setItem("am.project", id);
     setProjectId(id);
     setCreatingProject(false);
+  };
+  const choose = (id: string) => {
+    select(id);
     window.location.hash = "#/";
   };
+
+  // TASK-12: a link to a task the chosen project lacks switches to the task's project; `nowhere` is a task no store has.
+  const [nowhere, setNowhere] = useState<string | null>(null);
+  const elsewhere = taskId !== null && tasks.data !== null && !tasks.data.some((summary) => summary.task.id === taskId);
+  useEffect(() => {
+    if (!elsewhere || taskId === null || stores.data === null) return;
+    let cancelled = false;
+    void projectOfTask(stores.data, taskId).then((found) => {
+      if (cancelled) return;
+      if (found === null) setNowhere(taskId);
+      // A task of the chosen project that its list does not hold yet shows with the list's next poll.
+      else if (found !== project?.id) select(found);
+    });
+    return () => { cancelled = true; };
+  }, [elsewhere, taskId]);
 
   const owner = me.data?.person.owner === true;
   if (stores.data === null) return <main className="empty">{stores.error ?? "Loading…"}</main>;
@@ -247,7 +277,7 @@ function App() {
           {error && <p className="error banner">{error}</p>}
           {taskId === null && <p className="workspace-page muted">Choose a task, or create one.</p>}
           {taskId !== null && current === null && (
-            <p className="workspace-page muted">{tasks.data === null ? "Loading…" : "This task does not exist in this project."}</p>
+            <p className="workspace-page muted">{nowhere === taskId ? "This task does not exist." : "Loading…"}</p>
           )}
           {current !== null && (
             <>
