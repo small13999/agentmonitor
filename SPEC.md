@@ -120,9 +120,9 @@ Unnumbered intent; not testable, so not claims.
   each completed turn, from any machine.
 - **SESSION-4** Every chat starts with both the Agent Monitor workflow context and
   the repository's own `AGENTS.md`.
-- **SESSION-5** A session belongs to one task and runs in one workspace: a
-  worktree of the task's branch and a container, or host processes, on exactly
-  one machine.
+- **SESSION-5** A session belongs to one task or one automation and runs in one
+  workspace: a worktree of its branch and a container, or host processes, on
+  exactly one machine at a time.
 - **SESSION-7** A new chat started in a session stays in that session: same
   workspace, worktree, and task, and the session's card shows the new chat.
 - **SESSION-8** Ending a session removes its workspace and keeps its chats; the
@@ -303,18 +303,41 @@ Unnumbered intent; not testable, so not claims.
 
 ## Automations
 
-- **AUTO-1** An automation is a trigger plus an action; the action starts a
-  session that runs a chosen agent, model, and prompt.
-- **AUTO-2** A schedule trigger fires at most once per scheduled time, including
-  across server restarts.
-- **AUTO-3** An event trigger starts its session with the event payload in the
-  initial prompt.
-- **AUTO-4** An event whose dedupe key was already emitted in the project is
-  dropped.
-- **AUTO-5** Any agent can emit an event through a tool.
-- **AUTO-6** An automation run requires review unless the automation allows
-  merging without review.
-- **AUTO-7** Each automation lists its runs with time, session, and outcome.
+- **AUTO-1** An automation has a name, instructions, a model, triggers, an end
+  mode, a time limit, a folder (shared by all its runs: `memory.md` and each run's
+  outputs in `runs/<run>/`), and an on/off switch; an automation that is off
+  starts no runs.
+- **AUTO-2** A schedule (cron, with a timezone; default Europe/Budapest) fires at
+  most once per scheduled time, also across restarts; times missed while the store
+  was down fire once as soon as it is back.
+- **AUTO-7** An automation's page shows first what its runs produced and what
+  waits for review, then its runs and firings with time, session, and outcome; a
+  run's outputs download with one click.
+- **AUTO-8** A trigger is a schedule, optionally with a guard (code in the folder,
+  run in the session image; exit 0 passes, its output goes on) and a check (a
+  prompt in the folder that a cheap model answers with read-only tools: the web
+  and the folder; it says yes or no and why). A run starts only when both pass,
+  and every firing records what the guard and check said. An automation has any
+  number of triggers.
+- **AUTO-9** Each run is a session of the automation on its own branch
+  `am/<automation>-<run>` from the default branch, never a task. A firing while a
+  run of the automation is still going is skipped and recorded as such.
+- **AUTO-10** End mode Finish (default): the run writes its outputs into the
+  folder, deploys its work (a pull request it merges once checks pass, MERGE-2),
+  and its session ends; a run with nothing to deploy deletes its branch. End mode
+  Wait for review: the run writes its outputs and pushes its branch, deploys
+  nothing, its session stays open, and it counts as waiting on you.
+- **AUTO-11** A run can be followed up by going on in its session (for example to
+  deploy what was reviewed), or by starting a session on the automation,
+  optionally from a run (its branch and outputs).
+- **AUTO-12** Making a task from a run gives the task the run's branch and links
+  the run's outputs.
+- **AUTO-13** A run's prompt holds the automation's instructions, what its
+  trigger's guard and check found, and the folder's `memory.md`.
+- **AUTO-14** A run that reaches its automation's time limit (default 120
+  minutes) is stopped and recorded as timed out.
+- **AUTO-15** People create and change automations on the site; agents do the same
+  with `am automation`, so an agent can set one up with a person.
 
 ## Leases
 
