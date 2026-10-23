@@ -32,9 +32,9 @@ export function AllTasks({ project, query, cards, people }: {
             <li key={summary.task.id} className="all-tasks-row" data-task={summary.task.title}>
               {card === undefined ? <span className="light light-none" aria-label="No session" title="No session" /> : <Light turn={card.turn} />}
               <a className="name" href={`#/t/${summary.task.id}`}>{summary.task.title}</a>
-              <span className="state">{STATE_LABEL[summary.task.state]}</span>
               <span className="meta">{summary.topics.map((topic) => <TopicName key={topic.id} topic={topic} />)}</span>
-              {assignee !== undefined && <Avatar person={assignee} />}
+              <span className="state">{STATE_LABEL[summary.task.state]}</span>
+              <span className="assignee">{assignee !== undefined && <Avatar person={assignee} />}</span>
             </li>
           );
         })}

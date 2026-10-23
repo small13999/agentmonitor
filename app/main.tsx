@@ -164,6 +164,8 @@ function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [settingsOpen]);
+  // A topic's panel belongs to the page it was opened on.
+  useEffect(() => setOpenTopic(null), [route]);
 
   const choose = (id: string) => {
     localStorage.setItem("am.project", id);
