@@ -2,8 +2,9 @@ import { api, type Card, type Project, type Task, type TaskSummary } from "./api
 import { HostMark, Light } from "./Board.tsx";
 import { InlineCreate } from "./InlineCreate.tsx";
 
-/** The project menu's last entry, which opens the new-project form instead of choosing one. */
+/** The project menu's last entries, which open the new-project form or the project's settings instead of choosing one. */
 const NEW_PROJECT = "new";
+const SETTINGS = "settings";
 
 /**
  * UI-1: the project's open and in-progress tasks (in review included), in the order they
@@ -25,11 +26,16 @@ export function TaskList(props: {
     <nav className="task-list" aria-label="Tasks">
       <select
         value={props.project.id}
-        onChange={(event) => (event.target.value === NEW_PROJECT ? props.onNewProject() : props.onProject(event.target.value))}
+        onChange={(event) => {
+          if (event.target.value === NEW_PROJECT) props.onNewProject();
+          else if (event.target.value === SETTINGS) window.location.hash = "#/project";
+          else props.onProject(event.target.value);
+        }}
         aria-label="Project"
       >
         {props.projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
         <option value={NEW_PROJECT}>+ Project</option>
+        <option value={SETTINGS}>Project settings</option>
       </select>
       <InlineCreate
         label="Task"
