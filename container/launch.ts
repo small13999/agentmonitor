@@ -86,9 +86,14 @@ export async function startSession(paths: SessionPaths): Promise<void> {
   // Tern starts a pane's program with an environment of its own, so the chat's command line
   // carries what omp, its extension, `am` and `tern` need to find this session's sockets and
   // settings.
+  // SESSION-17: the user's omp settings (compaction, model roles, ...) apply as a read-only
+  // overlay, and the session's own config.yml is overlaid after them, so its extension wins.
+  const userConfig = join(paths.ompCredentials, "config.yml");
+  const configFiles = [...(existsSync(userConfig) ? [userConfig] : []), join(agentDir, "config.yml")];
   const chatEnv = [
     ...paths.chatEnv,
     `PI_CODING_AGENT_DIR=${agentDir}`,
+    `PI_CONFIG_FILES=${configFiles.join(":")}`,
     `TERN_CONFIG_DIR=${paths.ternConfig}`,
     `TERN_DAEMON_SOCKET=${daemonSocket}`,
     `AM_SOCKET=${join(paths.run, "am.sock")}`,

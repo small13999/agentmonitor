@@ -26,6 +26,8 @@ const REPO_RULE = "Fixture rule 5d21: host sessions run the fixture linter too."
 const TASK = { title: "Host fixes", description: "Fix the host fixture 8b3e." };
 /** The user's configuration a host session must leave alone (HOST-5), relative to the home. */
 const USER_CONFIG = [".ssh", ".gitconfig", ".config/gh", ".config/tern", ".omp/agent"];
+/** The configured omp agent directory's settings: no extension of the user's, a compaction threshold. */
+const USER_OMP_SETTINGS = "compaction:\n  thresholdTokens: 271828\n";
 
 let scratch: string;
 let repo: string;
@@ -67,6 +69,8 @@ before(async () => {
   mkdirSync(agentDir);
   // A host session reaches the model the way the gateway does.
   fake.writeAgentDir(agentDir, "127.0.0.1");
+  // The user's own omp settings, which sessions run with (SESSION-17).
+  writeFileSync(join(agentDir, "config.yml"), USER_OMP_SETTINGS);
 
   // The user's home: credentials, and omp and Tern settings of their own.
   home = join(scratch, "home");
@@ -227,6 +231,16 @@ spec("HOST-4", "a stopped host session starts again on its last chat when its pa
   channel = await gateway.omp(host.id);
   const shown = await card(host);
   assert.deepEqual([shown.turn, shown.lastUserMessage], ["done", "bash:am whoami"]);
+});
+
+spec("SESSION-17", "a session's agent runs with the user's omp settings, the session's own winning, and the user's file stays as it is", async () => {
+  const setting = await prompt(host, "bash:omp config get compaction.thresholdTokens");
+  assert.equal(setting.lastReply, "answered: 271828");
+  // The user's settings name no extension; Agent Monitor's is the one that runs, so the turn
+  // reached the card through it.
+  const extensions = await prompt(host, "bash:omp config get extensions");
+  assert.match(String(extensions.lastReply), /omp-extension\.ts/);
+  assert.equal(readFileSync(join(agentDir, "config.yml"), "utf8"), USER_OMP_SETTINGS);
 });
 
 spec("HOST-3", "a host session is marked red on its board card, task list row, and settings", async () => {

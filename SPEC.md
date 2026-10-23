@@ -117,6 +117,9 @@ Unnumbered intent; not testable, so not claims.
   keys and GitHub CLI login, so it can push its branch.
 - **SESSION-13** Until a session's chat has loaded, its page says what it waits
   on, including that a stopped container is starting.
+- **SESSION-17** A session's agent runs with the user's own omp settings (such as
+  compaction and model roles); Agent Monitor's settings for the session win where
+  both set something, and the user's settings file is never changed.
 
 ## Host sessions
 
