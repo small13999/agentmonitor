@@ -338,6 +338,9 @@ Unnumbered intent; not testable, so not claims.
 - **CLOUDFLARE-2** A session's agent can change its project's Cloudflare account
   only while the user allows it in the task's settings, for 10 minutes at a time
   or until the user revokes it; an agent cannot allow itself.
+- **CLOUDFLARE-3** A project's Cloudflare tokens are set by its store's owner in
+  the project's settings and kept in its store; they are never shown again or
+  given to a session, and they move with the project (STORE-6).
 
 ## Web app
 
