@@ -152,7 +152,7 @@
     "tests/host-session.test.ts::HOST-3::a host session is marked red on its board card, task list row, and settings": "f028c3ee248bc746",
     "tests/host-session.test.ts::FOLDER-3::a host session's agent finds its task's folder outside its worktree; what it writes there shows on the page, and the reverse": "e36605d8d359b498",
     "tests/host-session.test.ts::STORE-5::am task changes says what the task's Changes view says": "f4958bf7a852473f",
-    "tests/host-session.test.ts::HOST-2::a host session's agent works as the user in its own worktree, and ending it stops every process it started": "80e6b8e2e3cda8bf",
+    "tests/host-session.test.ts::HOST-2::a host session's agent works as the user in its own worktree, and ending it stops every process it started": "70d29b30ddbe557c",
     "tests/host-session.test.ts::HOST-7::a session in the main checkout has the user's omp chats there, as omp in a terminal does": "72151c6679806619",
     "tests/host-session.test.ts::HOST-6::a host session works in the main checkout, one per project, and ending it leaves the checkout as it is": "bfd54fecda06d080",
     "tests/host-session.test.ts::HOST-5::a host session never changes the user's omp, Tern, ssh, git, or gh configuration": "8cd5da1a27ae4749",

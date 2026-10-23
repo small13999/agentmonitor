@@ -333,6 +333,11 @@ spec("HOST-2", "a host session's agent works as the user in its own worktree, an
   assert.equal(shown.lastReply, `answered: ${uid} ${dirs(host).worktree} fixture@example.com gho_fixture ${key}`);
   await prompt(host, "bash:git commit --allow-empty -qm by-host-agent");
   assert.equal(execFileSync("git", ["-C", repo, "log", "-1", "--format=%an <%ae> %s", host.branch], { encoding: "utf8" }).trim(), "Fixture User <fixture@example.com> by-host-agent");
+  // An omp the agent runs itself (a test suite, `omp -p`) inherits the session's environment,
+  // its extension included; the session's card still reads the session's own omp afterwards.
+  const nested = await prompt(host, "bash:omp -p --model fake/scripted say:nested-5d2 </dev/null 2>/dev/null");
+  assert.equal(nested.lastReply, "answered: nested-5d2");
+  assert.equal(nested.turn, "done");
 
   // A server of its own, detached from the chat.
   await prompt(host, "bash:setsid sleep 4242 </dev/null >/dev/null 2>&1 &");

@@ -5,7 +5,7 @@
 // Every client is also pushed {type:"turn", turn} whenever the main agent's turn changes.
 // The conversation itself reaches the web UI through Tern's chat (omp over ACP), not this channel.
 import { rmSync } from "node:fs";
-import { createServer, type Server, type Socket } from "node:net";
+import { connect, createServer, type Server, type Socket } from "node:net";
 
 // The slice of omp's extension API this file uses; omp's type package is not a dependency.
 interface Ctx {
@@ -99,6 +99,23 @@ function listen(): void {
   server.listen(socketPath);
 }
 
+/**
+ * Takes the channel unless a live omp already answers on it: an omp the agent runs itself (a
+ * test suite, `omp -p`) inherits the session's environment, this extension included, and must
+ * leave the session's channel alone. A socket file nobody answers on is a dead session's.
+ */
+function claim(): void {
+  let answered = false;
+  const probe = connect(socketPath);
+  probe.once("connect", () => {
+    answered = true;
+    probe.destroy();
+  });
+  probe.on("error", () => {
+    if (!answered) listen();
+  });
+}
+
 export default function agentmonitor(api: ExtensionApi): void {
   // Only the main agent is the session; subagents and advisors do not move its turn.
   const main = (name: string, handler: (event: Event, ctx: Ctx) => void) => {
@@ -117,7 +134,7 @@ export default function agentmonitor(api: ExtensionApi): void {
 
   main("session_start", (_event, ctx) => {
     live = ctx;
-    if (server === null) listen();
+    if (server === null) claim();
   });
   track("agent_start", () => { running = true; });
   track("agent_end", () => {
