@@ -1,19 +1,47 @@
 import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-/** The live session's transcript: the newest top-level session file (subagent transcripts are nested). */
-export function newestTranscript(ompHome: string): string | null {
+/** The working directory a chat ran in, from its header; null if the header has none. */
+function chatCwd(path: string): string | null {
+  const buffer = Buffer.alloc(4096);
+  const fd = openSync(path, "r");
+  let read: number;
+  try {
+    read = readSync(fd, buffer, 0, buffer.length, 0);
+  } finally {
+    closeSync(fd);
+  }
+  // The header's first lines: a title, then the session entry with its cwd.
+  for (const line of buffer.subarray(0, read).toString("utf8").split("\n").slice(0, 3)) {
+    const escaped = /^\{"type":"session",.*?"cwd":"((?:[^"\\]|\\.)*)"/.exec(line)?.[1];
+    if (escaped === undefined) continue;
+    const cwd: unknown = JSON.parse(`"${escaped}"`);
+    return typeof cwd === "string" ? cwd : null;
+  }
+  return null;
+}
+
+/**
+ * The live session's transcript: the newest top-level session file (subagent transcripts are
+ * nested). With `cwd`, only chats that ran there count: a checkout session's chats sit among
+ * all of the user's (HOST-7).
+ */
+export function newestTranscript(ompHome: string, cwd: string | null): string | null {
   const sessions = join(ompHome, "agent", "sessions");
   if (!existsSync(sessions)) return null;
   let newest: { path: string; mtime: number } | null = null;
   for (const dir of readdirSync(sessions, { withFileTypes: true })) {
     if (!dir.isDirectory()) continue;
+    // omp keeps the chats of one working directory per folder; its newest chat tells which.
+    let folderNewest: { path: string; mtime: number } | null = null;
     for (const file of readdirSync(join(sessions, dir.name), { withFileTypes: true })) {
       if (!file.isFile() || !file.name.endsWith(".jsonl")) continue;
       const path = join(sessions, dir.name, file.name);
       const mtime = statSync(path).mtimeMs;
-      if (newest === null || mtime > newest.mtime) newest = { path, mtime };
+      if (folderNewest === null || mtime > folderNewest.mtime) folderNewest = { path, mtime };
     }
+    if (folderNewest === null || (newest !== null && folderNewest.mtime <= newest.mtime)) continue;
+    if (cwd === null || chatCwd(folderNewest.path) === cwd) newest = folderNewest;
   }
   return newest?.path ?? null;
 }

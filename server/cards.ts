@@ -22,11 +22,12 @@ function textOf(content: string | z.infer<typeof blocks>): string {
   return typeof content === "string" ? content : content.map((block) => (block.type === "text" ? block.text ?? "" : "")).join("");
 }
 
-/** The live session's turn state; no answer means no live agent. */
-async function turnOf(runDir: string): Promise<TurnLight> {
+/** The live session's turn state and chat file (as omp sees it); no answer means no live agent. */
+async function liveState(runDir: string): Promise<{ turn: TurnLight; chat: string | null }> {
   const reply = await ompRequest(runDir, "state");
   const turn = reply?.ok === true ? reply.turn : undefined;
-  return turn === "blocked" || turn === "working" || turn === "done" ? turn : "stopped";
+  const chat = reply?.ok === true && typeof reply.sessionFile === "string" ? reply.sessionFile : null;
+  return { turn: turn === "blocked" || turn === "working" || turn === "done" ? turn : "stopped", chat };
 }
 
 /** Last user message and last assistant text; the transcript's last 1 MiB is plenty. */
@@ -85,20 +86,25 @@ export async function projectCards(
   principal: Principal,
   projectId: string,
 ): Promise<Card[]> {
+  const { repoPath } = store.getProject(principal, projectId);
   const cards = await Promise.all(store.listSessions(principal, projectId).map(async (session) => {
     const dirs = dirsOf(session.id);
-    // SESSION-7: the newest chat is the one the session runs now.
-    const transcript = newestTranscript(dirs.ompHome);
-    const messages = transcript === null ? { user: null, reply: null } : lastMessages(transcript);
     const hasWorktree = session.branch !== null && session.baseRef !== null && existsSync(dirs.worktree);
-    const [turn, gitInfo, prs] = await Promise.all([
-      turnOf(dirs.run),
+    const [live, gitInfo, prs] = await Promise.all([
+      liveState(dirs.run),
       hasWorktree ? gitState(dirs.worktree, session.baseRef ?? "") : null,
       hasWorktree ? pullRequests(dirs.worktree, session.branch ?? "") : null,
     ]);
+    // SESSION-7: the chat the session runs now: the one omp has open (a host session's path is
+    // this machine's; omp writes it with the first message), else the newest; a checkout
+    // session's sit among the user's (HOST-7).
+    const transcript = session.runtime === "host" && live.chat !== null && existsSync(live.chat)
+      ? live.chat
+      : newestTranscript(dirs.ompHome, session.checkout ? repoPath : null);
+    const messages = transcript === null ? { user: null, reply: null } : lastMessages(transcript);
     const card: Card = {
       session,
-      turn,
+      turn: live.turn,
       lastUserMessage: messages.user,
       lastReply: messages.reply,
       git: gitInfo,

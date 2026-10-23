@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { basename, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -162,8 +162,9 @@ export class StoreService implements StoreContext {
     if (project.repoPath === null || !existsSync(session.checkout ? project.repoPath : dirs.worktree)) {
       throw new StoreError(409, `session ${session.name} has no worktree to start again on`);
     }
-    // omp names a chat's transcript <time>_<chat id>.jsonl.
-    const newest = newestTranscript(dirs.ompHome);
+    // omp names a chat's transcript <time>_<chat id>.jsonl. A checkout session's chats sit
+    // among the user's (HOST-7): its newest is the newest of the checkout's.
+    const newest = newestTranscript(dirs.ompHome, session.checkout ? project.repoPath : null);
     const resume = newest === null ? null : /_([0-9a-f-]{36})\.jsonl$/.exec(basename(newest))?.[1] ?? null;
     this.forgetTernUpstream(session.id);
     try {
@@ -270,29 +271,11 @@ export class StoreService implements StoreContext {
   }
 
   /**
-   * HOST-7: the user's own omp chat whose id starts with `prefix`, in the configured omp agent
-   * directory: sessions/<working directory folder>/<time>_<chat id>.jsonl.
-   */
-  private userChat(prefix: string): { id: string; path: string; folder: string } {
-    const sessions = join(this.config.ompAgentDir, "sessions");
-    const found = existsSync(sessions)
-      ? readdirSync(sessions, { withFileTypes: true }).filter((entry) => entry.isDirectory()).flatMap((folder) =>
-        readdirSync(join(sessions, folder.name)).flatMap((name) => {
-          const id = /_([0-9a-f-]{36})\.jsonl$/.exec(name)?.[1];
-          return id !== undefined && id.startsWith(prefix) ? [{ id, path: join(sessions, folder.name, name), folder: folder.name }] : [];
-        }))
-      : [];
-    if (found.length === 0) throw new StoreError(404, `no omp chat ${prefix} in ${sessions}`);
-    if (found.length > 1) throw new StoreError(409, `${found.length} omp chats start with ${prefix}; give more of the id`);
-    return found[0];
-  }
-
-  /**
    * Starts a session on the task (TASK-3, TASK-5): a worktree of the task's branch, which its
    * first session creates (TASK-4), with the previous session's uncommitted work restored
    * (SESSION-9), and its agent in a container or on the host (HOST-1). A checkout session
-   * works in the main checkout instead (HOST-6), and may go on with one of the user's omp
-   * chats (HOST-7). Undone if the launch fails.
+   * works in the main checkout instead (HOST-6), among the user's omp chats (HOST-7). Undone
+   * if the launch fails.
    */
   async startSession(principal: Principal, taskId: string, input: SessionInput): Promise<Session> {
     const { task } = this.store.getTask(principal, taskId);
@@ -302,10 +285,6 @@ export class StoreService implements StoreContext {
     if (runtime !== null && project.repoPath === null) {
       throw new StoreError(400, `project ${project.name} has no repository to create a worktree from`);
     }
-    if (input.resume !== undefined && input.checkout !== true) {
-      throw new StoreError(400, "only a session in the main checkout can go on with one of your omp chats");
-    }
-    const chat = input.resume === undefined ? null : this.userChat(input.resume);
     const repo = runtime === null ? null : project.repoPath;
     const created = this.store.createSession(principal, taskId, {
       model: input.model,
@@ -337,21 +316,13 @@ export class StoreService implements StoreContext {
         restored = await restoreSnapshot(repo, dirs.worktree, snapshotRef(task.id));
         started = { ...created, branch, baseRef };
       }
-      // HOST-7: a copy, in the folder omp keeps chats of that working directory in; the
-      // user's own chat stays as it is.
-      if (chat !== null) {
-        const target = join(dirs.ompHome, "agent", "sessions", chat.folder);
-        mkdirSync(target, { recursive: true });
-        copyFileSync(chat.path, join(target, basename(chat.path)));
-      }
       await runtime.launch({
         checkout: created.checkout,
         sessionId: created.id,
         repoPath: repo,
         dirs,
-        // A resumed chat keeps the model it last ran.
-        model: chat === null ? input.model ?? null : null,
-        resume: chat?.id ?? null,
+        model: input.model ?? null,
+        resume: null,
         ternOrigin: `http://tern-${created.id}.localhost`,
         cloudflare: this.cloudflare.tokens(project.name) !== null,
         taskContext: this.taskContext(task.id, restored, created.checkout ? repo : null),

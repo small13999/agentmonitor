@@ -39,9 +39,8 @@ const finishBody = z.strictObject({ state: z.enum(["done", "cancelled"]), confir
 const sessionBody = z.strictObject({
   model: z.string().min(1).optional(),
   runtime: z.enum(["container", "host"]).optional(),
-  // HOST-6 and HOST-7: the main checkout instead of a worktree; one of the user's omp chats to go on with.
+  // HOST-6: the main checkout instead of a worktree.
   checkout: z.boolean().optional(),
-  resume: z.string().regex(/^[0-9a-f-]{8,36}$/).optional(),
 });
 export type SessionInput = z.infer<typeof sessionBody>;
 const statusBody = z.strictObject({ status: z.string().max(64 * 1024), baseRevision: z.int().min(0) });

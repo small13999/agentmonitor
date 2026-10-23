@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { closeSync, existsSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -91,6 +91,16 @@ export class HostRuntime implements Runtime {
     const port = await freePort();
     const cwd = input.checkout ? input.repoPath : input.dirs.worktree;
     writeLaunchFiles(input, { cwd, ternListen: `127.0.0.1:${port}` });
+    if (input.checkout) {
+      // HOST-7: the checkout's chats are the user's, as for omp in a terminal there: /resume
+      // lists them, and the session's own chats join them.
+      const chats = join(input.dirs.ompHome, "agent", "sessions");
+      if (lstatSync(chats, { throwIfNoEntry: false }) === undefined) {
+        mkdirSync(join(this.options.ompAgentDir, "sessions"), { recursive: true });
+        mkdirSync(dirname(chats), { recursive: true });
+        symlinkSync(join(this.options.ompAgentDir, "sessions"), chats);
+      }
+    }
     const log = openSync(join(input.dirs.run, "host.log"), "a");
     try {
       const entry = spawn(process.execPath, [

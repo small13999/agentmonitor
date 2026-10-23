@@ -2,7 +2,8 @@
 // own worktree, with the user's credentials and tools. Everything Agent Monitor writes for
 // the session stays in its own directories: omp's agent directory in the session's omp home,
 // Tern's settings and `am` in the run directory. The user's ~/.omp, ~/.config/tern, ~/.ssh,
-// ~/.gitconfig and gh login are only read, by the agent's own tools (HOST-5).
+// ~/.gitconfig and gh login are only read, by the agent's own tools (HOST-5); a session in
+// the main checkout keeps its chats among the user's omp chats, as omp there does (HOST-7).
 // Usage: AGENTMONITOR_SESSION=ID node host-entry.ts RUN_DIR AGENT_DIR OMP_CREDENTIALS TERN_ASSETS
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
