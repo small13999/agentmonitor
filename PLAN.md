@@ -17,8 +17,8 @@ through Agent Monitor (dogfooding).
 | # | Step | State |
 |---|------|-------|
 | 1 | Tasks: Topic → Task → Session, board, task workspace, snapshots, `am check` | Done (`7ae8314`..`2f84742`) |
-| 2 | Bootstrap: host sessions, "+ Project", agentmonitor project; the user's PC is the hub | Done: HOST-1..5, UI-3; project `agentmonitor` on the dev server allows host sessions |
-| 3 | SPEC draft for steps 4–8 (claims below), reviewed by the user | Next |
+| 2 | Bootstrap: host sessions, "+ Project", agentmonitor project; the user's PC is the hub | Done: HOST-1..7, UI-3; the integrator runs as a main-checkout session of project `agentmonitor` |
+| 3 | SPEC draft for steps 4–8 (claims below), reviewed by the user | Draft in `SPEC-DRAFT.md`, awaiting review |
 | 4 | Redesign from a clean slate: task page, comments, attachments (folder), people and assignee, board, session Settings tab, topic reader, visual identity; done through Agent Monitor itself | |
 | 5 | Hub on Hetzner: Cloudflare Tunnel + Access, login, teammate access, flat hosts | |
 | 6 | Preview tab per task (and the draftcoach preview login) | |
@@ -77,14 +77,14 @@ through Agent Monitor (dogfooding).
 - No Discord; the teammate uses the site. Posting to Instagram comes later as an
   after-approval step.
 
-### Host sessions (built in step 2: HOST-1..5, UI-3)
+### Host sessions (built in step 2: HOST-1..7, UI-3)
 Still open:
 - Switching host sessions on or off for an existing project in the UI (API only:
   `PATCH /projects/:id`); belongs in the project settings of the redesign.
 - Host sessions of automations, once automations exist.
-- Integrator: a checkout session (HOST-6) works in the main checkout and can go on
-  with a terminal omp chat (HOST-7). Still open: how it pulls in other sessions'
-  branches, and resuming chats in worktree or container sessions.
+- Integrator: a checkout session (HOST-6) works in the main checkout among the
+  user's omp chats (HOST-7). Still open: how it pulls in other sessions' branches,
+  and resuming chats in worktree or container sessions.
 - Unix socket paths are limited to 108 bytes; a long state dir breaks every
   session (`<state>/sessions/<uuid>/run/am.sock`, and for host sessions
   `run/tern-daemon.sock`).
