@@ -274,6 +274,27 @@ spec("TASK-6", "a session's first chat starts with its task's title, description
   }
 });
 
+spec("FOLDER-3", "a container session's agent finds its task's folder as a directory; what it writes there shows on the page, and the reverse", async () => {
+  const { systemPrompt } = await channelA.request("system_prompt");
+  const folder = /The task's folder is the directory `([^`]+)`/.exec(String(systemPrompt))?.[1];
+  assert.equal(folder, "/task-folder", "the task context names the folder");
+
+  // Written in the agent's container as its tools would; a bash turn in a's chat would show in the later chat claims.
+  exec(a, ["sh", "-c", `mkdir -p ${folder}/shots && echo 'agent wrote 5b2c' > ${folder}/shots/report.txt`]);
+  const page = await sessionPage(a, "page");
+  const files = page.getByRole("region", { name: "Folder" });
+  await files.getByRole("row").filter({ hasText: "shots/report.txt" }).getByText("Agent").waitFor();
+  const history = await gateway.data<Array<{ kind: string; path?: string; actor: unknown }>>("GET", `/tasks/${a.taskId}/history`);
+  assert.deepEqual(history.filter((entry) => entry.kind === "file").map((entry) => [entry.path, entry.actor]), [["shots/report.txt", { kind: "agent", sessionId: a.id }]]);
+
+  // A file a person adds on the page is in the agent's directory.
+  await files.locator("input[type=file]").setInputFiles({ name: "brief.txt", mimeType: "text/plain", buffer: Buffer.from("from the page 8e1d\n") });
+  await files.getByRole("row").filter({ hasText: "brief.txt" }).waitFor();
+  assert.equal(exec(a, ["cat", `${folder}/brief.txt`]), "from the page 8e1d");
+  // Neither is in the worktree, so neither is in git.
+  assert.equal(exec(a, ["git", "-C", "/workspace/fixture", "status", "--porcelain"]), "");
+});
+
 spec("COMMENT-3", "comments never reach a running session's chat; its agent reads them when its session starts and with am comments", async () => {
   const before = String((await channelA.request("system_prompt")).systemPrompt);
   const posted = "Hold the release until Friday 5d2a.";

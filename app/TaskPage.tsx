@@ -4,6 +4,7 @@ import {
 } from "./api.ts";
 import { HostMark, Light, LIGHT_LABEL, STATE_LABEL } from "./Board.tsx";
 import { InlineCreate } from "./InlineCreate.tsx";
+import { TaskFolder } from "./Folder.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { ActorName, PeopleDialog, PersonAvatar, useDirectory, type Directory } from "./People.tsx";
 import { TopicName } from "./Topics.tsx";
@@ -455,10 +456,7 @@ export function TaskPage({ summary, card, topics, onChanged }: { summary: TaskSu
         <div className="page-main">
           <DescriptionField task={task} onSaved={changed} />
           <StatusSection task={task} />
-          {/* The "Task folders" slice's <TaskFolder taskId={task.id} /> goes in this section. */}
-          <section className="panel" aria-label="Folder">
-            <h3>Folder</h3>
-          </section>
+          <TaskFolder taskId={task.id} directory={directory} />
           <CommentsSection taskId={task.id} comments={comments.data} directory={directory} onChanged={commented} />
           <HistorySection entries={history.data} directory={directory} comments={comments.data ?? []} />
         </div>

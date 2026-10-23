@@ -25,9 +25,10 @@ import {
 } from "../git.ts";
 import { branchPullRequests } from "../github.ts";
 import { HostRuntime } from "../runtime/host.ts";
-import { PodmanRuntime } from "../runtime/podman.ts";
+import { CONTAINER_FOLDER, PodmanRuntime } from "../runtime/podman.ts";
 import type { Runtime, WorkspaceDirs } from "../runtime/runtime.ts";
 import { newestTranscript } from "../transcript.ts";
+import { TaskFolders } from "./folders.ts";
 import { handleStoreApi, type SessionInput, type StoreContext } from "./http.ts";
 import { Store, StoreError, type Principal, type Session, type SessionRuntime, type Task } from "./store.ts";
 
@@ -64,6 +65,7 @@ function failure(cause: unknown): string {
  */
 export class StoreService implements StoreContext {
   readonly store: Store;
+  readonly folders: TaskFolders;
   private readonly servers = new Map<string, Server>();
   /** Asking podman for a container's port takes a quarter second, so each page load would wait on it. */
   private readonly ternUpstreams = new Map<string, TernUpstream>();
@@ -77,6 +79,7 @@ export class StoreService implements StoreContext {
 
   constructor(stateDir: string, config: ServiceConfig) {
     this.store = new Store(join(stateDir, "store.sqlite"), userInfo().username);
+    this.folders = new TaskFolders(this.store, join(stateDir, "folders"));
     this.root = join(stateDir, "sessions");
     this.runtimes = config.workspaceRuntime === "podman"
       ? {
@@ -190,12 +193,13 @@ export class StoreService implements StoreContext {
         sessionId: session.id,
         repoPath: project.repoPath,
         dirs,
+        folder: this.folders.dir(session.taskId),
         // A resumed chat keeps the model it last ran.
         model: resume === null ? session.model : null,
         resume,
         ternOrigin: `http://tern-${session.id}.localhost`,
         cloudflare: this.cloudflare.tokens(project.name) !== null,
-        taskContext: this.taskContext(session.taskId, { kind: "none" }, session.checkout ? project.repoPath : null),
+        taskContext: this.taskContext(session.taskId, { kind: "none" }, session.checkout ? project.repoPath : null, session.runtime),
       });
       await this.ternAnswers(runtime, session.id);
     } catch (cause) {
@@ -254,15 +258,17 @@ export class StoreService implements StoreContext {
 
   /**
    * TASK-6: what the container adds to the agent's workflow context: the task as it is now,
-   * with its comments (COMMENT-3: the only time they reach the agent unasked), and what
-   * happened to the work an earlier session left uncommitted (SESSION-9). A checkout session
-   * (HOST-6) is told it works in the main checkout, `checkout`, instead.
+   * with its comments (COMMENT-3: the only time they reach the agent unasked), where its folder
+   * is (FOLDER-3), and what happened to the work an earlier session left uncommitted
+   * (SESSION-9). A checkout session (HOST-6) is told it works in the main checkout, `checkout`,
+   * instead.
    */
-  private taskContext(taskId: string, restored: RestoredSnapshot, checkout: string | null): string {
+  private taskContext(taskId: string, restored: RestoredSnapshot, checkout: string | null, runtime: SessionRuntime): string {
     const human = this.store.ownerPrincipal();
     const { task, topics } = this.store.getTask(human, taskId);
     const comments = this.store.listComments(human, taskId);
     const people = this.store.listPeople(human);
+    const folder = runtime === "container" ? CONTAINER_FOLDER : this.folders.dir(taskId);
     const sections = [
       "# Your task",
       checkout === null
@@ -285,6 +291,8 @@ export class StoreService implements StoreContext {
         const quoted = body.trim().split("\n").map((line) => `> ${line}`.trimEnd()).join("\n");
         return `${name}, ${new Date(createdAt).toISOString()}${editedAt === null ? "" : " (edited)"}:\n\n${quoted}`;
       })),
+      "## Folder",
+      `The task's folder is the directory \`${folder}\`, outside the worktree and outside git.`,
     ];
     if (restored.kind === "restored") {
       sections.push("## Restored work", "The task's previous session ended with uncommitted changes. They are back in the worktree, still uncommitted: commit what belongs to the task.");
@@ -349,11 +357,12 @@ export class StoreService implements StoreContext {
         sessionId: created.id,
         repoPath: repo,
         dirs,
+        folder: this.folders.dir(task.id),
         model: input.model ?? null,
         resume: null,
         ternOrigin: `http://tern-${created.id}.localhost`,
         cloudflare: this.cloudflare.tokens(project.name) !== null,
-        taskContext: this.taskContext(task.id, restored, created.checkout ? repo : null),
+        taskContext: this.taskContext(task.id, restored, created.checkout ? repo : null, kind),
       });
       await this.ternAnswers(runtime, created.id);
       return started;
@@ -401,6 +410,8 @@ export class StoreService implements StoreContext {
         throw new StoreError(500, `could not keep the uncommitted work of ${session.name}, so it has not ended: ${failure(cause)}`);
       }
     }
+    // Recorded now, what its agent wrote into the folder is the agent's; after the session, no one is known to write there (FOLDER-3).
+    this.folders.sync(task.id);
     const ended = this.store.endSession(principal, sessionId);
     this.unlisten(sessionId);
     if (repo !== null) {

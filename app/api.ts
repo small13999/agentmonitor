@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import type {
-  Actor, ChangedFile, Card, Comment, EndedSession, HistoryEntry, Person, Project, Session, SessionRuntime, Task, TaskChanges, TaskDetail, TaskState, TaskSummary, Topic, TopicLink, UnpushedWork,
+  Actor, ChangedFile, Card, Comment, EndedSession, FolderFile, HistoryEntry, Person, Project, Session, SessionRuntime, Task, TaskChanges, TaskDetail, TaskState, TaskSummary, Topic, TopicLink, UnpushedWork,
 } from "../shared/api.ts";
 export type {
-  Actor, ChangedFile, Card, Comment, EndedSession, HistoryEntry, Person, Project, Session, SessionRuntime, Task, TaskChanges, TaskDetail, TaskState, TaskSummary, Topic, TopicLink, UnpushedWork,
+  Actor, ChangedFile, Card, Comment, EndedSession, FolderFile, HistoryEntry, Person, Project, Session, SessionRuntime, Task, TaskChanges, TaskDetail, TaskState, TaskSummary, Topic, TopicLink, UnpushedWork,
 };
 
 /** A refused call; `details` holds the error's extra fields, e.g. the files that block ending a session. */
@@ -16,12 +16,16 @@ export class ApiError extends Error {
   }
 }
 
-/** One store API call; the gateway answers `{ ok, data }` or `{ ok: false, error, ...details }`. */
+/**
+ * One store API call; the gateway answers `{ ok, data }` or `{ ok: false, error, ...details }`.
+ * A Blob body (a file for a task's folder, FOLDER-1) goes as it is; any other as JSON.
+ */
 export async function api<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const json = body !== undefined && !(body instanceof Blob);
   const response = await fetch(`/api/store${path}`, {
     method,
-    headers: body === undefined ? {} : { "content-type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
+    headers: json ? { "content-type": "application/json" } : {},
+    body: body instanceof Blob ? body : json ? JSON.stringify(body) : undefined,
   });
   const envelope = await response.json() as { ok: boolean; data?: T; error?: string; [key: string]: unknown };
   if (!envelope.ok) throw new ApiError(envelope.error ?? `${method} ${path} failed (${response.status})`, envelope);

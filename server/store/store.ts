@@ -4,10 +4,10 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
 import type {
-  Actor, Comment, HistoryEntry, HistoryEvent, Person, Project, PullRequest, Session, SessionRuntime, Task, TaskDetail, TaskState, TaskSummary, Topic, TopicLink,
+  Actor, Comment, FolderFile, HistoryEntry, HistoryEvent, Person, Project, PullRequest, Session, SessionRuntime, Task, TaskDetail, TaskState, TaskSummary, Topic, TopicLink,
 } from "../../shared/api.ts";
 
-export type { Actor, Comment, HistoryEntry, HistoryEvent, Person, Project, Session, SessionRuntime, Task, TaskDetail, TaskState, TaskSummary, Topic, TopicLink };
+export type { Actor, Comment, FolderFile, HistoryEntry, HistoryEvent, Person, Project, Session, SessionRuntime, Task, TaskDetail, TaskState, TaskSummary, Topic, TopicLink };
 
 /** TOPIC-2 and TASK-7: a status is a short current-state note, not a document. */
 export const STATUS_MAX_LINES = 50;
@@ -124,6 +124,17 @@ CREATE TABLE IF NOT EXISTS comments (
   edited_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS comments_task ON comments (task_id, created_at);
+CREATE TABLE IF NOT EXISTS folder_files (
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  path TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  content_type TEXT NOT NULL,
+  added_by_kind TEXT,
+  added_by_id TEXT,
+  added_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (task_id, path)
+);
 `;
 
 /** TASK-14: what happened to a task, appended as it happens; created on its own so old stores can be backfilled. */
@@ -140,6 +151,25 @@ CREATE INDEX task_events_task ON task_events (task_id, at);
 `;
 
 type Row = Record<string, unknown>;
+
+/** FOLDER-1: a file as its task's folder holds it now; `modifiedAt` is its modification time. */
+export interface FolderEntry {
+  path: string;
+  size: number;
+  contentType: string;
+  modifiedAt: number;
+}
+
+function folderFile(row: Row): FolderFile {
+  return {
+    path: String(row.path),
+    size: Number(row.size),
+    contentType: String(row.content_type),
+    addedBy: actorOfRow(row.added_by_kind, row.added_by_id),
+    addedAt: Number(row.added_at),
+    updatedAt: Number(row.updated_at),
+  };
+}
 
 function project(row: Row): Project {
   return {
@@ -875,6 +905,58 @@ export class Store {
       if (current.state !== state) this.recordTaskEvent(taskId, principal, { kind: "state", from: current.state, to: state }, next.updatedAt);
       return next;
     });
+  }
+
+  /**
+   * FOLDER-1, FOLDER-3: brings the task's recorded files in line with what its folder's
+   * directory holds, `entries`. A file that appeared there was written by the agent of the
+   * task's running session, the only one with the directory; with none running, by no one
+   * known. New files go into the task's history (TASK-14) as added when they were written.
+   */
+  syncFolder(taskId: string, entries: FolderEntry[]): FolderFile[] {
+    return this.transaction(() => {
+      const recorded = new Map(this.db.prepare("SELECT * FROM folder_files WHERE task_id = ?").all(taskId).map((row) => [String(row.path), folderFile(row)]));
+      const running = this.runningSessionOf(taskId);
+      const writer: Principal | null = running === null ? null : { kind: "agent", sessionId: running.id };
+      for (const entry of entries) {
+        const known = recorded.get(entry.path);
+        recorded.delete(entry.path);
+        if (known === undefined) {
+          this.insertFolderFile(taskId, entry, writer, entry.modifiedAt);
+        } else if (known.size !== entry.size || known.updatedAt !== entry.modifiedAt || known.contentType !== entry.contentType) {
+          this.db.prepare("UPDATE folder_files SET size = ?, content_type = ?, updated_at = ? WHERE task_id = ? AND path = ?")
+            .run(entry.size, entry.contentType, entry.modifiedAt, taskId, entry.path);
+        }
+      }
+      for (const gone of recorded.keys()) this.db.prepare("DELETE FROM folder_files WHERE task_id = ? AND path = ?").run(taskId, gone);
+      return this.db.prepare("SELECT * FROM folder_files WHERE task_id = ? ORDER BY path").all(taskId).map(folderFile);
+    });
+  }
+
+  /** FOLDER-1: a file someone put into the task's folder, replacing any of the same path; added now, by them. */
+  addFolderFile(principal: Principal, taskId: string, entry: FolderEntry): FolderFile {
+    return this.transaction(() => {
+      this.visibleTask(principal, taskId);
+      this.db.prepare("DELETE FROM folder_files WHERE task_id = ? AND path = ?").run(taskId, entry.path);
+      return this.insertFolderFile(taskId, entry, principal, Date.now());
+    });
+  }
+
+  private insertFolderFile(taskId: string, entry: FolderEntry, principal: Principal | null, addedAt: number): FolderFile {
+    const addedBy = principal === null ? null : actorOf(principal);
+    this.db.prepare(
+      "INSERT INTO folder_files (task_id, path, size, content_type, added_by_kind, added_by_id, added_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run(
+      taskId, entry.path, entry.size, entry.contentType, addedBy?.kind ?? null,
+      addedBy === null ? null : addedBy.kind === "person" ? addedBy.personId : addedBy.sessionId, addedAt, entry.modifiedAt,
+    );
+    this.recordTaskEvent(taskId, principal, { kind: "file", path: entry.path }, addedAt);
+    return { path: entry.path, size: entry.size, contentType: entry.contentType, addedBy, addedAt, updatedAt: entry.modifiedAt };
+  }
+
+  /** FOLDER-1: forgets a file deleted from the task's folder. */
+  removeFolderFile(taskId: string, path: string): void {
+    this.db.prepare("DELETE FROM folder_files WHERE task_id = ? AND path = ?").run(taskId, path);
   }
 
   /** Sessions whose agent socket must be listening. */

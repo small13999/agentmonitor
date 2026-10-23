@@ -40,9 +40,22 @@ am topic create NAME
 am topic link NAME...                 # link the task to topics
 am topic unlink NAME...
 am session show [ID]                  # a session and its task
+am folder                             # the files in the task's folder, who added each, when
+am folder add FILE [PATH]             # put a file into the folder
+am folder get PATH [FILE]             # a folder file, to FILE or stdout
+am folder rm PATH
 ```
 
 `--json` before the command prints JSON instead.
+
+## The task's folder
+
+Every task has a folder: files kept in Agent Monitor, not in git, shown on the task's
+page with who added them and when. Its directory, outside the worktree, is named at the
+end of this context. Files you write there show on the page within seconds; files people
+drop on the page appear there. Put what people should look at there (screenshots,
+reports, exports, recordings), not in the repository, and read what they leave you. It
+outlives the session and the branch.
 
 ## What survives
 

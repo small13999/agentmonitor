@@ -43,7 +43,9 @@ the workspace. `#/t/<id>` opens a task's workspace, a small browser with tabs.
 Page (`#/t/<id>`, `app/TaskPage.tsx`) is the task's primary place: title,
 description (Markdown), state, assignee, and topics, all edited in place; its
 status, folder, comments, history, and sessions, and the running session's
-state. People (the store's owner adds and renames them from the assignee's
+state. The folder (`TaskFolder` in `app/Folder.tsx`) takes files dropped there
+or chosen, shows each inline by kind, and downloads one or all as a zip.
+People (the store's owner adds and renames them from the assignee's
 "People…") show as initials on their colour; an agent shows as its session's
 agent on the session's avatar, linking to the session. Chat (`#/t/<id>/chat`)
 is its running session's chat in Tern, or a Start session button. Settings
@@ -80,6 +82,18 @@ identity, so no token is issued. Inside the container, `am` (`container/am.ts`)
 is the agent's client for it; `am check` lists what would not survive the
 session (uncommitted files, unpushed commits, untracked files that look like
 secrets) and fails until it is clean.
+
+Every task has a folder, `<state dir>/folders/<task id>`: files outside git. The
+store records who added each file and when (`folder_files`) and a `file` event in
+the task's history; the directory is the truth, since agents write into it
+directly, so every list (and the history) first brings the records in line with
+it, crediting new files to the task's running session's agent. Routes:
+`GET /tasks/:id/folder` (list), `GET|PUT|DELETE /tasks/:id/folder/<path>` (the
+file inline with its content type, `?download` as an attachment, single byte
+ranges; `PUT` streams the body in, past the JSON body limit), and
+`GET /tasks/:id/folder.zip`. A container session has the folder at
+`/task-folder`; a host session's agent uses the directory itself; the task
+context names it. `am folder` lists, adds, gets, and deletes files.
 
 Starting a task's first session in a project with a `repoPath` creates the
 task's `am/<title>-<hex>` branch from `origin/HEAD` (or `HEAD` without an
