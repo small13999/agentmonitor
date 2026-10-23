@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, watch as watchDir, writeFileSync } from "node:fs";
 import { watch } from "node:fs/promises";
 import { connect, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -8,18 +8,59 @@ import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-let built = false;
+// `node --test` runs each test file in its own process, all children of one runner. Each
+// building dist/ itself would empty it under the gateways of the others, so the first one
+// builds, under a lock, and stamps the build with the runner's pid; the others wait for it.
+const buildDir = join(tmpdir(), `agentmonitor-build-${root.replaceAll(/[^a-zA-Z0-9]/g, "_")}`);
+const stampFile = join(buildDir, "stamp");
+const lockDir = join(buildDir, "lock");
+const lockRun = join(lockDir, "run");
+let built: Promise<void> | null = null;
 
-/** Build the web app into dist/, which the gateway serves; once per test process. */
-export function buildApp(): void {
-  if (built) return;
-  const result = spawnSync(process.execPath, [join(root, "node_modules", "vite", "bin", "vite.js"), "build", "--logLevel", "error"], {
-    cwd: root,
-    encoding: "utf8",
-    timeout: 30_000,
+/** Build the web app into dist/, which the gateway serves; once per test run. */
+export function buildApp(): Promise<void> {
+  built ??= buildOnce(String(process.ppid));
+  return built;
+}
+
+async function buildOnce(run: string): Promise<void> {
+  mkdirSync(buildDir, { recursive: true });
+  const read = (file: string) => (existsSync(file) ? readFileSync(file, "utf8") : null);
+  for (;;) {
+    if (read(stampFile) === run) return;
+    try {
+      mkdirSync(lockDir);
+    } catch {
+      const holder = read(lockRun);
+      // A lock of another run is left by one that died while building.
+      if (holder !== null && holder !== run) rmSync(lockDir, { recursive: true, force: true });
+      else await untilChanged(() => read(stampFile) === run || !existsSync(lockDir));
+      continue;
+    }
+    try {
+      writeFileSync(lockRun, run);
+      const result = spawnSync(process.execPath, [join(root, "node_modules", "vite", "bin", "vite.js"), "build", "--logLevel", "error"], {
+        cwd: root,
+        encoding: "utf8",
+        timeout: 30_000,
+      });
+      if (result.status !== 0) throw new Error(`vite build failed:\n${result.stdout}${result.stderr}`);
+      writeFileSync(stampFile, run);
+    } finally {
+      rmSync(lockDir, { recursive: true, force: true });
+    }
+    return;
+  }
+}
+
+/** Resolves once `done` holds, checked on every change in the build directory. */
+function untilChanged(done: () => boolean): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  const watcher = watchDir(buildDir, { recursive: true }, () => {
+    if (done()) resolve();
   });
-  if (result.status !== 0) throw new Error(`vite build failed:\n${result.stdout}${result.stderr}`);
-  built = true;
+  if (done()) resolve();
+  return promise.finally(() => watcher.close());
 }
 
 /** A `#rrggbb` colour (a topic's, a person's) as `getComputedStyle` reports it. */
@@ -79,6 +120,8 @@ export class Gateway {
         AGENTMONITOR_STATE_DIR: stateDir,
         AGENTMONITOR_AUTH_MODE: "local",
         AGENTMONITOR_WORKSPACE_RUNTIME: options.runtime,
+        // Never the user's settings, e.g. the hubs of their hubs.json (STORE-3).
+        AGENTMONITOR_CONFIG_DIR: join(stateDir, "config"),
         ...options.env,
       },
       stdio: ["ignore", "pipe", "pipe"],
@@ -102,7 +145,8 @@ export class Gateway {
   }
 
   async stop(): Promise<void> {
-    if (this.child.exitCode === null) {
+    // A gateway already stopped (by a test, then again after it) exited on its signal: no exit code.
+    if (this.child.exitCode === null && this.child.signalCode === null) {
       const { promise, resolve } = Promise.withResolvers<void>();
       this.child.once("exit", () => resolve());
       this.child.kill();

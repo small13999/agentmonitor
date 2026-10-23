@@ -11,6 +11,20 @@ export interface Project {
   createdAt: number;
 }
 
+/**
+ * STORE-3: a store the app lists projects of: the gateway's own (`hub` null) or a hub of the
+ * client's hubs.json, whose projects stay listed from its last answer while it is unavailable.
+ */
+export interface StoreListing {
+  hub: string | null;
+  name: string;
+  /** The hub's origin; null for the gateway's own store. */
+  url: string | null;
+  projects: Project[];
+  /** Why the hub cannot be reached; null when it can. */
+  unavailable: string | null;
+}
+
 export interface Topic {
   id: string;
   projectId: string;

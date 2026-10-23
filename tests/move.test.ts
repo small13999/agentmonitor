@@ -8,29 +8,28 @@ import { after, before } from "node:test";
 import { fileURLToPath } from "node:url";
 import { chromium, type Browser } from "playwright";
 import type { Comment, FolderFile, HistoryEntry, Person, Project, Session, Task, TaskDetail, TaskSummary, Topic, TopicLink } from "../shared/api.ts";
+import { AUDIENCE, FakeAccess } from "./fake-access.ts";
 import { buildApp, Gateway, type AmResult } from "./harness.ts";
 import { spec } from "./spec.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const TOKEN = "access-token-for-the-hub";
+/** The hub's owner, as Cloudflare Access names them. */
+const OWNER = "armin@example.com";
 
 let source: Gateway;
 let target: Gateway;
+let access: FakeAccess;
 let edge: { url: string; server: Server };
 let chrome: Browser;
 let scratch: string;
+/** What the test sends the hub directly carries the owner's Access token, as the edge would. */
+let asOwner: Record<string, string>;
 
-/**
- * Cloudflare's edge in front of the target: it lets a request through only with the hub's
- * Access token in `cf-access-token`, and sends anyone else to Access's login.
- */
+/** Cloudflare's edge in front of the hub: it turns `cf-access-token` into the `Cf-Access-Jwt-Assertion` the hub checks. */
 async function edgeOf(upstream: string): Promise<{ url: string; server: Server }> {
   const server = createServer((request, response) => {
-    if (request.headers["cf-access-token"] !== TOKEN) {
-      response.writeHead(302, { location: "https://team.cloudflareaccess.com/cdn-cgi/access/login" }).end();
-      return;
-    }
     const headers: IncomingHttpHeaders = Object.fromEntries(Object.entries(request.headers).filter(([name]) => name !== "cf-access-token"));
+    headers["cf-access-jwt-assertion"] = request.headers["cf-access-token"];
     request.pipe(forward(`${upstream}${request.url}`, { method: request.method, headers }, (answer) => {
       response.writeHead(answer.statusCode ?? 502, answer.headers);
       answer.pipe(response);
@@ -45,15 +44,25 @@ async function edgeOf(upstream: string): Promise<{ url: string; server: Server }
 }
 
 before(async () => {
-  buildApp();
-  [source, target, chrome] = await Promise.all([Gateway.start(), Gateway.start(), chromium.launch()]);
+  await buildApp();
+  [source, access, chrome] = await Promise.all([Gateway.start(), FakeAccess.start(), chromium.launch()]);
+  target = await Gateway.start({
+    runtime: "none",
+    env: {
+      AGENTMONITOR_AUTH_MODE: "access",
+      AGENTMONITOR_ACCESS_TEAM_DOMAIN: access.url,
+      AGENTMONITOR_ACCESS_AUD: AUDIENCE,
+      AGENTMONITOR_OWNER_EMAIL: OWNER,
+    },
+  });
+  asOwner = { "cf-access-jwt-assertion": access.token(OWNER) };
   edge = await edgeOf(target.url);
   scratch = mkdtempSync(join(tmpdir(), "am-move-test-"));
 });
 after(async () => {
   edge?.server.close();
   await chrome?.close();
-  await Promise.all([source?.stop(), target?.stop()]);
+  await Promise.all([source?.stop(), target?.stop(), access?.stop()]);
   if (scratch !== undefined) rmSync(scratch, { recursive: true, force: true });
 });
 
@@ -70,20 +79,21 @@ async function moveProject(...args: string[]): Promise<AmResult> {
 }
 
 /** Everything a store shows of the project: its records, its people's ids where the records name them, and its files' bytes. */
-async function everything(store: Gateway, project: Project): Promise<unknown> {
-  const tasks = await store.data<TaskSummary[]>("GET", `/projects/${project.id}/tasks`);
-  const topics = await store.data<Topic[]>("GET", `/projects/${project.id}/topics`);
+async function everything(store: Gateway, project: Project, headers: Record<string, string> = {}): Promise<unknown> {
+  const read = <T>(path: string) => store.data<T>("GET", path, undefined, headers);
+  const tasks = await read<TaskSummary[]>(`/projects/${project.id}/tasks`);
+  const topics = await read<Topic[]>(`/projects/${project.id}/topics`);
   return {
-    project: (await store.data<Project[]>("GET", "/projects")).find((found) => found.id === project.id),
-    topics: await Promise.all(topics.map((topic) => store.data<{ topic: Topic; tasks: TopicLink[] }>("GET", `/topics/${topic.id}`))),
+    project: (await read<Project[]>("/projects")).find((found) => found.id === project.id),
+    topics: await Promise.all(topics.map((topic) => read<{ topic: Topic; tasks: TopicLink[] }>(`/topics/${topic.id}`))),
     tasks: await Promise.all(tasks.map(async ({ task }) => {
-      const folder = await store.data<FolderFile[]>("GET", `/tasks/${task.id}/folder`);
+      const folder = await read<FolderFile[]>(`/tasks/${task.id}/folder`);
       return {
-        detail: await store.data<TaskDetail>("GET", `/tasks/${task.id}`),
-        comments: await store.data<Comment[]>("GET", `/tasks/${task.id}/comments`),
-        history: await store.data<HistoryEntry[]>("GET", `/tasks/${task.id}/history`),
+        detail: await read<TaskDetail>(`/tasks/${task.id}`),
+        comments: await read<Comment[]>(`/tasks/${task.id}/comments`),
+        history: await read<HistoryEntry[]>(`/tasks/${task.id}/history`),
         folder,
-        bytes: await Promise.all(folder.map(async (file) => (await fetch(`${store.url}/api/store/tasks/${task.id}/folder/${file.path}`)).text())),
+        bytes: await Promise.all(folder.map(async (file) => (await fetch(`${store.url}/api/store/tasks/${task.id}/folder/${file.path}`, { headers })).text())),
       };
     })),
   };
@@ -118,17 +128,17 @@ spec("STORE-6", "a project moves to another store with its topics, tasks, commen
   await source.data("PATCH", `/tasks/${notes.id}`, { state: "in_review" });
   await source.data("POST", `/tasks/${recap.id}/finish`, { state: "done" });
   await source.data("POST", `/tasks/${idea.id}/finish`, { state: "cancelled" });
-  await target.data("PATCH", `/people/${(await target.data<{ person: Person }>("GET", "/me")).person.id}`, { name: "Hub owner" });
+  await target.data("PATCH", `/people/${(await target.data<{ person: Person }>("GET", "/me", undefined, asOwner)).person.id}`, { name: "Hub owner" }, asOwner);
   // The hub knows Sam by his email under another name, and another Kim Park by hers.
-  const targetSam = await target.data<Person>("POST", "/people", { name: "Samuel Lee", email: "sam@example.com" });
-  const otherKim = await target.data<Person>("POST", "/people", { name: "Kim Park", email: "kim.park@example.org" });
-  const targetMove = ["--target-token-command", `echo ${TOKEN}`];
+  const targetSam = await target.data<Person>("POST", "/people", { name: "Samuel Lee", email: "sam@example.com" }, asOwner);
+  const otherKim = await target.data<Person>("POST", "/people", { name: "Kim Park", email: "kim.park@example.org" }, asOwner);
+  const targetMove = ["--target-token-command", `echo ${access.token(OWNER)}`];
 
   // A running session does not move, and nothing else does then.
   const running = await moveProject(source.url, "draftcoach", edge.url, ...targetMove);
   assert.notEqual(running.code, 0);
   assert.match(running.stderr, new RegExp(`Patch notes 26\\.21 \\(${session.id}\\)`));
-  assert.deepEqual(await target.data<Project[]>("GET", "/projects"), []);
+  assert.deepEqual(await target.data<Project[]>("GET", "/projects", undefined, asOwner), []);
 
   // The session ends; omp left a chat with a subagent's and an image blob in its home.
   await source.data("POST", `/sessions/${session.id}/end`);
@@ -143,36 +153,36 @@ spec("STORE-6", "a project moves to another store with its topics, tasks, commen
     writeFileSync(join(agentDir(source), path), content);
   }
 
-  // Without the hub's Access token the target is out of reach, and the project stays where it is.
-  const denied = await moveProject(source.url, "draftcoach", edge.url, "--target-token-command", "echo expired");
+  // Only the hub's owner moves a project there; Sam's token reaches the hub, and the project stays where it is.
+  const denied = await moveProject(source.url, "draftcoach", edge.url, "--target-token-command", `echo ${access.token("sam@example.com")}`);
   assert.notEqual(denied.code, 0);
-  assert.match(denied.stderr, /not the store API/);
+  assert.match(denied.stderr, /only the store's owner moves projects/);
   const before = await everything(source, project);
 
   const moved = await moveProject(source.url, "draftcoach", edge.url, ...targetMove);
   assert.equal(moved.code, 0, moved.stderr);
 
   // On the target: every record and file, with the same ids and history, and the same people:
-  // the source's owner is the target's, Sam the target's person with his email, and Kim, whose
-  // email it lacked, added with it beside the other Kim Park.
-  const people = await target.data<Person[]>("GET", "/people");
+  // the source's owner is the hub's, Sam the hub's person with his email, and Kim, whose email
+  // it lacked, added with it beside the other Kim Park.
+  const people = await target.data<Person[]>("GET", "/people", undefined, asOwner);
   const targetOwner = people.find((person) => person.owner);
   const targetKim = people.find((person) => person.email === "kim@example.com");
   assert.ok(targetOwner !== undefined && targetKim !== undefined, JSON.stringify(people));
   assert.deepEqual(
     people.map((person) => `${person.name} <${person.email}>`).sort(),
-    [`Hub owner <${targetOwner.email}>`, "Kim Park <kim.park@example.org>", "Kim Park <kim@example.com>", "Samuel Lee <sam@example.com>"].sort(),
+    ["Hub owner <armin@example.com>", "Kim Park <kim.park@example.org>", "Kim Park <kim@example.com>", "Samuel Lee <sam@example.com>"].sort(),
   );
   assert.notEqual(targetKim.id, otherKim.id);
   const here = new Map([[sourceOwner.id, targetOwner.id], [sam.id, targetSam.id], [kim.id, targetKim.id]]);
   const expected: unknown = JSON.parse([...here].reduce((text, [from, to]) => text.replaceAll(from, to), JSON.stringify(before)));
-  assert.deepEqual(await everything(target, project), expected);
-  const comments = await target.data<Comment[]>("GET", `/tasks/${notes.id}/comments`);
+  assert.deepEqual(await everything(target, project, asOwner), expected);
+  const comments = await target.data<Comment[]>("GET", `/tasks/${notes.id}/comments`, undefined, asOwner);
   assert.deepEqual(comments.map((comment) => comment.author), [{ kind: "person", personId: targetOwner.id }, { kind: "agent", sessionId: session.id }]);
   for (const [path, content] of Object.entries(chats)) assert.equal(readFileSync(join(agentDir(target), path), "utf8"), content, path);
 
   // The target's board shows it.
-  const page = await chrome.newPage();
+  const page = await chrome.newPage({ extraHTTPHeaders: asOwner });
   page.setDefaultTimeout(10_000);
   await page.goto(`${target.url}/#/`);
   await page.getByRole("region", { name: "In review" }).getByRole("article", { name: "Patch notes 26.21" }).waitFor();

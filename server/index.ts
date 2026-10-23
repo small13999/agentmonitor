@@ -4,6 +4,7 @@ import { extname, join, normalize, resolve, sep } from "node:path";
 import { handleApi, sendJson } from "./api.ts";
 import { Auth, sendRefusal } from "./auth.ts";
 import { loadConfig } from "./config.ts";
+import { Hubs, loadHubs } from "./hubs.ts";
 import { StoreService } from "./store/service.ts";
 import { TernProxy } from "./tern-proxy.ts";
 
@@ -46,6 +47,7 @@ async function serveStatic(request: IncomingMessage, response: ServerResponse, d
 
 async function main(): Promise<void> {
   const config = loadConfig();
+  const hubs = new Hubs(loadHubs(config.configDir));
   const store = new StoreService(config.stateDir, config);
   await store.start();
   const auth = new Auth(config, store.store);
@@ -57,7 +59,7 @@ async function main(): Promise<void> {
     try {
       // Tern hosts first: they are sessions' chats, not the monitor.
       if (await tern.handleRequest(request, response)) return;
-      if (await handleApi(request, response, { config, auth, store })) return;
+      if (await handleApi(request, response, { config, auth, store, hubs })) return;
       const visitor = await auth.identify(request);
       if (visitor.kind === "refused") {
         sendRefusal(response, visitor);

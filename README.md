@@ -228,6 +228,29 @@ file added later reaches a session when its container starts again.
 this. Tests point them at a scripted fake model (`tests/fake-model.ts`), a fake
 `gh`, fixture credentials, and a fake Cloudflare API.
 
+### Hubs
+
+A client lists the projects of the hubs in `<config dir>/hubs.json` beside its
+own (STORE-3), grouped by store in the project menu:
+
+```json
+[{ "name": "draftcoach", "url": "https://am.draftcoach.gg",
+   "tokenCommand": ["cloudflared", "access", "token", "-app=https://am.draftcoach.gg"] }]
+```
+
+`tokenCommand` is optional and defaults to that `cloudflared` call; the gateway
+reads the file when it starts (`server/hubs.ts`). The browser reaches a hub's
+store API only through the gateway, at `/api/hubs/<name>/store/*`, which adds
+`cf-access-token: <token>` (Cloudflare's edge turns it into
+`Cf-Access-Jwt-Assertion`); the token is asked for again after a minute or once
+the hub refuses it. A hub that cannot be reached (no answer, no token, 401, a
+redirect to Access's login, or an error page instead of the API's JSON) shows
+as unavailable with why, e.g. `log in: cloudflared access login
+https://am.draftcoach.gg`; its last listed projects stay in the menu, and what
+fails because of it names the hub (STORE-4). A hub session's chat loads from
+the hub's own chat host (`am-t-<session>.draftcoach.gg`, PREVIEW-2), where the
+browser logs in through Access itself.
+
 ### Moving a project to another store
 
 `node scripts/move-project.ts <source url> <project name or id> <target url>`
@@ -247,9 +270,10 @@ store's owner. The script drives three store routes:
 2. `PUT /imports/:upload?offset=N` on the target appends a part (the script
    sends 32 MiB, under Cloudflare's request size limit), and `POST
    /imports/:upload {repoPath?}` imports it: refused if the target has the
-   project or any of its records. People map by email where they have one, else
-   by name; the source's owner is the target's owner, and anyone missing is
-   added (`matchPeople` in `server/store/bundle.ts`). The project arrives with
+   project or any of its records. A person is whoever has their email on the
+   target; else the source's owner is the target's owner; else, without an
+   email, the person of the same name; anyone missing is added with their email
+   (`matchPeople` in `server/store/bundle.ts`). The project arrives with
    `--target-repo` as its checkout (else none) and host sessions off. The
    answer carries the SHA-256 of `bundle.json`.
 3. `POST /projects/:id/moved {digest}` on the source deletes the project, its
@@ -268,7 +292,9 @@ gateway:build`, then `npm run gateway:start`; port `AGENTMONITOR_PORT`, default
 
 - `GET /api/health` (unauthenticated liveness: `{ machine, auth }`, `auth` the
   auth mode).
-- `/api/store/*`, the store API above.
+- `/api/store/*`, the store API above; `GET /api/stores`, the projects of this
+  gateway's store and of each hub (STORE-3); `/api/hubs/<name>/store/*`, a
+  hub's store API through the gateway.
 
 Every other request, the app's pages, the store API and Tern hosts alike, goes
 through `Auth.identify` (`server/auth.ts`), which says which person it is or
