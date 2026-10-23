@@ -196,10 +196,18 @@ Unnumbered intent; not testable, so not claims.
 
 - **CARD-1** A task's card and page show its running session as waiting on you,
   working, idle, or stopped; working pulses.
-- **CARD-3** A task's Changes view shows what its branch changed against the
-  default branch, its uncommitted files, and its open pull requests.
-- **CARD-4** A task's Changes view names the other running tasks of the project
+- **CARD-3** A task's page has a Work section: its branch's state (nothing yet,
+  uncommitted changes in its running session, commits not pushed, or pushed), its
+  commits with their descriptions, its pull requests (open, merged, or closed) with
+  their checks, and how many files changed, which expands to the list.
+- **CARD-4** A task's Work section names the other running tasks of the project
   that changed any of the same files, and its card marks that it has them.
+- **CARD-6** A task's card shows one badge for the most important state of its
+  work: not pushed, pull request open, or deployed.
+- **DEPLOY-1** A task's page has Deploy: its agent (its session started if
+  stopped) opens a pull request of the task's work to the default branch with a
+  description, and merges it once its checks pass; telling the agent to deploy
+  does the same.
 
 ## Tasks
 
@@ -338,6 +346,8 @@ Unnumbered intent; not testable, so not claims.
   minutes) is stopped and recorded as timed out.
 - **AUTO-15** People create and change automations on the site; agents do the same
   with `am automation`, so an agent can set one up with a person.
+- **AUTO-16** A run's page shows its work as a task's does (CARD-3), with Deploy
+  (DEPLOY-1) while it waits for review.
 
 ## Leases
 

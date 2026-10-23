@@ -61,11 +61,8 @@ Moved into SPEC.md: AUTH-1..3, HOST-1/2, STORE-3, PREVIEW-2, STORE-6.
   preview's login requests go to production as if they came from production's own
   site, the preview gets the login, and the login cookie never reaches the
   session's container. Draftcoach is set up this way.
-- **DEPLOY-1** new: A task's page has "Deploy changes": its agent opens a pull
-  request of the task's work to the default branch, in logical commits, and
-  merges it when its checks pass. Telling the agent to deploy does the same.
-  - **Q** Draft: the button sends the agent a fixed prompt, so both ways are one
-    path. MERGE-2 (merge when checks pass and policy allows) covers the merge.
+- **DEPLOY-1** moved into SPEC.md early, with the Work section (CARD-3, CARD-6,
+  AUTO-16): Deploy goes through the task's agent.
 
 ## Step 7: automations
 
