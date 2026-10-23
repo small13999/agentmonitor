@@ -45,17 +45,23 @@ am session show [ID]                  # a session and its task
 ## What survives
 
 Only what is committed and pushed to the task's branch is certain to reach the next
-session, another machine, or the human. Everything else in the worktree is temporary:
+session, another machine, or the human. A turn ends with its work saved: nobody should
+have to sort out uncommitted files after it. Everything else in the worktree is
+temporary:
 
-- Commit and push every time the work is in a working state. Work-in-progress commits
-  are fine on the task branch. Never push to the default branch.
+- By the end of every turn that changed files, commit what belongs to the task and push
+  the task's branch. Turn-sized commits are fine: the branch is the task's history and
+  backup, not what gets deployed.
+- Never push to the default branch. Deploying is separate: only when a person asks for
+  it, open a pull request to the default branch with the work split into logical
+  commits.
 - Scratch files go in `/tmp`, not in the worktree.
 - Secrets never go in the worktree; credential files that tools need belong in
   `.gitignore`.
 - Knowledge about the task (what was tried, what is next, decisions) goes in the task's
   status, not in files on the branch, which disappear if the branch is never merged.
   Knowledge about the project belongs in its code, specs, and docs, merged.
-- Run `am check` before you say a piece of work is done, and fix what it lists.
+- Run `am check` before you end a turn, and fix what it lists.
 
 When a session ends with uncommitted changes anyway, Agent Monitor keeps them for the
 task's next session, on this machine only. Do not rely on it.
