@@ -1,4 +1,4 @@
-import { useEffect, useState, type KeyboardEvent } from "react";
+import { useEffect, useState, type CSSProperties, type KeyboardEvent } from "react";
 import { api, type Actor, type Person, type Session } from "./api.ts";
 import { InlineCreate } from "./InlineCreate.tsx";
 
@@ -17,12 +17,17 @@ function initials(name: string): string {
 }
 
 /** PERSON-2: a session's agent gets a colour of its own, from its id. */
-const AGENT_COLORS = ["#3e63dd", "#8e4ec6", "#0d74ce", "#218358", "#ad5700", "#c2298a"];
+const AGENT_COLORS = ["#4c6ef5", "#9c36b5", "#1c7ed6", "#12b886", "#f76707", "#e64980", "#74b816"];
 
 function agentColor(sessionId: string): string {
   let hash = 0;
   for (const char of sessionId) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
   return AGENT_COLORS[hash % AGENT_COLORS.length];
+}
+
+/** PERSON-2: a session's agent, its spark on a glossy square in the session's colour. */
+export function AgentAvatar({ sessionId }: { sessionId: string }) {
+  return <span className="avatar avatar-agent" style={{ "--s": agentColor(sessionId) } as CSSProperties} data-initials="AI" aria-hidden="true" />;
 }
 
 /**
@@ -54,7 +59,7 @@ export function ActorName({ actor, directory }: { actor: Actor | null; directory
     : `The agent of the session started ${new Date(session.startedAt).toLocaleString()}${session.machine === null ? "" : ` on ${session.machine}`}${session.endedAt === null ? "" : ", ended"}`;
   return (
     <a className="actor agent" href={href} title={title} data-session={actor.sessionId}>
-      <span className="avatar avatar-agent" style={{ background: agentColor(actor.sessionId) }} data-initials="AI" aria-hidden="true" />
+      <AgentAvatar sessionId={actor.sessionId} />
       <span className="actor-name">{label}</span>
     </a>
   );

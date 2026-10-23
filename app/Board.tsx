@@ -1,6 +1,6 @@
 import { useState, type SubmitEvent } from "react";
 import { api, type Card, type Person, type Project, type Task, type TaskState, type TaskSummary } from "./api.ts";
-import { PersonAvatar } from "./People.tsx";
+import { AgentAvatar, PersonAvatar } from "./People.tsx";
 import { TopicName } from "./Topics.tsx";
 
 export const LIGHT_LABEL: Record<Card["turn"], string> = {
@@ -65,6 +65,7 @@ function TaskCard({ summary, card, assignee }: { summary: TaskSummary; card: Car
         {card === null && <span className="muted">{summary.sessionId === null ? "No session" : "Starting…"}</span>}
         {card !== null && (
           <>
+            <AgentAvatar sessionId={card.session.id} />
             <TurnPill turn={card.turn} />
             {card.session.machine !== null && <span className="machine" title="Machine">{card.session.machine}</span>}
             <HostMark card={card} />
@@ -115,6 +116,17 @@ const COLUMNS: Array<{ label: string; state: TaskState }> = [
   { label: "In review", state: "in_review" },
 ];
 
+/** A column's glyph: an open ring, a half-filled one for work under way, an eye for review. */
+function ColumnIcon({ state }: { state: TaskState }) {
+  return (
+    <svg className="column-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
+      {state === "open" && <circle cx="12" cy="12" r="8.5" strokeDasharray="3.2 3.4" />}
+      {state === "in_progress" && <><circle cx="12" cy="12" r="8.5" /><path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="currentColor" /></>}
+      {state === "in_review" && <><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z" /><circle cx="12" cy="12" r="2.8" /></>}
+    </svg>
+  );
+}
+
 /**
  * BOARD-1/BOARD-2: the project's active tasks in columns by state. Tasks waiting on you come
  * first in their column; the rest keep the order they were created in, so cards stay put as
@@ -137,9 +149,13 @@ export function Board({ project, tasks, cards, people, meId, onChanged }: {
         const shown = tasks
           .filter((summary) => summary.task.state === column.state)
           .toSorted((a, b) => waiting(a) - waiting(b) || a.task.createdAt - b.task.createdAt);
+        const needs = shown.filter((summary) => waiting(summary) === 0).length;
         return (
-          <section key={column.label} className="column" aria-label={column.label}>
-            <h2>{column.label} <span className="count">{shown.length}</span></h2>
+          <section key={column.label} className={`column column-${column.state}`} aria-label={column.label}>
+            <header className="column-head">
+              <h2><ColumnIcon state={column.state} />{column.label} <span className="count">{shown.length}</span></h2>
+              {needs > 0 && <span className="needs-count">{needs} need{needs === 1 ? "s" : ""} you</span>}
+            </header>
             {column.state === "open" && <NewTask project={project} onCreated={onChanged} />}
             {shown.map((summary) => (
               <TaskCard

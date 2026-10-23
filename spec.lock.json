@@ -106,7 +106,7 @@
   },
   "tests": {
     "tests/app.test.ts::UI-1::the Tasks page lists open and in-progress tasks beside the workspace": "a23058ede592d21d",
-    "tests/app.test.ts::UI-2::a task has Page, Chat, and Settings tabs, Settings at the right with its subtabs, and switching keeps the chat loaded": "939c7a811dd83648",
+    "tests/app.test.ts::UI-2::a task has Page, Chat, and Settings tabs, Settings at the right with its subtabs, and switching keeps the chat loaded": "d48a155ebcfc4865",
     "tests/app.test.ts::BOARD-3::done and cancelled tasks leave the board; search and the All tasks list find every task by title, description, and comments": "b4db0589a8a32400",
     "tests/app.test.ts::UI-4::a topic's name shows in its colour everywhere; clicking it opens its rendered status and linked tasks": "83a2036984bbe475",
     "tests/app.test.ts::UI-3::the project menu creates a project from its name, repository, and whether it allows host sessions": "f46b3da628546914",

@@ -73,9 +73,17 @@ spec("UI-2", "a task has Page, Chat, and Settings tabs, Settings at the right wi
   await tabs.getByRole("tab", { name: "Chat" }).waitFor();
   assert.deepEqual((await tabs.getByRole("tab").allTextContents()).map((text) => text.trim()), ["Page", "Chat", "Settings"]);
   // Settings sits at the right end of the tabs, apart from the others.
-  const [bar, chatTab, settingsTab] = await Promise.all([tabs.boundingBox(), tabs.getByRole("tab", { name: "Chat" }).boundingBox(), tabs.getByRole("tab", { name: "Settings" }).boundingBox()]);
+  const [bar, chatTab, settingsTab, barInset] = await Promise.all([
+    tabs.boundingBox(),
+    tabs.getByRole("tab", { name: "Chat" }).boundingBox(),
+    tabs.getByRole("tab", { name: "Settings" }).boundingBox(),
+    tabs.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return parseFloat(style.paddingRight) + parseFloat(style.borderRightWidth);
+    }),
+  ]);
   assert.ok(bar && chatTab && settingsTab);
-  assert.ok(Math.abs(settingsTab.x + settingsTab.width - (bar.x + bar.width)) <= 2, "Settings ends where the tabs end");
+  assert.ok(Math.abs(settingsTab.x + settingsTab.width - (bar.x + bar.width - barInset)) <= 2, "Settings ends where the tabs end");
   assert.ok(settingsTab.x > chatTab.x + chatTab.width + 100, "Settings stands apart from Page and Chat");
 
   // Without a session, the Chat tab starts one.
