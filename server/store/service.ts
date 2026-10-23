@@ -32,11 +32,11 @@ import { newestTranscript } from "../transcript.ts";
 import { TaskFolders } from "./folders.ts";
 import { ProjectMoves } from "./move.ts";
 import { handleStoreApi, type SessionInput, type StoreContext } from "./http.ts";
-import { Store, StoreError, type Principal, type Session, type SessionRuntime, type Task } from "./store.ts";
+import { Store, StoreError, type Principal, type Project, type Session, type SessionRuntime, type Task } from "./store.ts";
 
 type ServiceConfig = Pick<
   GatewayConfig,
-  "workspaceRuntime" | "workspaceMemoryMib" | "machineName" | "ompAgentDir" | "credentialsHome" | "configDir" | "cloudflareApi" | "ownerEmail" | "publicOrigin"
+  "workspaceRuntime" | "workspaceMemoryMib" | "machineName" | "ompAgentDir" | "credentialsHome" | "cloudflareApi" | "ownerEmail" | "publicOrigin"
 >;
 
 export interface TernUpstream {
@@ -92,7 +92,7 @@ export class StoreService implements StoreContext {
         }
       : null;
     this.config = config;
-    this.cloudflare = new CloudflareBroker({ configDir: config.configDir, upstream: config.cloudflareApi });
+    this.cloudflare = new CloudflareBroker({ store: this.store, upstream: config.cloudflareApi });
     this.moves = new ProjectMoves({
       store: this.store,
       folders: this.folders,
@@ -109,9 +109,9 @@ export class StoreService implements StoreContext {
   }
 
   cards(principal: Principal, projectId: string): Promise<Card[]> {
-    const tokens = this.cloudflare.tokens(this.store.getProject(principal, projectId).name);
+    const { cloudflare } = this.store.getProject(principal, projectId);
     const cloudflareOf = (sessionId: string): Card["cloudflare"] =>
-      tokens === null ? null : { canWrite: tokens.write !== null, writesUntil: this.cloudflare.writesUntil(sessionId) };
+      cloudflare.read ? { canWrite: cloudflare.write, writesUntil: this.cloudflare.writesUntil(sessionId) } : null;
     return projectCards(this.store, (id) => this.dirs(id), cloudflareOf, principal, projectId);
   }
 
@@ -135,8 +135,7 @@ export class StoreService implements StoreContext {
     const { session } = this.store.getSession(principal, sessionId);
     if (session.endedAt !== null) throw new StoreError(409, `session ${session.name} has ended`);
     const project = this.store.getProject(principal, session.projectId);
-    const tokens = this.cloudflare.tokens(project.name);
-    if (tokens === null || tokens.write === null) {
+    if (!project.cloudflare.write) {
       throw new StoreError(409, `project ${project.name} has no Cloudflare write token in Agent Monitor`);
     }
     return session;
@@ -210,7 +209,7 @@ export class StoreService implements StoreContext {
         model: resume === null ? session.model : null,
         resume,
         ternOrigin: hostOrigin(gatewayZone(this.config.publicOrigin), { kind: "chat", sessionId: session.id }),
-        cloudflare: this.cloudflare.tokens(project.name) !== null,
+        cloudflare: project.cloudflare.read,
         taskContext: this.taskContext(session.taskId, { kind: "none" }, session.checkout ? project.repoPath : null, session.runtime),
       });
       await this.ternAnswers(runtime, session.id);
@@ -237,10 +236,10 @@ export class StoreService implements StoreContext {
     mkdirSync(run, { recursive: true, mode: 0o700 });
     const agent = createServer((request, response) => {
       if (new URL(request.url ?? "/", "http://localhost").pathname.startsWith(CLOUDFLARE_API_PREFIX)) {
-        let project: string;
+        let project: Project;
         try {
           const owner = this.store.ownerPrincipal();
-          project = this.store.getProject(owner, this.store.getSession(owner, sessionId).session.projectId).name;
+          project = this.store.getProject(owner, this.store.getSession(owner, sessionId).session.projectId);
         } catch {
           response.writeHead(403).end();
           return;
@@ -373,7 +372,7 @@ export class StoreService implements StoreContext {
         model: input.model ?? null,
         resume: null,
         ternOrigin: hostOrigin(gatewayZone(this.config.publicOrigin), { kind: "chat", sessionId: created.id }),
-        cloudflare: this.cloudflare.tokens(project.name) !== null,
+        cloudflare: project.cloudflare.read,
         taskContext: this.taskContext(task.id, restored, created.checkout ? repo : null, kind),
       });
       await this.ternAnswers(runtime, created.id);

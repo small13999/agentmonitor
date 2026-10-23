@@ -297,10 +297,18 @@ function peopleOf(value: unknown): Person[] {
 
 function projectOf(value: unknown): Project {
   if (!isRecord(value) || typeof value.id !== "string" || typeof value.name !== "string" || (value.repoPath !== null && typeof value.repoPath !== "string")
-    || typeof value.hostSessions !== "boolean" || typeof value.createdAt !== "number") {
+    || typeof value.hostSessions !== "boolean" || !isRecord(value.cloudflare) || typeof value.cloudflare.read !== "boolean"
+    || typeof value.cloudflare.write !== "boolean" || typeof value.createdAt !== "number") {
     throw unexpected("a project");
   }
-  return { id: value.id, name: value.name, repoPath: value.repoPath, hostSessions: value.hostSessions, createdAt: value.createdAt };
+  const cloudflare = { read: value.cloudflare.read, write: value.cloudflare.write };
+  return { id: value.id, name: value.name, repoPath: value.repoPath, hostSessions: value.hostSessions, cloudflare, createdAt: value.createdAt };
+}
+
+/** CLOUDFLARE-3: which Cloudflare tokens the project has, as its settings page says it; never the tokens. */
+function cloudflareTokensLine({ cloudflare }: Project): string {
+  if (!cloudflare.read) return "cloudflare no tokens";
+  return cloudflare.write ? "cloudflare read token set, write token set" : "cloudflare read token set, no write token";
 }
 
 /** TASK-14: one entry of a task's history, checked field by field for its kind. */
@@ -904,6 +912,7 @@ async function main(args: string[]): Promise<void> {
       `project ${project.name} (${project.id})`,
       `repository ${project.repoPath ?? "none"}`,
       `host sessions ${project.hostSessions ? "allowed" : "not allowed"}`,
+      cloudflareTokensLine(project),
     ].join("\n"));
     return;
   }

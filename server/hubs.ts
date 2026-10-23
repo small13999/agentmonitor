@@ -186,6 +186,7 @@ const projectSchema = z.object({
   name: z.string(),
   repoPath: z.string().nullable(),
   hostSessions: z.boolean(),
+  cloudflare: z.object({ read: z.boolean(), write: z.boolean() }),
   createdAt: z.number(),
 });
 

@@ -38,7 +38,7 @@ export interface GatewayConfig {
   ompAgentDir: string;
   /** Home whose ~/.ssh, ~/.gitconfig and ~/.config/gh session containers get copies of. */
   credentialsHome: string;
-  /** Agent Monitor's own settings, e.g. cloudflare/<project>.env. Default ~/.config/agentmonitor. */
+  /** Agent Monitor's own settings, e.g. hubs.json. Default ~/.config/agentmonitor. */
   configDir: string;
   /** Cloudflare's API origin, which the gateway's Cloudflare broker forwards agents' requests to. */
   cloudflareApi: string;

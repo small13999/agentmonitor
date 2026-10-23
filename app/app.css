@@ -173,6 +173,7 @@ button.ghost.danger:hover { border-color: var(--red); background: transparent; }
 .new-project label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; font-weight: 700; }
 .new-project label.check { display: flex; gap: 8px; align-items: flex-start; font-weight: 500; }
 .new-project .actions, .start-session .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.new-project + .new-project { margin-top: 16px; }
 /* HOST-3: a session without a container's walls. */
 .host-mark { flex: none; background: #f7768e; color: #111; border: 2px solid var(--ink-line); border-radius: 999px; padding: 0 8px; font-size: 11px; font-weight: 800; line-height: 16px; white-space: nowrap; }
 

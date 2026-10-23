@@ -72,7 +72,11 @@ function Cloudflare({ card, onChanged }: { card: Card; onChanged: () => void }) 
   const [error, setError] = useState<string | null>(null);
   const cloudflare = card.cloudflare;
   if (cloudflare === null) {
-    return <section className="settings-body" aria-label="Cloudflare"><p className="muted small">This project has no Cloudflare tokens in Agent Monitor.</p></section>;
+    return (
+      <section className="settings-body" aria-label="Cloudflare">
+        <p className="muted small">This project has no Cloudflare tokens in Agent Monitor. The store's owner sets them in the <a href="#/project">project settings</a>.</p>
+      </section>
+    );
   }
   const change = (method: "POST" | "DELETE") => {
     setError(null);

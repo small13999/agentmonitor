@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import type {
   Actor, Comment, FolderFile, HistoryEntry, HistoryEvent, Person, Project, PullRequest, Session, SessionRuntime, Task, TaskDetail, TaskState, TaskSummary, Topic, TopicLink,
 } from "../../shared/api.ts";
+import type { CloudflareTokens } from "../cloudflare.ts";
 import { historyEvent, matchPeople, type ProjectRecords } from "./bundle.ts";
 
 export type { Actor, Comment, FolderFile, HistoryEntry, HistoryEvent, Person, Project, Session, SessionRuntime, Task, TaskDetail, TaskState, TaskSummary, Topic, TopicLink };
@@ -117,6 +118,13 @@ CREATE TABLE IF NOT EXISTS folder_files (
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (task_id, path)
 );
+-- CLOUDFLARE-3: a project's Cloudflare tokens, which the gateway's broker uses for its sessions' agents (CLOUDFLARE-1/2).
+CREATE TABLE IF NOT EXISTS cloudflare_tokens (
+  project_id TEXT PRIMARY KEY REFERENCES projects(id),
+  read_token TEXT NOT NULL,
+  write_token TEXT,
+  updated_at INTEGER NOT NULL
+);
 `;
 
 /** TASK-14: what happened to a task, appended as it happens; created on its own so old stores can be backfilled. */
@@ -153,12 +161,17 @@ function folderFile(row: Row): FolderFile {
   };
 }
 
+/** Project rows with whether the project has Cloudflare tokens (CLOUDFLARE-3), never the tokens. */
+const PROJECT_ROWS = `SELECT p.*, c.project_id IS NOT NULL AS cloudflare_read, c.write_token IS NOT NULL AS cloudflare_write
+  FROM projects p LEFT JOIN cloudflare_tokens c ON c.project_id = p.id`;
+
 function project(row: Row): Project {
   return {
     id: String(row.id),
     name: String(row.name),
     repoPath: row.repo_path === null ? null : String(row.repo_path),
     hostSessions: Number(row.host_sessions) === 1,
+    cloudflare: { read: Number(row.cloudflare_read) === 1, write: Number(row.cloudflare_write) === 1 },
     createdAt: Number(row.created_at),
   };
 }
@@ -501,7 +514,7 @@ export class Store {
 
   private visibleProject(principal: Principal, projectId: string): Project {
     const scope = this.scope(principal);
-    const row = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(projectId);
+    const row = this.db.prepare(`${PROJECT_ROWS} WHERE p.id = ?`).get(projectId);
     if (row === undefined || (scope !== null && scope !== projectId)) {
       throw new StoreError(404, `project ${projectId} not found`);
     }
@@ -559,8 +572,8 @@ export class Store {
   listProjects(principal: Principal): Project[] {
     const scope = this.scope(principal);
     const rows = scope === null
-      ? this.db.prepare("SELECT * FROM projects ORDER BY name").all()
-      : this.db.prepare("SELECT * FROM projects WHERE id = ?").all(scope);
+      ? this.db.prepare(`${PROJECT_ROWS} ORDER BY p.name`).all()
+      : this.db.prepare(`${PROJECT_ROWS} WHERE p.id = ?`).all(scope);
     return rows.map(project);
   }
 
@@ -584,6 +597,7 @@ export class Store {
       name: input.name,
       repoPath: input.repoPath ?? null,
       hostSessions: input.hostSessions ?? false,
+      cloudflare: { read: false, write: false },
       createdAt: Date.now(),
     };
     this.db.prepare("INSERT INTO projects (id, name, repo_path, host_sessions, created_at) VALUES (?, ?, ?, ?, ?)")
@@ -619,6 +633,38 @@ export class Store {
   /** HOST-1: only the store's owner allows or stops host sessions in a project; the one place that says who may. */
   private requireHostSessionsSwitch(principal: Principal): void {
     if (!this.isOwner(principal)) throw new StoreError(403, "only the store's owner allows or stops host sessions");
+  }
+
+  /**
+   * CLOUDFLARE-3: the store's owner sets the project's Cloudflare tokens, both at once: a read
+   * token, and a write token or none (its agents only read). The answer says which are set.
+   */
+  setCloudflareTokens(principal: Principal, projectId: string, tokens: CloudflareTokens): Project {
+    this.requireOwner(principal);
+    return this.transaction(() => {
+      this.visibleProject(principal, projectId);
+      this.db.prepare(
+        "INSERT INTO cloudflare_tokens (project_id, read_token, write_token, updated_at) VALUES (?, ?, ?, ?) " +
+          "ON CONFLICT (project_id) DO UPDATE SET read_token = excluded.read_token, write_token = excluded.write_token, updated_at = excluded.updated_at",
+      ).run(projectId, tokens.read, tokens.write, Date.now());
+      return this.visibleProject(principal, projectId);
+    });
+  }
+
+  /** CLOUDFLARE-3: the store's owner removes the project's Cloudflare tokens; its agents lose Cloudflare access. */
+  removeCloudflareTokens(principal: Principal, projectId: string): Project {
+    this.requireOwner(principal);
+    return this.transaction(() => {
+      this.visibleProject(principal, projectId);
+      this.db.prepare("DELETE FROM cloudflare_tokens WHERE project_id = ?").run(projectId);
+      return this.visibleProject(principal, projectId);
+    });
+  }
+
+  /** CLOUDFLARE-1/2: the project's tokens, for the gateway's broker only: no route answers with them. Null: it has none. */
+  cloudflareTokens(projectId: string): CloudflareTokens | null {
+    const row = this.db.prepare("SELECT read_token, write_token FROM cloudflare_tokens WHERE project_id = ?").get(projectId);
+    return row === undefined ? null : { read: String(row.read_token), write: row.write_token === null ? null : String(row.write_token) };
   }
 
   listTopics(principal: Principal, projectId: string): Topic[] {
@@ -996,7 +1042,7 @@ export class Store {
 
   /**
    * STORE-6: every record of the project, in the order the store wrote them, with the store's
-   * owner and the people the records name.
+   * owner, the people the records name, and the project's Cloudflare tokens (CLOUDFLARE-3).
    */
   projectRecords(principal: Principal, projectId: string): ProjectRecords {
     this.requireOwner(principal);
@@ -1021,7 +1067,7 @@ export class Store {
       if (id !== null) named.add(id);
     }
     return {
-      version: 1,
+      version: 2,
       project: found,
       people: this.db.prepare("SELECT * FROM people ORDER BY owner DESC, created_at, id").all().map(person).filter((found) => found.owner || named.has(found.id)),
       topics: ofProject("SELECT * FROM topics WHERE project_id = ? ORDER BY created_at, id").map(topic),
@@ -1031,6 +1077,7 @@ export class Store {
       comments,
       folderFiles,
       events,
+      cloudflareTokens: this.cloudflareTokens(projectId),
     };
   }
 
@@ -1039,7 +1086,7 @@ export class Store {
    * and branches stay valid; refused when this store has any of them already. Whoever its
    * records name is this store's person (matchPeople); anyone this store lacks is added with
    * their id. `repoPath` is the project's main checkout on this machine; host sessions stay off
-   * until this store's owner allows them (HOST-1).
+   * until this store's owner allows them (HOST-1). Its Cloudflare tokens come along (CLOUDFLARE-3).
    */
   importProject(principal: Principal, records: ProjectRecords, repoPath: string | null): { project: Project; added: Person[] } {
     this.requireOwner(principal);
@@ -1073,6 +1120,10 @@ export class Store {
       };
       const actorHere = (who: Actor | null): Actor | null => (who?.kind === "person" ? { kind: "person", personId: here(who.personId) } : who);
       this.db.prepare("INSERT INTO projects (id, name, repo_path, host_sessions, created_at) VALUES (?, ?, ?, 0, ?)").run(moved.id, moved.name, repoPath, moved.createdAt);
+      if (records.cloudflareTokens !== null) {
+        this.db.prepare("INSERT INTO cloudflare_tokens (project_id, read_token, write_token, updated_at) VALUES (?, ?, ?, ?)")
+          .run(moved.id, records.cloudflareTokens.read, records.cloudflareTokens.write, Date.now());
+      }
       for (const found of records.topics) {
         this.db.prepare("INSERT INTO topics (id, project_id, name, color, created_at, status, status_revision) VALUES (?, ?, ?, ?, ?, ?, ?)")
           .run(found.id, moved.id, found.name, found.color, found.createdAt, found.status, found.statusRevision);
@@ -1112,7 +1163,7 @@ export class Store {
         const event = entry.event.kind === "assignee" && entry.event.personId !== null ? { ...entry.event, personId: here(entry.event.personId) } : entry.event;
         this.db.prepare("INSERT INTO task_events (task_id, at, actor_kind, actor_id, data) VALUES (?, ?, ?, ?, ?)").run(entry.taskId, entry.at, kind, id, JSON.stringify(event));
       }
-      return { project: { ...moved, repoPath, hostSessions: false }, added };
+      return { project: this.visibleProject(principal, moved.id), added };
     });
   }
 
@@ -1124,7 +1175,7 @@ export class Store {
       for (const table of ["task_events", "comments", "folder_files", "task_topics"]) {
         this.db.prepare(`DELETE FROM ${table} WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)`).run(projectId);
       }
-      for (const table of ["sessions", "tasks", "topics"]) this.db.prepare(`DELETE FROM ${table} WHERE project_id = ?`).run(projectId);
+      for (const table of ["sessions", "tasks", "topics", "cloudflare_tokens"]) this.db.prepare(`DELETE FROM ${table} WHERE project_id = ?`).run(projectId);
       this.db.prepare("DELETE FROM projects WHERE id = ?").run(projectId);
     });
   }

@@ -44,6 +44,9 @@ const repoPath = z.string().startsWith("/");
 const projectBody = z.strictObject({ name, repoPath: repoPath.optional(), hostSessions: z.boolean().optional() });
 // The project settings page; null takes the repository away.
 const projectUpdateBody = z.strictObject({ name: name.optional(), repoPath: repoPath.nullable().optional(), hostSessions: z.boolean().optional() });
+// CLOUDFLARE-3: both tokens at once; without a write token the project's agents only read.
+const cloudflareToken = z.string().trim().min(1).max(1024);
+const cloudflareTokensBody = z.strictObject({ read: cloudflareToken, write: cloudflareToken.optional() });
 const taskBody = z.strictObject({ title: name, description: description.optional() });
 // Finishing a task has its own route (TASK-9).
 const taskUpdateBody = z.strictObject({
@@ -120,6 +123,20 @@ const routes: Route[] = [
     method: "PATCH",
     pattern: new RegExp(`^/projects/${id}$`),
     handler: async (c, p, [projectId], body) => c.store.updateProject(p, projectId, projectUpdateBody.parse(await body())),
+  },
+  // CLOUDFLARE-3: the owner sets or removes the project's Cloudflare tokens; no route answers with them.
+  {
+    method: "PUT",
+    pattern: new RegExp(`^/projects/${id}/cloudflare$`),
+    handler: async (c, p, [projectId], body) => {
+      const input = cloudflareTokensBody.parse(await body());
+      return c.store.setCloudflareTokens(p, projectId, { read: input.read, write: input.write ?? null });
+    },
+  },
+  {
+    method: "DELETE",
+    pattern: new RegExp(`^/projects/${id}/cloudflare$`),
+    handler: (c, p, [projectId]) => c.store.removeCloudflareTokens(p, projectId),
   },
   // STORE-6: the source exports a bundle, the target receives it in parts and imports it, and the source deletes the project.
   {

@@ -8,6 +8,8 @@ export interface Project {
   repoPath: string | null;
   /** HOST-1: whether sessions of this project may run on the host instead of in a container. */
   hostSessions: boolean;
+  /** CLOUDFLARE-3: whether the store holds a Cloudflare read and a write token for the project; never the tokens. */
+  cloudflare: { read: boolean; write: boolean };
   createdAt: number;
 }
 

@@ -1,7 +1,7 @@
-import { readFileSync } from "node:fs";
 import { request as httpRequest, type IncomingMessage, type OutgoingHttpHeaders, type ServerResponse } from "node:http";
 import { request as httpsRequest } from "node:https";
-import { join } from "node:path";
+import type { Project } from "../shared/api.ts";
+import type { Store } from "./store/store.ts";
 
 /** How long one "allow writes" on the session page lasts (CLOUDFLARE-2). */
 export const WRITE_GRANT_MS = 10 * 60_000;
@@ -17,19 +17,11 @@ const STRIPPED_RESPONSE_HEADERS = new Set([
   "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade",
 ]);
 
+/** CLOUDFLARE-3: a project's Cloudflare tokens, as its store keeps them. */
 export interface CloudflareTokens {
   read: string;
   /** Null: the project's agents only ever read. */
   write: string | null;
-}
-
-function parseEnv(text: string): Map<string, string> {
-  const values = new Map<string, string>();
-  for (const line of text.split("\n")) {
-    const match = /^\s*(?:export\s+)?([A-Z0-9_]+)\s*=\s*(.*?)\s*$/.exec(line);
-    if (match !== null) values.set(match[1], match[2].replace(/^(["'])(.*)\1$/, "$2"));
-  }
-  return values;
 }
 
 /** Wrangler prints the messages of Cloudflare's own error shape. */
@@ -51,34 +43,19 @@ function keep(headers: IncomingMessage["headers"], stripped: Set<string>): Outgo
 }
 
 /**
- * Cloudflare access for sessions. A project's tokens stay in the gateway, in
- * <config dir>/cloudflare/<project name>.env (CLOUDFLARE_READ_TOKEN, optional
- * CLOUDFLARE_WRITE_TOKEN). An agent's Wrangler sends Cloudflare API requests to its session
- * socket, which identifies the session; the broker forwards them with the read token, or,
- * while the user allows writes for that session, the write token. Grants live in memory, so
- * a gateway restart revokes them.
+ * Cloudflare access for sessions. A project's tokens stay in the gateway, in its store, where
+ * the store's owner sets them in the project's settings (CLOUDFLARE-3). An agent's Wrangler
+ * sends Cloudflare API requests to its session socket, which identifies the session; the
+ * broker forwards them with the read token, or, while the user allows writes for that
+ * session, the write token. Grants live in memory, so a gateway restart revokes them.
  */
 export class CloudflareBroker {
-  private readonly options: { configDir: string; upstream: string };
+  private readonly options: { store: Store; upstream: string };
   /** When each session's writes stop being allowed. */
   private readonly grants = new Map<string, number>();
 
-  constructor(options: { configDir: string; upstream: string }) {
+  constructor(options: { store: Store; upstream: string }) {
     this.options = options;
-  }
-
-  /** The project's tokens; null when it has none (its agents get no Cloudflare access). */
-  tokens(projectName: string): CloudflareTokens | null {
-    let text: string;
-    try {
-      text = readFileSync(join(this.options.configDir, "cloudflare", `${projectName}.env`), "utf8");
-    } catch {
-      return null;
-    }
-    const values = parseEnv(text);
-    const read = values.get("CLOUDFLARE_READ_TOKEN") ?? "";
-    const write = values.get("CLOUDFLARE_WRITE_TOKEN") ?? "";
-    return read === "" ? null : { read, write: write === "" ? null : write };
   }
 
   writesUntil(sessionId: string): number | null {
@@ -100,11 +77,11 @@ export class CloudflareBroker {
     this.grants.delete(sessionId);
   }
 
-  /** Forwards one Cloudflare API request of the session's agent. */
-  handle(request: IncomingMessage, response: ServerResponse, sessionId: string, projectName: string): void {
-    const tokens = this.tokens(projectName);
+  /** Forwards one Cloudflare API request of the session's agent, with the tokens its project has now. */
+  handle(request: IncomingMessage, response: ServerResponse, sessionId: string, project: Project): void {
+    const tokens = this.options.store.cloudflareTokens(project.id);
     if (tokens === null) {
-      refuse(response, 403, `project ${projectName} has no Cloudflare tokens in Agent Monitor`);
+      refuse(response, 403, `project ${project.name} has no Cloudflare tokens in Agent Monitor`);
       return;
     }
     const url = new URL(request.url ?? "/", "http://localhost");
@@ -116,7 +93,7 @@ export class CloudflareBroker {
     let token = tokens.read;
     if (kind === "write") {
       if (tokens.write === null) {
-        refuse(response, 403, `project ${projectName} has no Cloudflare write token in Agent Monitor; its agents only read`);
+        refuse(response, 403, `project ${project.name} has no Cloudflare write token in Agent Monitor; its agents only read`);
         return;
       }
       if (this.writesUntil(sessionId) === null) {

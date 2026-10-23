@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { Actor, Comment, FolderFile, HistoryEvent, Person, Project, Session, Task, Topic, TopicLink } from "../../shared/api.ts";
+import type { CloudflareTokens } from "../cloudflare.ts";
 
 const taskState = z.enum(["open", "in_progress", "in_review", "done", "cancelled"]);
 /** TASK-14: a stored event's data, as recorded. */
@@ -33,7 +34,7 @@ export interface MovedEvent {
 
 /** STORE-6: every record of one project, as `bundle.json` of a move's bundle holds them. */
 export interface ProjectRecords {
-  version: 1;
+  version: 2;
   project: Project;
   /** The store's owner and everyone the records name. */
   people: Person[];
@@ -44,6 +45,8 @@ export interface ProjectRecords {
   comments: Comment[];
   folderFiles: MovedFolderFile[];
   events: MovedEvent[];
+  /** CLOUDFLARE-3: the project's Cloudflare tokens; null when it has none. */
+  cloudflareTokens: CloudflareTokens | null;
 }
 
 const id = z.uuid();
@@ -67,6 +70,7 @@ const project: z.ZodType<Project> = z.object({
   name: z.string().trim().min(1),
   repoPath: z.string().nullable(),
   hostSessions: z.boolean(),
+  cloudflare: z.object({ read: z.boolean(), write: z.boolean() }),
   createdAt: z.number(),
 });
 const topic: z.ZodType<Topic> = z.object({
@@ -125,6 +129,8 @@ const folderFile: z.ZodType<MovedFolderFile> = z.object({
   updatedAt: z.number(),
 });
 const movedEvent: z.ZodType<MovedEvent> = z.object({ taskId: id, at: z.number(), actor: actor.nullable(), event: historyEvent });
+const token = z.string().min(1);
+const cloudflareTokens: z.ZodType<CloudflareTokens> = z.object({ read: token, write: token.nullable() });
 
 /**
  * STORE-6: a bundle's records, checked to be one project's: every record belongs to it, links
@@ -132,7 +138,7 @@ const movedEvent: z.ZodType<MovedEvent> = z.object({ taskId: id, at: z.number(),
  * session has ended: a running one never leaves its store.
  */
 export const projectRecords: z.ZodType<ProjectRecords> = z.object({
-  version: z.literal(1),
+  version: z.literal(2),
   project,
   people: z.array(person),
   topics: z.array(topic),
@@ -142,6 +148,7 @@ export const projectRecords: z.ZodType<ProjectRecords> = z.object({
   comments: z.array(comment),
   folderFiles: z.array(folderFile),
   events: z.array(movedEvent),
+  cloudflareTokens: cloudflareTokens.nullable(),
 }).superRefine((records, context) => {
   const problem = (message: string) => context.addIssue({ code: "custom", message });
   const people = new Set(records.people.map((person) => person.id));
