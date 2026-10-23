@@ -133,4 +133,3 @@ Still open:
   margin; stencil-hq/tern-sdk#99.
 - Features of the old UI not yet back: agentctl list, mobile page, cmux terminals,
   memory view, port previews.
-- Untested: the remote-cookie login form.

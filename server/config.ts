@@ -1,18 +1,24 @@
-import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { z } from "zod";
 
-export type AuthMode = "local" | "remote-cookie";
+export type AuthMode = "local" | "access";
+
+/** AUTH-1: the Cloudflare Access application whose tokens the hub accepts. */
+export interface AccessConfig {
+  /** The team domain, which issues the tokens, e.g. https://draftcoach.cloudflareaccess.com; its keys are at /cdn-cgi/access/certs. */
+  teamDomain: string;
+  /** The Access application's audience tag. */
+  audience: string;
+}
 
 export interface GatewayConfig {
-  /** "local" preserves current open-loopback behavior; "remote-cookie" requires login. */
+  /** "local": the user's PC, every request is the owner; "access": Cloudflare Access tokens decide who a request is. */
   authMode: AuthMode;
-  /** Exact public origin, e.g. https://hetzner-dev.<tail>.ts.net. Remote mode only. */
-  publicOrigin: string | null;
-  /** Path to the 0600 login-secret file. Remote mode only; env carries the path, never the value. */
-  loginSecretFile: string | null;
-  /** Opaque session TTL. */
-  sessionTtlMs: number;
+  /** Access mode only. */
+  access: AccessConfig | null;
+  /** The store owner's email (AUTH-2), lower-cased; required in access mode. */
+  ownerEmail: string | null;
   /** Display name for this machine's gateway. */
   machineName: string;
   /** Gateway state dir: store, session worktrees and run directories. Default ~/.local/state/agentmonitor. */
@@ -33,6 +39,9 @@ export interface GatewayConfig {
   cloudflareApi: string;
 }
 
+/** People's emails are compared case-insensitively: the store keeps them lower-cased. */
+export const email = z.email().max(320).transform((value) => value.toLowerCase());
+
 function positiveInt(raw: string | undefined, name: string): number {
   if (raw === undefined) throw new Error(`${name} is required`);
   const value = Number(raw);
@@ -52,37 +61,47 @@ function gatewayPort(raw: string | undefined): number {
   return port;
 }
 
+/** The team domain's origin; https, or http on loopback for a local fake issuer. */
+function teamDomain(raw: string): string {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error("AGENTMONITOR_ACCESS_TEAM_DOMAIN must be an absolute URL");
+  }
+  const loopback = url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]";
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
+    throw new Error("AGENTMONITOR_ACCESS_TEAM_DOMAIN must be https:");
+  }
+  return url.origin;
+}
+
+function ownerEmail(raw: string | undefined): string | null {
+  if (raw === undefined || raw === "") return null;
+  const parsed = email.safeParse(raw.trim());
+  if (!parsed.success) throw new Error("AGENTMONITOR_OWNER_EMAIL must be an email address");
+  return parsed.data;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig {
   const authMode = env.AGENTMONITOR_AUTH_MODE ?? "local";
-  if (authMode !== "local" && authMode !== "remote-cookie") {
-    throw new Error(`AGENTMONITOR_AUTH_MODE must be "local" or "remote-cookie"`);
+  if (authMode !== "local" && authMode !== "access") {
+    throw new Error(`AGENTMONITOR_AUTH_MODE must be "local" or "access"`);
   }
-  const remote = authMode === "remote-cookie";
-  const publicOrigin = env.AGENTMONITOR_PUBLIC_ORIGIN ?? null;
-  const loginSecretFile = env.AGENTMONITOR_LOGIN_SECRET_FILE ?? null;
-  if (remote && (publicOrigin === null || loginSecretFile === null)) {
-    throw new Error("remote-cookie mode requires AGENTMONITOR_PUBLIC_ORIGIN and AGENTMONITOR_LOGIN_SECRET_FILE");
-  }
-  if (remote) {
-    let origin: URL;
-    try {
-      origin = new URL(publicOrigin as string);
-    } catch {
-      throw new Error("AGENTMONITOR_PUBLIC_ORIGIN must be an absolute URL");
+  const owner = ownerEmail(env.AGENTMONITOR_OWNER_EMAIL);
+  let access: AccessConfig | null = null;
+  if (authMode === "access") {
+    const domain = env.AGENTMONITOR_ACCESS_TEAM_DOMAIN;
+    const audience = env.AGENTMONITOR_ACCESS_AUD;
+    if (!domain || !audience || owner === null) {
+      throw new Error("access mode requires AGENTMONITOR_ACCESS_TEAM_DOMAIN, AGENTMONITOR_ACCESS_AUD and AGENTMONITOR_OWNER_EMAIL");
     }
-    if (origin.protocol !== "https:") throw new Error("AGENTMONITOR_PUBLIC_ORIGIN must be https:");
-    // Fail closed on a world/group-readable secret file at startup.
-    const mode = statSync(loginSecretFile as string).mode & 0o777;
-    if (mode & 0o077) {
-      throw new Error(`login secret file must not be group/world-accessible (mode ${mode.toString(8)})`);
-    }
-    readFileSync(loginSecretFile as string); // readable by this process, checked before serving
+    access = { teamDomain: teamDomain(domain), audience };
   }
   return {
     authMode,
-    publicOrigin,
-    loginSecretFile,
-    sessionTtlMs: 24 * 60 * 60 * 1_000,
+    access,
+    ownerEmail: owner,
     machineName: env.AGENTMONITOR_MACHINE_NAME ?? "Agent Monitor",
     stateDir: env.AGENTMONITOR_STATE_DIR || join(homedir(), ".local", "state", "agentmonitor"),
     workspaceRuntime: workspaceRuntime(env.AGENTMONITOR_WORKSPACE_RUNTIME),
