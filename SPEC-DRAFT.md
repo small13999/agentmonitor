@@ -191,12 +191,11 @@ the answer this draft assumes.
 
 - **SESSION-9** retired (snapshot refs, "never pushed"). Replaced by SESSION-15.
 - **SESSION-15** new: A turn that changed files ends with them committed and
-  pushed to the task's branch by the session's agent; Agent Monitor does no git
-  work after a turn.
-  - **Q** Instructions alone, or also a backstop: when a turn ends with `am check`
-    failing, Agent Monitor sends the agent back to finish within the same turn, so a
-    person never sees it? Draft: the backstop, because the claim then holds by
-    mechanism, and its test can prove it (a scripted agent that forgets to commit).
+  pushed to the task's branch by the session's agent; when the agent tries to end
+  a turn with `am check` failing, Agent Monitor sends it back to finish within the
+  same turn, so a person never meets uncommitted work. Agent Monitor itself does
+  no git work after a turn. (omp's `session_stop` hook; the tests whose turns
+  leave uncommitted work on purpose are rewritten with SESSION-9's retirement.)
 - **TURN-1** retired (snapshot without changing the branch).
 - **TURN-2, TURN-3** changed: a turn's diff is the commits it made; the diff view
   offers the whole branch and each turn, with the turn's prompt and final reply.
@@ -218,13 +217,11 @@ the answer this draft assumes.
 - Deferred: "moving a running session between machines" stays deferred; moving a
   stopped one is SESSION-16.
 - MACHINE-1, MACHINE-2 stay.
+- **MERGE-1** changed: No session pushes to its project's default branch, except
+  the integrator when a person asks for it. The integrator backs up its commits to
+  `am/integrator`; its instructions already say so.
 
 ## Not drafted yet
 
 - How the integrator pulls in other tasks' branches.
 - Switching host sessions on for an existing project (project settings, step 4).
-- The integrator's turns: it works on the default branch, which no session may push
-  (MERGE-1), so its turns end committed but not pushed, and `am check` never comes
-  out clean there. Either its pushes of the default branch are allowed (for
-  agentmonitor that is a backup, not a deploy), or `am check` skips "unpushed" in the
-  main checkout.
