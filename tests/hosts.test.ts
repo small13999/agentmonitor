@@ -1,17 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { after, before } from "node:test";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
-import { buildApp, Gateway, Tunnel } from "./harness.ts";
+import { ACCESS_AUDIENCE, buildApp, FakeAccess, Gateway, Tunnel } from "./harness.ts";
 import { spec } from "./spec.ts";
 
 const ZONE = "draftcoach.gg";
 const UI = `https://am.${ZONE}`;
-const SECRET = "the hub's login secret";
 
-let secretDir: string;
+let access: FakeAccess;
 let gateway: Gateway;
 let tunnel: Tunnel;
 let chrome: Browser;
@@ -20,13 +16,19 @@ let page: Page;
 
 before(async () => {
   buildApp();
-  secretDir = mkdtempSync(join(tmpdir(), "am-secret-"));
-  writeFileSync(join(secretDir, "secret"), SECRET, { mode: 0o600 });
+  access = await FakeAccess.start();
   gateway = await Gateway.start({
     runtime: "none",
-    env: { AGENTMONITOR_AUTH_MODE: "remote-cookie", AGENTMONITOR_PUBLIC_ORIGIN: UI, AGENTMONITOR_LOGIN_SECRET_FILE: join(secretDir, "secret") },
+    env: {
+      AGENTMONITOR_AUTH_MODE: "access",
+      AGENTMONITOR_ACCESS_TEAM_DOMAIN: access.url,
+      AGENTMONITOR_ACCESS_AUD: ACCESS_AUDIENCE,
+      AGENTMONITOR_OWNER_EMAIL: "armin@example.com",
+      AGENTMONITOR_PUBLIC_ORIGIN: UI,
+    },
   });
-  tunnel = await Tunnel.start(gateway);
+  // The owner has signed in through Access, whose edge adds its token to each request.
+  tunnel = await Tunnel.start(gateway, () => ({ "cf-access-jwt-assertion": access.token("armin@example.com") }));
   chrome = await chromium.launch({ args: tunnel.chromeArgs(ZONE) });
   context = await chrome.newContext({ ignoreHTTPSErrors: true });
   context.setDefaultTimeout(10_000);
@@ -36,7 +38,7 @@ after(async () => {
   await chrome?.close();
   await tunnel?.stop();
   await gateway?.stop();
-  if (secretDir !== undefined) rmSync(secretDir, { recursive: true, force: true });
+  await access?.stop();
 });
 
 /** A store request of the UI's own page, as the app makes it; returns the response's data. */
@@ -59,14 +61,9 @@ async function created(path: string, body: unknown): Promise<string> {
   return data.id;
 }
 
-spec("PREVIEW-2", "the UI, a session's chat, and a task's preview each answer on their own host under the hub's zone, and only the UI gets its login cookie", async () => {
-  // The UI answers on the hub's own host; logging in there sets its cookie for that host alone.
+spec("PREVIEW-2", "the UI, a session's chat, and a task's preview each answer on their own origin under the hub's zone, and none acts for another", async () => {
+  // The UI answers on the hub's own host.
   await page.goto(`${UI}/`);
-  await page.getByLabel("Login secret").fill(SECRET);
-  await page.getByRole("button", { name: "Log in" }).click();
-  await page.getByLabel("Login secret").waitFor({ state: "detached" });
-  assert.deepEqual((await context.cookies()).map((cookie) => [cookie.name, cookie.domain]), [["__Host-agentmonitor", `am.${ZONE}`]]);
-
   const projectId = await created("/projects", { name: "draftcoach" });
   const taskId = await created(`/projects/${projectId}/tasks`, { title: "Hosts" });
 
@@ -93,12 +90,12 @@ spec("PREVIEW-2", "the UI, a session's chat, and a task's preview each answer on
   assert.equal(await preview.locator("body").textContent(), "This task has no preview yet.");
   assert.equal(await preview.evaluate(() => location.origin), previewOrigin);
 
-  // The browser keeps the UI's cookie from the chat's and the preview's hosts.
-  assert.deepEqual(await context.cookies([chatOrigin, previewOrigin]), []);
+  // The hub sets no cookie, so no host shares one with another.
+  assert.deepEqual(await context.cookies(), []);
 
-  // A page on the preview's host is another origin of the same site, so the browser sends the
-  // UI's cookie along to the UI's host: the hub takes it as logged in (no 401) and still refuses
-  // to change the store for that page.
+  // A page on the preview's host is another origin of the same site, and Access lets the
+  // person's requests through from it: the hub knows the person (no 401) and still refuses to
+  // change the store for that page.
   const forged = preview.waitForResponse(`${UI}/api/store/projects`);
   await preview.evaluate(async (ui) => {
     await fetch(`${ui}/api/store/projects`, { method: "POST", mode: "no-cors", credentials: "include", body: JSON.stringify({ name: "from-preview" }) });
@@ -107,4 +104,8 @@ spec("PREVIEW-2", "the UI, a session's chat, and a task's preview each answer on
   const projects = await store("GET", "/projects");
   assert.ok(Array.isArray(projects));
   assert.deepEqual(projects.map((project) => typeof project === "object" && project !== null && "name" in project ? project.name : null), ["draftcoach"]);
+
+  // Hosts that are not the hub's get neither the app nor its API.
+  const stranger = await preview.goto(`https://elsewhere.${ZONE}/api/store/projects`);
+  assert.equal(stranger?.status(), 404);
 });

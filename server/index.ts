@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { readFile, stat } from "node:fs/promises";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { handleApi, sendJson } from "./api.ts";
-import { AuthStore } from "./auth.ts";
+import { Auth, sendRefusal, validHost } from "./auth.ts";
 import { loadConfig } from "./config.ts";
 import { handlePreview } from "./previews.ts";
 import { StoreService } from "./store/service.ts";
@@ -47,9 +47,9 @@ async function serveStatic(request: IncomingMessage, response: ServerResponse, d
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const auth = new AuthStore(config);
   const store = new StoreService(config.stateDir, config);
   await store.start();
+  const auth = new Auth(config, store.store);
   const tern = new TernProxy({ config, auth, store });
   const distDir = resolve(process.cwd(), "dist");
   const bindHost = process.env.AGENTMONITOR_BIND_HOST ?? "127.0.0.1";
@@ -58,9 +58,14 @@ async function main(): Promise<void> {
     try {
       // Chat and preview hosts first: they are sessions' chats and tasks' previews, not the monitor.
       if (await tern.handleRequest(request, response)) return;
-      if (handlePreview(request, response, config)) return;
+      if (await handlePreview(request, response, { config, auth })) return;
       if (await handleApi(request, response, { config, auth, store })) return;
-      if (auth.validHost(request, config.publicOrigin) && (await serveStatic(request, response, distDir))) return;
+      const visitor = await auth.identify(request);
+      if (visitor.kind === "refused") {
+        sendRefusal(response, visitor);
+        return;
+      }
+      if (validHost(request, config.publicOrigin) && (await serveStatic(request, response, distDir))) return;
       sendJson(response, 404, { ok: false, error: "unknown endpoint" });
     } catch (cause) {
       console.error("gateway request failed", cause);

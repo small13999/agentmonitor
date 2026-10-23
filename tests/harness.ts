@@ -1,6 +1,8 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { generateKeyPairSync, randomBytes, sign, type KeyObject } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { watch } from "node:fs/promises";
+import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
 import { createServer as createHttpsServer, type Server as HttpsServer } from "node:https";
 import { connect, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -66,13 +68,16 @@ export class Gateway {
   /**
    * `runtime: "none"` keeps sessions as store records only: store claims do not need
    * containers, and starting one per session would cost seconds per test. `stateDir` starts
-   * the gateway on an existing state directory, e.g. a store from an older version.
+   * the gateway on an existing state directory, e.g. a store from an older version. `hub`
+   * names its hosts as a hub's (shared/hosts.ts) under `localhost`: its UI, which `url` names,
+   * is `http://am.localhost:<port>`.
    */
   static async start(
-    options: { runtime: "podman" | "none"; env?: Record<string, string>; stateDir?: string } = { runtime: "none" },
+    options: { runtime: "podman" | "none"; env?: Record<string, string>; stateDir?: string; hub?: boolean } = { runtime: "none" },
   ): Promise<Gateway> {
     const stateDir = options.stateDir ?? mkdtempSync(join(tmpdir(), "am-gw-"));
     const port = await freePort();
+    const url = options.hub === true ? `http://am.localhost:${port}` : `http://127.0.0.1:${port}`;
     const child = spawn(process.execPath, [join(root, "server", "index.ts")], {
       cwd: root,
       env: {
@@ -81,6 +86,7 @@ export class Gateway {
         AGENTMONITOR_STATE_DIR: stateDir,
         AGENTMONITOR_AUTH_MODE: "local",
         AGENTMONITOR_WORKSPACE_RUNTIME: options.runtime,
+        ...(options.hub === true ? { AGENTMONITOR_PUBLIC_ORIGIN: url } : {}),
         ...options.env,
       },
       stdio: ["ignore", "pipe", "pipe"],
@@ -93,7 +99,7 @@ export class Gateway {
     });
     child.stderr?.on("data", (chunk) => { log += chunk; });
     child.once("exit", (code) => reject(new Error(`gateway exited with ${code}:\n${log}`)));
-    const gateway = new Gateway(stateDir, `http://127.0.0.1:${port}`, child);
+    const gateway = new Gateway(stateDir, url, child);
     try {
       await listening;
     } catch (error) {
@@ -126,19 +132,19 @@ export class Gateway {
     rmSync(this.stateDir, { recursive: true, force: true });
   }
 
-  /** A human request through the gateway, as the web UI makes it. */
-  async api(method: string, path: string, body?: unknown): Promise<ApiResult> {
+  /** A human request through the gateway, as the web UI makes it; `headers` carry e.g. an Access token. */
+  async api(method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<ApiResult> {
     const response = await fetch(`${this.url}/api/store${path}`, {
       method,
-      headers: body === undefined ? {} : { "content-type": "application/json" },
+      headers: body === undefined ? headers : { ...headers, "content-type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     return { status: response.status, body: await response.json() as ApiResult["body"] };
   }
 
   /** Like `api`, but fails the test unless the request succeeded, and returns its data. */
-  async data<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const result = await this.api(method, path, body);
+  async data<T>(method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<T> {
+    const result = await this.api(method, path, body, headers);
     if (!result.body.ok) throw new Error(`${method} ${path} -> ${result.status} ${result.body.error}`);
     return result.body.data as T;
   }
@@ -161,8 +167,9 @@ export class Gateway {
 
 /**
  * Cloudflare's tunnel in front of a hub, as the browser and the gateway see it: TLS ends before
- * the gateway, which gets the browser's Host. Chromium reaches it under the hub's names with
- * `chromeArgs`, in a context that accepts its self-signed certificate (`ignoreHTTPSErrors`).
+ * the gateway, which gets the browser's Host and, with `edge`, the headers Access's edge adds
+ * (its token). Chromium reaches it under the hub's names with `chromeArgs`, in a context that
+ * accepts its self-signed certificate (`ignoreHTTPSErrors`).
  */
 export class Tunnel {
   readonly port: number;
@@ -173,7 +180,7 @@ export class Tunnel {
     this.server = server;
   }
 
-  static async start(gateway: Gateway): Promise<Tunnel> {
+  static async start(gateway: Gateway, edge: () => Record<string, string> = () => ({})): Promise<Tunnel> {
     const dir = mkdtempSync(join(tmpdir(), "am-tunnel-"));
     const made = spawnSync("openssl", [
       "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-days", "1",
@@ -182,9 +189,9 @@ export class Tunnel {
     if (made.status !== 0) throw new Error(`openssl failed:\n${made.stderr}`);
     const tls = { key: readFileSync(join(dir, "key.pem")), cert: readFileSync(join(dir, "cert.pem")) };
     rmSync(dir, { recursive: true, force: true });
-    const proxy = httpProxy.createProxyServer({ target: gateway.url });
-    const server = createHttpsServer(tls, (request, response) => proxy.web(request, response));
-    server.on("upgrade", (request, socket, head) => proxy.ws(request, socket, head));
+    const proxy = httpProxy.createProxyServer({ target: `http://127.0.0.1:${new URL(gateway.url).port}` });
+    const server = createHttpsServer(tls, (request, response) => proxy.web(request, response, { headers: edge() }));
+    server.on("upgrade", (request, socket, head) => proxy.ws(request, socket, head, { headers: edge() }));
     const { promise, resolve } = Promise.withResolvers<number>();
     server.listen(0, "127.0.0.1", () => {
       const address = server.address();
@@ -203,6 +210,66 @@ export class Tunnel {
     this.server.close(() => resolve());
     this.server.closeAllConnections();
     await promise;
+  }
+}
+
+export const ACCESS_AUDIENCE = "4714c1358e65fe4b408ad6d432a5f878f08194bdb4752441fd56faefa9b2b6f2";
+
+export interface SigningKey {
+  kid: string;
+  privateKey: KeyObject;
+  publicKey: KeyObject;
+}
+
+export function signingKey(): SigningKey {
+  const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  return { kid: randomBytes(16).toString("hex"), privateKey, publicKey };
+}
+
+/** A Cloudflare Access team domain: its keys at /cdn-cgi/access/certs, and tokens signed with them. */
+export class FakeAccess {
+  readonly url: string;
+  private readonly server: HttpServer;
+  /** The keys the team domain publishes. */
+  readonly keys: SigningKey[];
+
+  private constructor(url: string, server: HttpServer, keys: SigningKey[]) {
+    this.url = url;
+    this.server = server;
+    this.keys = keys;
+  }
+
+  static async start(): Promise<FakeAccess> {
+    const keys = [signingKey()];
+    const server = createHttpServer((req, res) => {
+      if (req.url !== "/cdn-cgi/access/certs") {
+        res.writeHead(404).end();
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ keys: keys.map((key) => ({ ...key.publicKey.export({ format: "jwk" }), kid: key.kid, alg: "RS256", use: "sig" })) }));
+    });
+    const { promise, resolve } = Promise.withResolvers<void>();
+    server.listen(0, "127.0.0.1", () => resolve());
+    await promise;
+    const address = server.address();
+    const port = typeof address === "object" && address !== null ? address.port : 0;
+    return new FakeAccess(`http://127.0.0.1:${port}`, server, keys);
+  }
+
+  /** A token as Cloudflare Access issues one for `email`; `claims` and `key` change it. */
+  token(email: string, claims: Record<string, unknown> = {}, key: SigningKey = this.keys[0]): string {
+    const now = Math.floor(Date.now() / 1_000);
+    const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+    const head = encode({ alg: "RS256", kid: key.kid, typ: "JWT" });
+    const body = encode({ aud: [ACCESS_AUDIENCE], email, exp: now + 3_600, iat: now, nbf: now, iss: this.url, type: "app", sub: email, ...claims });
+    return `${head}.${body}.${sign("RSA-SHA256", Buffer.from(`${head}.${body}`), key.privateKey).toString("base64url")}`;
+  }
+
+  stop(): Promise<void> {
+    const { promise, resolve } = Promise.withResolvers<void>();
+    this.server.close(() => resolve());
+    return promise;
   }
 }
 
