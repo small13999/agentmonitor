@@ -4,11 +4,11 @@ import { hostOrigin, zoneOf } from "../shared/hosts.ts";
 /** Sessions whose chats stay loaded after you leave them, so going back shows them at once. */
 const KEPT = 4;
 
-
 /**
  * The running sessions' chats: Tern's chat on omp, in Tern's web client, which the gateway
  * serves for each session on its own chat host beside the UI's, `am-t-<session id>`
- * (shared/hosts.ts, server/tern-proxy.ts).
+ * (shared/hosts.ts, server/tern-proxy.ts). A hub's project (STORE-3) has its chats on the hub's
+ * chat hosts, which the browser reaches through Cloudflare Access itself.
  *
  * Starting Tern's client takes a second or two, so the last few sessions' clients stay
  * loaded, hidden, and the current one shows. Frames keep the order they opened in: moving an
