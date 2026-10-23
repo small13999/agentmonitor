@@ -85,8 +85,6 @@ through Agent Monitor (dogfooding).
 
 ### Host sessions (built in step 2: HOST-1..7, UI-3)
 Still open:
-- Switching host sessions on or off for an existing project in the UI (API only:
-  `PATCH /projects/:id`); belongs in the project settings of the redesign.
 - Host sessions of automations, once automations exist.
 - Integrator: a checkout session (HOST-6) works in the main checkout among the
   user's omp chats (HOST-7). Still open: how it pulls in other sessions' branches,

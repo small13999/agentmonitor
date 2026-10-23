@@ -175,12 +175,19 @@ async function ternPage(sessionId: string): Promise<number> {
   return promise;
 }
 
-spec("HOST-1", "a session runs on the host only where a human allowed host sessions for its project", async () => {
+spec("HOST-1", "a session runs on the host only where the store's owner allowed host sessions on its project's settings page", async () => {
   const refused = await gateway.api("POST", `/tasks/${task.id}/sessions`, { runtime: "host", model: "fake/scripted" });
   assert.equal(refused.status, 403);
   assert.deepEqual((await gateway.data<{ sessions: Session[] }>("GET", `/tasks/${task.id}`)).sessions, []);
 
-  assert.equal((await gateway.data<Project>("PATCH", `/projects/${project.id}`, { hostSessions: true })).hostSessions, true);
+  // The store's owner allows them on the project's settings page, reached from the project menu.
+  const settings = await openPage("#/t");
+  await settings.getByRole("navigation", { name: "Tasks" }).getByRole("combobox", { name: "Project" }).selectOption({ label: "Project settings" });
+  const form = settings.getByRole("form", { name: "Project settings" });
+  await form.getByRole("checkbox", { name: /Allow host sessions/ }).check();
+  await form.getByRole("button", { name: "Save" }).click();
+  await form.getByRole("status").getByText("Saved.").waitFor();
+  assert.equal((await gateway.data<Project[]>("GET", "/projects"))[0].hostSessions, true);
   const starting = gateway.data<Session>("POST", `/tasks/${task.id}/sessions`, { runtime: "host", model: "fake/scripted" });
   // The task list shows the session while it starts, and its page asks for Tern again until it
   // answers: asked once the worktree exists, that waits for the start, which ends once Tern
@@ -277,6 +284,46 @@ spec("FOLDER-3", "a host session's agent finds its task's folder outside its wor
   await files.getByRole("row").filter({ hasText: "brief.txt" }).waitFor();
   assert.equal((await prompt(host, `bash:cat ${folder}/brief.txt`)).lastReply, "answered: from the page 6a3b");
   assert.equal(execFileSync("git", ["-C", dirs(host).worktree, "status", "--porcelain"], { encoding: "utf8" }), "");
+});
+
+spec("STORE-5", "am task changes says what the task's Changes view says", async () => {
+  const worktree = dirs(host).worktree;
+  writeFileSync(join(worktree, "AGENTS.md"), `# Fixture\n\n${REPO_RULE}\nAnd one more rule.\n`);
+  execFileSync("git", ["-C", worktree, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "One more rule"]);
+  writeFileSync(join(worktree, "draft.md"), "draft\n");
+  try {
+    const said = gateway.am(host.id, ["task", "changes"]);
+    assert.equal(said.code, 0, said.stderr);
+
+    const opened = await openPage(`#/t/${task.id}/settings`);
+    const view = opened.getByRole("region", { name: "Settings" }).getByRole("region", { name: "Changes" });
+    await view.locator(".changed-files li", { hasText: "AGENTS.md" }).waitFor();
+    await view.locator(".uncommitted code", { hasText: "draft.md" }).waitFor();
+    const [branch, base] = await view.locator("p.small").first().locator("code").allTextContents();
+    const commits = await view.locator(".commits code").allTextContents();
+    const files = await view.locator(".changed-files li").evaluateAll((items) => items.map((item) => `${item.querySelector(".file-status")?.getAttribute("title")}\t${item.querySelector("code")?.textContent}`));
+    const uncommitted = await view.locator(".uncommitted code").allTextContents();
+    const pullRequests = (await view.locator("h3", { hasText: "Pull requests" }).locator("xpath=following-sibling::p[1]").textContent()) ?? "";
+    assert.equal(said.stdout, [
+      `branch ${branch} against ${base}`,
+      "",
+      "committed on the branch:",
+      ...commits.map((commit) => `  ${commit}`),
+      ...files.map((file) => `  ${file}`),
+      "",
+      "uncommitted:",
+      ...uncommitted.map((file) => `  ${file}`),
+      "",
+      "pull requests:",
+      `  ${pullRequests.replace(/\.$/, "").toLowerCase()}`,
+      "",
+    ].join("\n"));
+    assert.equal(branch, host.branch);
+    assert.match(commits.join("\n"), /^[0-9a-f]+ One more rule$/);
+    assert.deepEqual([files, uncommitted], [["modified\tAGENTS.md"], ["draft.md"]]);
+  } finally {
+    rmSync(join(worktree, "draft.md"));
+  }
 });
 
 spec("HOST-2", "a host session's agent works as the user in its own worktree, and ending it stops every process it started", async () => {
