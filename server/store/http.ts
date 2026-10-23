@@ -37,8 +37,10 @@ const description = z.string().max(64 * 1024);
 // Strict objects: unknown fields are rejected, e.g. a topic `parent` (TOPIC-1).
 const nameBody = z.strictObject({ name });
 const personBody = z.strictObject({ name, email });
-const projectBody = z.strictObject({ name, repoPath: z.string().startsWith("/").optional(), hostSessions: z.boolean().optional() });
-const projectUpdateBody = z.strictObject({ hostSessions: z.boolean() });
+const repoPath = z.string().startsWith("/");
+const projectBody = z.strictObject({ name, repoPath: repoPath.optional(), hostSessions: z.boolean().optional() });
+// The project settings page; null takes the repository away.
+const projectUpdateBody = z.strictObject({ name: name.optional(), repoPath: repoPath.nullable().optional(), hostSessions: z.boolean().optional() });
 const taskBody = z.strictObject({ title: name, description: description.optional() });
 // Finishing a task has its own route (TASK-9).
 const taskUpdateBody = z.strictObject({

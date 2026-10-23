@@ -587,9 +587,8 @@ export class Store {
   }
 
   createProject(principal: Principal, input: { name: string; repoPath?: string; hostSessions?: boolean }): Project {
-    // HOST-1: only the owner allows host sessions.
-    if (input.hostSessions === true) this.requireOwner(principal);
-    else this.requireHuman(principal);
+    this.requireHuman(principal);
+    if (input.hostSessions === true) this.requireHostSessionsSwitch(principal);
     if (this.db.prepare("SELECT 1 FROM projects WHERE name = ?").get(input.name) !== undefined) {
       throw new StoreError(409, `project "${input.name}" already exists`);
     }
@@ -605,12 +604,34 @@ export class Store {
     return created;
   }
 
-  /** HOST-1: only the store's owner allows or stops host sessions in a project. */
-  updateProject(principal: Principal, projectId: string, input: { hostSessions: boolean }): Project {
-    this.requireOwner(principal);
-    this.visibleProject(principal, projectId);
-    this.db.prepare("UPDATE projects SET host_sessions = ? WHERE id = ?").run(input.hostSessions ? 1 : 0, projectId);
-    return this.visibleProject(principal, projectId);
+  /**
+   * The project settings page: its name, its repository, and whether it allows host sessions.
+   * A running session works in a worktree of the repository, so the repository changes only
+   * while none runs.
+   */
+  updateProject(principal: Principal, projectId: string, input: { name?: string; repoPath?: string | null; hostSessions?: boolean }): Project {
+    this.requireHuman(principal);
+    return this.transaction(() => {
+      const current = this.visibleProject(principal, projectId);
+      if (input.hostSessions !== undefined && input.hostSessions !== current.hostSessions) this.requireHostSessionsSwitch(principal);
+      const name = input.name ?? current.name;
+      if (name !== current.name && this.db.prepare("SELECT 1 FROM projects WHERE name = ?").get(name) !== undefined) {
+        throw new StoreError(409, `project "${name}" already exists`);
+      }
+      const repoPath = input.repoPath === undefined ? current.repoPath : input.repoPath;
+      if (repoPath !== current.repoPath) {
+        const running = this.listSessions(principal, projectId).length;
+        if (running > 0) throw new StoreError(409, `end the project's ${running} running session(s) before changing its repository`);
+      }
+      const hostSessions = input.hostSessions ?? current.hostSessions;
+      this.db.prepare("UPDATE projects SET name = ?, repo_path = ?, host_sessions = ? WHERE id = ?").run(name, repoPath, hostSessions ? 1 : 0, projectId);
+      return { ...current, name, repoPath, hostSessions };
+    });
+  }
+
+  /** HOST-1: only the store's owner allows or stops host sessions in a project; the one place that says who may. */
+  private requireHostSessionsSwitch(principal: Principal): void {
+    if (!this.isOwner(principal)) throw new StoreError(403, "only the store's owner allows or stops host sessions");
   }
 
   listTopics(principal: Principal, projectId: string): Topic[] {

@@ -6,6 +6,7 @@ import { createRoot } from "react-dom/client";
 import { AllTasks } from "./AllTasks.tsx";
 import { api, chooseStore, LOCAL_STORE, usePolled, type Card, type Person, type Project, type StoreListing, type TaskSummary, type Topic } from "./api.ts";
 import { Board, waitsOnYou } from "./Board.tsx";
+import { ProjectSettings } from "./ProjectSettings.tsx";
 import { SessionFrames } from "./SessionFrames.tsx";
 import { TaskList } from "./TaskList.tsx";
 import { TaskPage } from "./TaskPage.tsx";
@@ -15,7 +16,7 @@ import { StartSession, WorkspaceTabs, type WorkspaceTab } from "./Workspace.tsx"
 import "./app.css";
 
 interface Route {
-  page: "board" | "tasks" | "all";
+  page: "board" | "tasks" | "all" | "project";
   taskId: string | null;
   tab: WorkspaceTab;
   /** BOARD-3: the All tasks list's search words. */
@@ -25,9 +26,10 @@ interface Route {
 /**
  * `#/` is the board, `#/t` the task list, `#/t/<task id>` a task's page (TASK-12),
  * `#/t/<task id>/chat` its chat, `#/t/<task id>/settings` its settings (UI-2), `#/all` every
- * task, and `#/all?q=<words>` the tasks a search finds (BOARD-3).
+ * task, `#/all?q=<words>` the tasks a search finds (BOARD-3), and `#/project` the project's settings.
  */
 function readRoute(): Route {
+  if (window.location.hash === "#/project") return { page: "project", taskId: null, tab: "page", query: "" };
   const all = /^#\/all(?:\?q=(.*))?$/.exec(window.location.hash);
   if (all !== null) return { page: "all", taskId: null, tab: "page", query: decodeURIComponent(all[1] ?? "") };
   const match = /^#\/t(?:\/([0-9a-f-]{36})(?:\/(chat|settings))?)?$/.exec(window.location.hash);
@@ -202,7 +204,10 @@ function App() {
           {error && <p className="error banner">{error}</p>}
           <header className="board-head">
             <h1>{project.name}</h1>
-            <nav className="board-bar" aria-label="Board views"><a className="button" href="#/all">All tasks</a></nav>
+            <nav className="board-bar" aria-label="Board views">
+              <a className="button" href="#/all">All tasks</a>
+              <a className="button ghost" href="#/project">Project settings</a>
+            </nav>
           </header>
           <Board project={project} tasks={tasks.data} cards={cardsBySession} people={peopleById} meId={meId} onChanged={refresh} />
         </main>
@@ -210,6 +215,11 @@ function App() {
       {page === "all" && (
         <main className="board-page">
           <AllTasks project={project} query={route.query} cards={cardsBySession} people={peopleById} />
+        </main>
+      )}
+      {page === "project" && (
+        <main className="board-page">
+          <ProjectSettings project={project} me={me.data?.person ?? null} onSaved={stores.refresh} />
         </main>
       )}
       {/* Kept while the board shows, so the chats stay loaded. */}

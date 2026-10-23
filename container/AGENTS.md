@@ -18,15 +18,23 @@ and steers them from the Agent Monitor UI. Your work is organized like this:
 ## The `am` command
 
 `am` reads and writes the project's Agent Monitor store. It already knows which
-project, task, and session you are; it can only see this project.
+project, task, and session you are; it can only see this project. `--task ID` acts on
+another task of the project instead of yours.
 
 ```
 am whoami                             # this session, its task, and its project
-am task show                          # the task: description, state, branch, topics, status
+am task show                          # the task: description, state, assignee, topics, status, sessions
 am task status                        # the task's status; first line is "# revision N"
 am task set-status --base N           # replace the task's status with stdin
 am task set-state in_review           # open, in_progress, or in_review
+am task set-title TITLE
+am task set-description               # replace the description with stdin
+am task assign PERSON                 # a person's name or id, or nobody
+am task history                       # who did what to the task, and when
+am task changes                       # the branch's changes, uncommitted files, pull requests
 am task create TITLE                  # another task; stdin is its description
+am task search [WORDS...]             # every task of the project, done ones too
+am board                              # the project's open, in-progress, and in-review tasks
 am comments                           # the task's comments, with author and time
 am comment                            # comment on the task; stdin is Markdown
 am comment edit ID                    # replace your comment with stdin
@@ -39,11 +47,13 @@ am topic set-status NAME --base N     # replace the status with stdin
 am topic create NAME
 am topic link NAME...                 # link the task to topics
 am topic unlink NAME...
-am session show [ID]                  # a session and its task
+am session show [ID]                  # a session, its task, its state, its Cloudflare access
 am folder                             # the files in the task's folder, who added each, when
 am folder add FILE [PATH]             # put a file into the folder
 am folder get PATH [FILE]             # a folder file, to FILE or stdout
 am folder rm PATH
+am people                             # the store's people
+am project show                       # name, repository, whether host sessions are allowed
 ```
 
 `--json` before the command prints JSON instead.
