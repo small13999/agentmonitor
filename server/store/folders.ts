@@ -109,7 +109,7 @@ function fileHeaders(path: string, contentType: string, attachment: boolean): Re
 /** A single `Range: bytes=…` as an inclusive [start, end]; null for the whole file; "unsatisfiable" past its end. */
 function byteRange(header: string | undefined, size: number): [number, number] | null | "unsatisfiable" {
   const match = header === undefined ? null : /^bytes=(\d*)-(\d*)$/.exec(header.trim());
-  if (match === null || (match[1] === "" && match[2] === "")) return null;
+  if (match === null || size === 0 || (match[1] === "" && match[2] === "")) return null;
   const [start, end] = match[1] === ""
     ? [Math.max(0, size - Number(match[2])), size - 1]
     : [Number(match[1]), match[2] === "" ? size - 1 : Math.min(Number(match[2]), size - 1)];

@@ -40,8 +40,10 @@ shows the 20 most recently finished), waiting-on-you first, then in creation
 order; "+ New task" creates one without starting work. Tasks (`#/t`) lists the
 open, in-progress, and in-review tasks (172 px wide, in creation order) beside
 the workspace. `#/t/<id>` opens a task's workspace, a small browser with tabs:
-Chat (its running session's chat in Tern, or a Start session button) and Notes
-(`#/t/<id>/notes`, the task's notes, saved as typed; agents use `am notes`). The
+Chat (its running session's chat in Tern, or a Start session button), Notes
+(`#/t/<id>/notes`, the task's notes, saved as typed; agents use `am notes`), and
+Folder (`#/t/<id>/folder`, `TaskFolder` in `app/Folder.tsx`: the task's files,
+dropped there or chosen, each shown inline by kind, downloaded singly or as a zip). The
 gear at the right of the tabs opens the workspace settings: the task's state,
 title and description, its status, topic links, the session's changes, pull
 requests, overlapping sessions, Cloudflare writes, ending the session, and
@@ -71,6 +73,18 @@ identity, so no token is issued. Inside the container, `am` (`container/am.ts`)
 is the agent's client for it; `am check` lists what would not survive the
 session (uncommitted files, unpushed commits, untracked files that look like
 secrets) and fails until it is clean.
+
+Every task has a folder, `<state dir>/folders/<task id>`: files outside git. The
+store records who added each file and when (`folder_files`) and a `file` event in
+the task's history; the directory is the truth, since agents write into it
+directly, so every list (and the history) first brings the records in line with
+it, crediting new files to the task's running session's agent. Routes:
+`GET /tasks/:id/folder` (list), `GET|PUT|DELETE /tasks/:id/folder/<path>` (the
+file inline with its content type, `?download` as an attachment, single byte
+ranges; `PUT` streams the body in, past the JSON body limit), and
+`GET /tasks/:id/folder.zip`. A container session has the folder at
+`/task-folder`; a host session's agent uses the directory itself; the task
+context names it. `am folder` lists, adds, gets, and deletes files.
 
 Starting a task's first session in a project with a `repoPath` creates the
 task's `am/<title>-<hex>` branch from `origin/HEAD` (or `HEAD` without an
