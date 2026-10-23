@@ -89,6 +89,32 @@ through Agent Monitor (dogfooding).
   at a time, and none while it is off (409); a firing records each trigger's scheduled
   time once; a run's uncommitted work at its end is kept as a snapshot under its
   session's id; only people delete automations.
+- Phase 2, run behaviour built (AUTO-10..14). Decided there:
+  - A run's first prompt (server/store/runs.ts): what started it (the trigger
+    context), memory.md (first 32 KiB, because the prompt is one argv argument),
+    where outputs go (`runs/<run>/`), and the instructions, last. Its context says
+    how the run ends for its end mode.
+  - The agent ends its run with `am run end finished|nothing_to_deploy|review|failed
+    [--why]`. The gateway refuses an outcome the run's work does not show:
+    - finished: the branch is merged into the default branch, or GitHub has a merged
+      PR from it.
+    - nothing_to_deploy: no commits beyond the default branch.
+    - review: the branch is pushed.
+    - No outcome is accepted while files are uncommitted.
+  - Wait for review allows finished only after review. Every outcome except review
+    ends the session once the agent's turn ends. nothing_to_deploy deletes the branch
+    locally and on origin.
+  - A run waiting for review counts as waiting on everyone: its card is blocked while
+    its agent is idle, and it appears in the header's count, linking to its chat.
+  - Time limit: a sweep every minute, whenever the clock jumps, and at gateway start,
+    so it survives restarts. Runs waiting for review are exempt. A timed-out run keeps
+    its work as a snapshot.
+  - Sessions on an automation that are not runs (`is_run` 0) are started only by
+    people. "From run X" requires the run to have ended (409 while it runs), and
+    reuses its branch and its snapshot.
+  - Task from a run: the task takes the run's branch and snapshot. The run's outputs
+    are copied (not linked) into the task's folder under the same `runs/<run>/`. A
+    running run is ended first; only a person can do that.
 
 ### Host sessions (built in step 2: HOST-1..7, UI-3)
 Still open:

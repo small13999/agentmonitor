@@ -46,6 +46,7 @@ let chrome: Browser | undefined;
 /** Runs the later claims go on from. */
 let finished: Session;
 let failed: Session;
+let reviewed: Session;
 let fromRun: Session;
 
 function git(cwd: string, args: string[]): string {
@@ -223,7 +224,7 @@ spec("AUTO-10", "a Finish run deploys through a pull request it merges and ends;
   assert.ok(!originHas("Draft 3a9c"));
 });
 
-spec("AUTO-10", "a Wait for review run pushes its branch, deploys nothing, and waits on you until a person has it deploy", async () => {
+spec("AUTO-10", "a Wait for review run pushes its branch, deploys nothing, and waits on you", async () => {
   const audit = await automation("Weekly audit", {
     endMode: "review",
     instructions: [
@@ -232,6 +233,7 @@ spec("AUTO-10", "a Wait for review run pushes its branch, deploys nothing, and w
     ].join(" "),
   });
   const run = await runNow(audit);
+  reviewed = run;
   const card = await cardShowing(run, (shown) => shown.turn === "blocked", "the run waiting for review");
   assert.equal(card.lastReply, "answered: refused 1c7e", "a run with unpushed commits does not wait for review");
   assert.equal(card.session.run?.outcome, "review");
@@ -252,24 +254,20 @@ spec("AUTO-10", "a Wait for review run pushes its branch, deploys nothing, and w
   const link = page.getByRole("navigation", { name: "Waiting on you" }).getByRole("link", { name: `Weekly audit: run ${short(run)} waits for review` });
   assert.equal(await link.getAttribute("href"), `http://am-t-${run.id}.localhost:${new URL(gateway.url).port}/`);
   await page.close();
+});
 
-  // AUTO-11: a person goes on in the run's session and has it deploy.
-  const env = { ...process.env, TERN_DAEMON_SOCKET: join(runDir(run), "tern-daemon.sock"), TERN_CONFIG_DIR: join(runDir(run), "tern-config") };
-  const deployed = ended(run);
+spec("AUTO-11", "a run is followed up in its session, or in a session on the automation that is no run, from the run: its branch, its work, and its outputs", async () => {
+  // A run still going is gone on in its own session.
+  const refused = await gateway.api("POST", `/automations/${reviewed.automationId}/sessions`, { runtime: "host", model: "fake/scripted", fromRun: reviewed.id });
+  assert.equal(refused.status, 409);
+  // A person goes on in the reviewed run's chat and has it deploy.
+  const env = { ...process.env, TERN_DAEMON_SOCKET: join(runDir(reviewed), "tern-daemon.sock"), TERN_CONFIG_DIR: join(runDir(reviewed), "tern-config") };
+  const deployed = ended(reviewed);
   execFileSync("tern", ["send", "workspace/@focused", "text", "bash:gh pr create --fill && gh pr merge --merge && am run end finished"], { env });
   execFileSync("tern", ["send", "workspace/@focused", "keys", "Enter"], { env });
   const done = await deployed;
   assert.equal(done.run?.outcome, "finished");
   assert.ok(originHas("Audit 5f1b"), "what the person reviewed is deployed");
-});
-
-spec("AUTO-11", "a session on an automation that is no run goes on from a run: its branch, its work, and its outputs", async () => {
-  const going = await runNow(await automation("Still going", { instructions: "hold:going-0b4e" }));
-  await fake.holding();
-  const refused = await gateway.api("POST", `/automations/${going.automationId}/sessions`, { runtime: "host", model: "fake/scripted", fromRun: going.id });
-  assert.equal(refused.status, 409, "a run still going is gone on in its own session");
-  await gateway.data("POST", `/sessions/${going.id}/end`);
-  fake.release();
 
   fromRun = await gateway.data<Session>("POST", `/automations/${failed.automationId}/sessions`, { runtime: "host", model: "fake/scripted", fromRun: failed.id });
   assert.equal(fromRun.run, null);
