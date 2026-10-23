@@ -16,7 +16,8 @@ function ternUrl(sessionId: string): string {
  * loaded, hidden, and the current one shows. Frames keep the order they opened in: moving an
  * iframe in the document reloads it. Until a frame has loaded, a line says what it waits on:
  * a stopped session's container starts first (SESSION-10), which takes some seconds. Another
- * workspace tab covers the frames by hiding them, which keeps them loaded and sized (UI-2).
+ * workspace tab covers the frames by hiding them, which keeps them loaded and sized (UI-2); a
+ * chat first loads when its Chat tab shows, so a task's page does not start its container.
  */
 export function SessionFrames({ current, covered, running, stopped }: {
   current: string | null;
@@ -27,13 +28,13 @@ export function SessionFrames({ current, covered, running, stopped }: {
   const [frames, setFrames] = useState<{ order: string[]; used: string[] }>({ order: [], used: [] });
   const [loaded, setLoaded] = useState<ReadonlySet<string>>(new Set());
   useEffect(() => {
-    if (current === null) return;
+    if (current === null || covered) return;
     setFrames(({ order, used }) => {
       const recent = [current, ...used.filter((id) => id !== current)].slice(0, KEPT);
       const kept = order.filter((id) => recent.includes(id));
       return { order: kept.includes(current) ? kept : [...kept, current], used: recent };
     });
-  }, [current]);
+  }, [current, covered]);
   // An ended session's client goes; while cards load, keep everything.
   const shown = frames.order.filter((id) => running === null || running.has(id));
   return (

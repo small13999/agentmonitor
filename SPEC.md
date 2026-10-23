@@ -196,9 +196,6 @@ Unnumbered intent; not testable, so not claims.
   status, and comments in context.
 - **TASK-7** A task has a status of at most 50 lines that its agents keep
   current; a status write based on a stale revision is rejected.
-- **TASK-8** A task has notes. The user writes them in the task's Notes tab,
-  where they save as typed; agents read and write them with `am`; a write based
-  on a stale revision is rejected.
 - **TASK-9** Marking a task done or cancelled ends its running session and
   deletes its branch from the machine; when the branch has commits no remote
   has, it requires a confirmation that lists them.

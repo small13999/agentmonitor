@@ -4,8 +4,9 @@ import { api, usePolled, type Card, type Project, type TaskSummary, type Topic }
 import { Board } from "./Board.tsx";
 import { SessionFrames } from "./SessionFrames.tsx";
 import { TaskList } from "./TaskList.tsx";
-import { Notes, StartSession, WorkspaceTabs, type WorkspaceTab } from "./Workspace.tsx";
-import { WorkspaceSettings } from "./WorkspaceSettings.tsx";
+import { TaskPage } from "./TaskPage.tsx";
+import { TaskSettings } from "./TaskSettings.tsx";
+import { StartSession, WorkspaceTabs, type WorkspaceTab } from "./Workspace.tsx";
 import "./app.css";
 
 interface Route {
@@ -14,11 +15,14 @@ interface Route {
   tab: WorkspaceTab;
 }
 
-/** `#/` is the board, `#/t` the task list, `#/t/<task id>` a task's chat, `#/t/<task id>/notes` its notes. */
+/**
+ * `#/` is the board, `#/t` the task list, `#/t/<task id>` a task's page (TASK-12),
+ * `#/t/<task id>/chat` its chat, and `#/t/<task id>/settings` its settings (UI-2).
+ */
 function readRoute(): Route {
-  const match = /^#\/t(?:\/([0-9a-f-]{36})(\/notes)?)?$/.exec(window.location.hash);
-  if (match === null) return { page: "board", taskId: null, tab: "chat" };
-  return { page: "tasks", taskId: match[1] ?? null, tab: match[2] === undefined ? "chat" : "notes" };
+  const match = /^#\/t(?:\/([0-9a-f-]{36})(?:\/(chat|settings))?)?$/.exec(window.location.hash);
+  if (match === null) return { page: "board", taskId: null, tab: "page" };
+  return { page: "tasks", taskId: match[1] ?? null, tab: match[2] === "chat" ? "chat" : match[2] === "settings" ? "settings" : "page" };
 }
 
 function useRoute(): Route {
@@ -102,19 +106,11 @@ function App() {
   const projects = usePolled<Project[]>("/projects", 30_000);
   const [projectId, setProjectId] = useState<string | null>(() => localStorage.getItem("am.project"));
   const { page, taskId, tab } = useRoute();
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [creatingProject, setCreatingProject] = useState(false);
   const project = projects.data?.find((candidate) => candidate.id === projectId) ?? projects.data?.[0] ?? null;
   const tasks = usePolled<TaskSummary[]>(project === null ? null : `/projects/${project.id}/tasks`, 3_000);
   const cards = usePolled<Card[]>(project === null ? null : `/projects/${project.id}/cards`, 2_000);
   const topics = usePolled<Topic[]>(project === null ? null : `/projects/${project.id}/topics`, 5_000);
-
-  useEffect(() => {
-    if (!settingsOpen) return;
-    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") setSettingsOpen(false); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [settingsOpen]);
 
   const choose = (id: string) => {
     localStorage.setItem("am.project", id);
@@ -178,26 +174,14 @@ function App() {
           )}
           {current !== null && (
             <>
-              <WorkspaceTabs
-                taskId={current.task.id}
-                tab={tab}
-                settingsOpen={settingsOpen}
-                onSettings={() => setSettingsOpen((open) => !open)}
-              />
+              <WorkspaceTabs taskId={current.task.id} tab={tab} />
+              {tab === "page" && (
+                <TaskPage key={current.task.id} summary={current} card={currentCard} topics={topics.data ?? []} onChanged={refresh} />
+              )}
               {current.sessionId === null && tab === "chat" && (
                 <StartSession task={current.task} hostSessions={project.hostSessions} onStarted={refresh} />
               )}
-              <Notes key={current.task.id} taskId={current.task.id} hidden={tab !== "notes"} />
-              {settingsOpen && (
-                <WorkspaceSettings
-                  key={current.task.id}
-                  summary={current}
-                  card={currentCard}
-                  topics={topics.data ?? []}
-                  onChanged={refresh}
-                  onClose={() => setSettingsOpen(false)}
-                />
-              )}
+              {tab === "settings" && <TaskSettings key={current.task.id} summary={current} card={currentCard} onChanged={refresh} />}
             </>
           )}
           <SessionFrames

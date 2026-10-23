@@ -9,10 +9,6 @@ import { TernProxy } from "./server/tern-proxy.ts";
 
 // Local development gateway. Production uses server/index.ts; both share the server/*
 // modules so behavior cannot drift.
-const config = loadConfig();
-const auth = new AuthStore(config);
-const store = new StoreService(config.stateDir, config);
-const tern = new TernProxy({ config, auth, store });
 
 declare global {
   /** The store the last config load started; Vite evaluates this file afresh on every config reload. */
@@ -20,12 +16,17 @@ declare global {
 }
 
 function gateway(): Plugin {
-  // Agent sockets keep the process alive, so they open only when a server starts, never during `vite build`.
+  // The store opens only when a server starts, never during `vite build`: the tests build the
+  // app, and a build must not open, let alone migrate, the user's live store.
   const attach = async (server: ViteDevServer | PreviewServer) => {
     // A config reload starts the new server before closing the old one, and closing a socket
     // server unlinks its path: the previous store closes first, so its sockets and database
     // do not pile up and its close does not delete the new store's sockets.
     globalThis.agentmonitorStore?.close();
+    const config = loadConfig();
+    const auth = new AuthStore(config);
+    const store = new StoreService(config.stateDir, config);
+    const tern = new TernProxy({ config, auth, store });
     globalThis.agentmonitorStore = store;
     await store.start();
     server.middlewares.use(async (request, response, next) => {

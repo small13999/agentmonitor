@@ -16,9 +16,11 @@ const USAGE = `usage: am [--json] COMMAND
                                       REV is the revision you read; a stale REV is refused
   task set-state STATE                open, in_progress, or in_review
   task create TITLE                   create another task (stdin: its description)
-  notes                               the task's notes; first line is their revision
-  notes set --base REV                replace the task's notes with stdin;
-                                      REV is the revision you read; a stale REV is refused
+  comments                            the task's comments, oldest first, with author and time
+  comment                             comment on the task (stdin: Markdown); people read it
+                                      on the task's page, never in a running chat
+  comment edit ID                     replace your comment ID with stdin
+  comment delete ID                   delete your comment ID
   check                               what would not survive this session: uncommitted
                                       files, unpushed commits, and untracked files that
                                       look like secrets; fails while there are any
@@ -140,17 +142,27 @@ async function whoami(): Promise<Me> {
   return me;
 }
 
-interface Notes {
-  text: string;
-  revision: number;
+interface Comment {
+  id: string;
+  author: { kind: string; personId?: string; sessionId?: string };
+  body: string;
+  createdAt: number;
+  editedAt: number | null;
 }
 
-function notesOf(value: unknown): Notes {
-  if (typeof value !== "object" || value === null || !("text" in value) || typeof value.text !== "string"
-    || !("revision" in value) || typeof value.revision !== "number") {
-    throw new CliError("the store answered with something that is not notes");
+function commentOf(value: unknown): Comment {
+  if (!isRecord(value) || typeof value.id !== "string" || typeof value.body !== "string" || typeof value.createdAt !== "number"
+    || (value.editedAt !== null && typeof value.editedAt !== "number") || !isRecord(value.author) || typeof value.author.kind !== "string") {
+    throw new CliError("the store answered with something that is not a comment");
   }
-  return { text: value.text, revision: value.revision };
+  const { kind, personId, sessionId } = value.author;
+  return {
+    id: value.id,
+    author: { kind, personId: typeof personId === "string" ? personId : undefined, sessionId: typeof sessionId === "string" ? sessionId : undefined },
+    body: value.body,
+    createdAt: value.createdAt,
+    editedAt: value.editedAt,
+  };
 }
 
 /** Untracked files with these names are credentials far more often than work. */
@@ -344,16 +356,34 @@ async function main(args: string[]): Promise<void> {
     return;
   }
 
-  if (group === "notes" && command === undefined) {
-    const notes = notesOf(await call("GET", `/tasks/${me.task.id}/notes`));
-    print(json, notes, () => `# revision ${notes.revision}\n${notes.text}`.trimEnd());
+  if (group === "comments" && command === undefined) {
+    const listed = await call("GET", `/tasks/${me.task.id}/comments`);
+    const comments = Array.isArray(listed) ? listed.map(commentOf) : [];
+    const people = await call("GET", "/people");
+    const nameOf = (comment: Comment) => {
+      if (comment.author.kind !== "person") return comment.author.sessionId === me.session.id ? "you (this session's agent)" : `the agent of session ${comment.author.sessionId}`;
+      const person = Array.isArray(people) ? people.find((candidate: unknown) => isRecord(candidate) && candidate.id === comment.author.personId) : undefined;
+      return isRecord(person) && typeof person.name === "string" ? person.name : "someone no longer in the store";
+    };
+    print(json, listed, () => comments.length === 0 ? "no comments" : comments.map((comment) => [
+      `comment ${comment.id} by ${nameOf(comment)}, ${new Date(comment.createdAt).toISOString()}${comment.editedAt === null ? "" : " (edited)"}`,
+      comment.body.trimEnd(),
+    ].join("\n")).join("\n\n"));
     return;
   }
-  if (group === "notes" && command === "set" && rest.length === 2 && rest[0] === "--base") {
-    const base = revisionOf(rest[1]);
-    const text = readFileSync(0, "utf8");
-    const updated = notesOf(await call("PUT", `/tasks/${me.task.id}/notes`, { text, baseRevision: base }));
-    print(json, updated, () => `notes are now revision ${updated.revision}`);
+  if (group === "comment" && command === undefined) {
+    const created = commentOf(await call("POST", `/tasks/${me.task.id}/comments`, { body: readFileSync(0, "utf8") }));
+    print(json, created, () => `commented on the task (comment ${created.id})`);
+    return;
+  }
+  if (group === "comment" && command === "edit" && rest.length === 1) {
+    const updated = commentOf(await call("PATCH", `/comments/${rest[0]}`, { body: readFileSync(0, "utf8") }));
+    print(json, updated, () => `comment ${updated.id} is edited`);
+    return;
+  }
+  if (group === "comment" && command === "delete" && rest.length === 1) {
+    const deleted = commentOf(await call("DELETE", `/comments/${rest[0]}`));
+    print(json, deleted, () => `comment ${deleted.id} is deleted`);
     return;
   }
 

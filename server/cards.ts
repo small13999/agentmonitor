@@ -1,15 +1,12 @@
-import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { promisify } from "node:util";
 import { z } from "zod";
 import { git, uncommittedFiles, unpushedCommits } from "./git.ts";
+import { openPullRequests } from "./github.ts";
 import { ompRequest } from "./omp-channel.ts";
 import type { WorkspaceDirs } from "./runtime/runtime.ts";
-import type { Card, PullRequest, TurnLight } from "../shared/api.ts";
+import type { Card, TurnLight } from "../shared/api.ts";
 import type { Principal, Store } from "./store/store.ts";
 import { newestTranscript, readTranscript } from "./transcript.ts";
-
-const run = promisify(execFile);
 
 const SORT: Record<TurnLight, number> = { blocked: 0, done: 1, working: 2, stopped: 3 };
 
@@ -44,7 +41,8 @@ function lastMessages(path: string): { user: string | null; reply: string | null
   return { user, reply };
 }
 
-async function gitState(worktree: string, baseRef: string): Promise<Card["git"]> {
+/** A worktree's uncommitted files, unpushed commits, and every file it changed since it left `baseRef`; null when git cannot read it. */
+export async function gitState(worktree: string, baseRef: string): Promise<Card["git"]> {
   if (!existsSync(worktree)) return null;
   try {
     const uncommitted = await uncommittedFiles(worktree);
@@ -55,27 +53,6 @@ async function gitState(worktree: string, baseRef: string): Promise<Card["git"]>
   } catch {
     return null;
   }
-}
-
-/** GitHub answers are slow and rate limited; one lookup per branch per half minute. */
-const prCache = new Map<string, { at: number; prs: PullRequest[] | null }>();
-
-async function pullRequests(worktree: string, branch: string): Promise<PullRequest[] | null> {
-  const cached = prCache.get(worktree);
-  if (cached !== undefined && Date.now() - cached.at < 30_000) return cached.prs;
-  let prs: PullRequest[] | null = null;
-  try {
-    const { stdout } = await run(
-      process.env.AGENTMONITOR_GH ?? "gh",
-      ["pr", "list", "--head", branch, "--state", "open", "--json", "number,title,url"],
-      { cwd: worktree, encoding: "utf8", timeout: 10_000 },
-    );
-    prs = JSON.parse(stdout) as PullRequest[];
-  } catch {
-    prs = null;
-  }
-  prCache.set(worktree, { at: Date.now(), prs });
-  return prs;
 }
 
 /** CARD-1..5: one card per running session of the project, waiting-on-you first. */
@@ -93,7 +70,7 @@ export async function projectCards(
     const [live, gitInfo, prs] = await Promise.all([
       liveState(dirs.run),
       hasWorktree ? gitState(dirs.worktree, session.baseRef ?? "") : null,
-      hasWorktree ? pullRequests(dirs.worktree, session.branch ?? "") : null,
+      hasWorktree ? openPullRequests(dirs.worktree, session.branch ?? "") : null,
     ]);
     // SESSION-7: the chat the session runs now: the one omp has open (a host session's path is
     // this machine's; omp writes it with the first message), else the newest; a checkout

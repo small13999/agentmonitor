@@ -4,6 +4,7 @@ import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import type { ChangedFile } from "../shared/api.ts";
 
 const run = promisify(execFile);
 
@@ -86,6 +87,28 @@ export async function uncommittedFiles(worktree: string): Promise<string[]> {
  */
 export async function unpushedCommits(repo: string, ref: string, baseRef: string): Promise<string[]> {
   return (await git(repo, ["log", "--format=%h %s", ref, "--not", "--remotes", baseRef])).split("\n").filter(Boolean);
+}
+
+/**
+ * CARD-3: the commits on `ref` since it left `baseRef`, newest first as "<short sha> <subject>",
+ * and the files they changed.
+ */
+export async function branchChanges(repo: string, ref: string, baseRef: string): Promise<{ commits: string[]; files: ChangedFile[] }> {
+  const base = await git(repo, ["merge-base", ref, baseRef]);
+  const commits = (await git(repo, ["log", "--format=%h %s", `${base}..${ref}`])).split("\n").filter(Boolean);
+  // -z entries are "status\0path\0"; renames and copies carry the old path first.
+  const entries = (await git(repo, ["diff", "--name-status", "-z", base, ref])).split("\0").filter(Boolean);
+  const files: ChangedFile[] = [];
+  for (let index = 0; index < entries.length; index += 2) {
+    const code = entries[index][0];
+    if (code === "R" || code === "C") {
+      index++;
+      files.push({ path: entries[index + 1], status: code === "R" ? "renamed" : "added" });
+    } else {
+      files.push({ path: entries[index + 1], status: code === "A" ? "added" : code === "D" ? "deleted" : "modified" });
+    }
+  }
+  return { commits, files };
 }
 
 /** SESSION-9: where a task's latest snapshot lives; a ref outside refs/heads and refs/tags, so pushes leave it behind. */

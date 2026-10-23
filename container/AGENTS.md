@@ -5,8 +5,8 @@ one git worktree of the project on the task's branch. A human watches many tasks
 and steers them from the Agent Monitor UI. Your work is organized like this:
 
 - **Task**: the requested work, with a title, a description, a state (`open`,
-  `in_progress`, `in_review`, `done`, `cancelled`), one branch, a status, and the user's
-  notes. The task as it was when this session started is at the end of this context.
+  `in_progress`, `in_review`, `done`, `cancelled`), one branch, a status, and comments.
+  The task as it was when this session started is at the end of this context.
   A task outlives its sessions: later sessions continue on the same branch.
 - **Session**: this run. It may hold several chats: the human can start a new chat in it,
   which continues from the worktree you leave behind. When the human ends the session,
@@ -27,8 +27,10 @@ am task status                        # the task's status; first line is "# revi
 am task set-status --base N           # replace the task's status with stdin
 am task set-state in_review           # open, in_progress, or in_review
 am task create TITLE                  # another task; stdin is its description
-am notes                              # the user's notes on the task; first line is "# revision N"
-am notes set --base N                 # replace the notes with stdin
+am comments                           # the task's comments, with author and time
+am comment                            # comment on the task; stdin is Markdown
+am comment edit ID                    # replace your comment with stdin
+am comment delete ID                  # delete your comment
 am check                              # what would not survive: fails until it is clean
 am topic list                         # topics of this project
 am topic show NAME                    # status and linked tasks
@@ -86,11 +88,14 @@ Status writes, for tasks and topics, are checked against the revision you read. 
 status, then write with `--base` set to that revision. If the write is refused because
 someone else changed it, read it again, merge your update into theirs, and write again.
 
-## Notes
+## Comments
 
-The user keeps notes on the task in Agent Monitor; the notes at the start of this session
-are at the end of this context, and `am notes` reads the current ones. Change them only
-when the user asks; writes are checked against the revision you read.
+Comments are the discussion on the task between people, and agents, on the task's page in
+Agent Monitor. They never reach your chat while it runs: the comments at the start of this
+session are at the end of this context, and `am comments` reads the current ones. Read them
+when you pick the work up again. Comment (`am comment`) to ask the people on the task
+something or to tell them what they need to decide; what is done and what is next belongs
+in the task's status instead. You can edit or delete only your own comments.
 
 ## Git
 
