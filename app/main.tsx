@@ -1,7 +1,7 @@
 import "@fontsource-variable/bricolage-grotesque/opsz.css";
 import "@fontsource/dm-mono/400.css";
 import "@fontsource/dm-mono/500.css";
-import { StrictMode, useEffect, useState, type SubmitEvent } from "react";
+import { StrictMode, useEffect, useRef, useState, type SubmitEvent } from "react";
 import { createRoot } from "react-dom/client";
 import { AllTasks } from "./AllTasks.tsx";
 import { api, chooseStore, LOCAL_STORE, storeOf, usePolled, type AutomationSummary, type Card, type Person, type Project, type StoreListing, type TaskDetail, type TaskSummary, type Topic } from "./api.ts";
@@ -108,22 +108,20 @@ function NewProject({ owner, onCreated, onCancel }: { owner: boolean; onCreated:
 /** BOARD-3: searching goes to the All tasks list of what it finds. */
 function SearchTasks({ query }: { query: string }) {
   const [words, setWords] = useState(query);
-  // The query the box last showed or searched for. A query from elsewhere (a link, Back) replaces
-  // the words; the box's own search landing does not, since the next words may be typed already.
-  const [known, setKnown] = useState(query);
-  if (query !== known) {
-    setKnown(query);
-    setWords(query);
-  }
+  const input = useRef<HTMLInputElement>(null);
+  // A query from elsewhere (a link, Back) shows in the box, but never over what someone is
+  // typing there: a search's own navigation can land after the next words are typed.
+  useEffect(() => {
+    if (document.activeElement !== input.current) setWords(query);
+  }, [query]);
   const submit = (event: SubmitEvent<HTMLFormElement>) => {
     event.preventDefault();
     const next = words.trim();
-    setKnown(next);
     window.location.hash = next === "" ? "#/all" : `#/all?q=${encodeURIComponent(next)}`;
   };
   return (
     <form role="search" className="search" onSubmit={submit}>
-      <input type="search" value={words} onChange={(event) => setWords(event.target.value)} placeholder="Search tasks" aria-label="Search tasks" />
+      <input ref={input} type="search" value={words} onChange={(event) => setWords(event.target.value)} placeholder="Search tasks" aria-label="Search tasks" />
     </form>
   );
 }
