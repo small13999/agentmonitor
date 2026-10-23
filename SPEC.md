@@ -328,8 +328,8 @@ Unnumbered intent; not testable, so not claims.
   workspace that shows the chosen task.
 - **UI-2** A task has three tabs: Page, Chat (its running session's chat, or
   starting one), and Settings, a full tab at the right of the tabs with subtabs
-  Changes, Previews, Cloudflare, and End session. Switching tabs keeps the chat
-  loaded.
+  Changes, Cloudflare, and End session (Previews joins them in step 6). Switching
+  tabs keeps the chat loaded.
 - **UI-3** The Tasks page's project menu creates a project from its name, its
   repository, and whether it allows host sessions.
 - **UI-4** A topic's name shows the same everywhere, in the topic's own colour;
