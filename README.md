@@ -131,11 +131,11 @@ what remains after 5 s, including servers the agent started.
 session in the project's main checkout instead of a worktree: the code the live
 instance runs, so edits take effect at once. One per project, marked "Host ·
 main". It creates no worktree or branch, and ending it only stops its processes:
-no snapshot, the checkout and its uncommitted work stay. With `resume: <omp chat
-id or prefix>` it goes on with one of your own omp chats from the omp agent
-directory (`sessions/<folder>/<time>_<id>.jsonl`), copied into the session's omp
-home; your chat stays unchanged, so the two diverge from there. The chat should
-come from the same working directory (omp files chats by it).
+no snapshot, the checkout and its uncommitted work stay. Its omp chats are your
+own (the session's `omp-home/agent/sessions` links to the omp agent directory's
+`sessions`): `/sessions` in its chat lists your terminal chats of the checkout to
+go on with, and `omp` → `/resume` in a terminal lists its chats. Don't continue
+one chat in both places at once.
 
 `POST /api/store/sessions/:id/end` ends a session: it stops the container, keeps
 the worktree's uncommitted changes (untracked files included, ignored ones not)
