@@ -137,7 +137,7 @@
     "tests/automation-runs.test.ts::AUTO-10::a Wait for review run pushes its branch, deploys nothing, and waits on you": "cd8c52ad374a7fa6",
     "tests/automation-runs.test.ts::AUTO-11::a run is followed up in its session, or in a session on the automation that is no run, from the run: its branch, its work, and its outputs": "121ae4c0c516292a",
     "tests/automation-runs.test.ts::AUTO-12::a task made from a run takes over its branch, with the run's outputs copied into the task's folder": "fb7daa492ef6c436",
-    "tests/automations.test.ts::AUTO-1::an automation has a name, instructions, a model, triggers, an end mode, a time limit, a folder, and an on/off switch; one that is off starts no runs": "470244736fda0461",
+    "tests/automations.test.ts::AUTO-1::an automation has a name, instructions, a model, triggers, an end mode, a time limit, a folder, and an on/off switch; one that is off starts no runs": "0f349feaa67f898f",
     "tests/automations.test.ts::AUTO-15::an agent creates and changes an automation with am automation, and people see it as the agent set it up": "068bfb03d1297eff",
     "tests/automations.test.ts::SESSION-5::sessions from before automations stay their tasks', and the store takes runs of automations beside them": "50182437fe09aafc",
     "tests/folders.test.ts::FOLDER-1::people drop files on the task's page and agents add them with am folder, into the task's folder in the store": "8f1f3a827b6351df",
