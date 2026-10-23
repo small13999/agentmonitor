@@ -53,7 +53,10 @@ through Agent Monitor (dogfooding).
   the full rendered text and linked work.
 - Visual identity from a clean slate: type with character, a distinct accent, a
   colour per topic, avatars for people and agents, live status (pulse while
-  working, a clear "needs you"). Show a clickable prototype before building it in.
+  working, a clear "needs you"). Picked from three prototypes: Studio (Bricolage
+  Grotesque, violet, compact and high signal), toned down: no offset 3D shadows, no
+  tilted elements or stickers. Console was too intimidating for non-technical users,
+  Paper too drawn out (half the tasks per screen).
 - People: the user and the teammate as named users; the assignee is a person.
 
 ### Automations (step 7)
