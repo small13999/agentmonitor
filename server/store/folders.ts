@@ -126,9 +126,10 @@ function dosDateTime(ms: number): { time: number; date: number } {
 
 /**
  * FOLDER-2: the files as one zip, streamed: stored (folder files are mostly images and video,
- * which do not shrink), each followed by a data descriptor with its CRC and size as read.
+ * which do not shrink), each followed by a data descriptor with its CRC and size as read. Each
+ * is named by its path without `prefix`, the subfolder the zip holds.
  */
-async function* zipOf(dir: string, files: FolderFile[]): AsyncGenerator<Buffer> {
+async function* zipOf(dir: string, files: FolderFile[], prefix: string): AsyncGenerator<Buffer> {
   // Bit 3: sizes and CRC follow the data; bit 11: names are UTF-8.
   const flags = 0x0808;
   const central: Buffer[] = [];
@@ -136,7 +137,7 @@ async function* zipOf(dir: string, files: FolderFile[]): AsyncGenerator<Buffer> 
   for (const file of files) {
     const handle = await openInside(dir, file.path);
     if (handle === null) continue;
-    const name = Buffer.from(file.path, "utf8");
+    const name = Buffer.from(file.path.slice(prefix.length), "utf8");
     const { time, date } = dosDateTime(file.updatedAt);
     const local = Buffer.alloc(30);
     local.writeUInt32LE(0x04034b50, 0);
@@ -319,18 +320,24 @@ export class Folders {
     return this.sync(owner);
   }
 
-  /** FOLDER-2: the whole folder as a zip named after its task or automation. */
-  zip(principal: Principal, owner: FolderOwner): FileResponse {
+  /**
+   * FOLDER-2: the whole folder as a zip named after its task or automation; AUTO-7: with `under`,
+   * only that subfolder (a run's outputs, `runs/<run>`), its files named as in it.
+   */
+  zip(principal: Principal, owner: FolderOwner, under: string | null): FileResponse {
     const title = this.store.folderName(principal, owner);
-    const files = this.sync(owner);
+    const prefix = under === null ? "" : `${under}/`;
+    const files = this.sync(owner).filter((file) => file.path.startsWith(prefix));
+    if (under !== null && files.length === 0) throw new StoreError(404, `the ${owner.kind}'s folder has no files in ${under}`);
     // Per file: local header, data descriptor, and directory entry (30 + 16 + 46 bytes) and its name twice.
     const total = files.reduce((sum, file) => sum + 92 + 2 * Buffer.byteLength(file.path) + file.size, 22);
     if (total > ZIP_MAX_BYTES) throw new StoreError(413, "the folder is too large for one zip; download its files one by one");
-    const name = `${title.replace(/[^\p{L}\p{N}._-]+/gu, "-").replace(/^-|-$/g, "") || "folder"}.zip`;
+    const named = under === null ? title : `${title} ${basename(under)}`;
+    const name = `${named.replace(/[^\p{L}\p{N}._-]+/gu, "-").replace(/^-|-$/g, "") || "folder"}.zip`;
     return new FileResponse(200, {
       "content-type": "application/zip",
       "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(name)}`,
       "cache-control": "no-store",
-    }, Readable.from(zipOf(this.dir(owner), files)));
+    }, Readable.from(zipOf(this.dir(owner), files, prefix)));
   }
 }

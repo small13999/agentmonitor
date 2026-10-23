@@ -4,7 +4,8 @@ import "@fontsource/dm-mono/500.css";
 import { StrictMode, useEffect, useState, type SubmitEvent } from "react";
 import { createRoot } from "react-dom/client";
 import { AllTasks } from "./AllTasks.tsx";
-import { api, chooseStore, LOCAL_STORE, storeOf, usePolled, type Card, type Person, type Project, type StoreListing, type TaskDetail, type TaskSummary, type Topic } from "./api.ts";
+import { api, chooseStore, LOCAL_STORE, storeOf, usePolled, type AutomationSummary, type Card, type Person, type Project, type StoreListing, type TaskDetail, type TaskSummary, type Topic } from "./api.ts";
+import { AutomationList, AutomationWorkspace, NewAutomation } from "./Automations.tsx";
 import { Board, waitsOnYou } from "./Board.tsx";
 import { ProjectSettings } from "./ProjectSettings.tsx";
 import { SessionFrames } from "./SessionFrames.tsx";
@@ -16,8 +17,12 @@ import { StartSession, WorkspaceTabs, type WorkspaceTab } from "./Workspace.tsx"
 import "./app.css";
 
 interface Route {
-  page: "board" | "tasks" | "all" | "project";
+  page: "board" | "tasks" | "automations" | "all" | "project";
   taskId: string | null;
+  /** The automation shown on the Automations page; "new" its form for a new one. */
+  automationId: string | null;
+  /** The session whose chat an automation's Chat tab shows. */
+  sessionId: string | null;
   tab: WorkspaceTab;
   /** BOARD-3: the All tasks list's search words. */
   query: string;
@@ -27,14 +32,22 @@ interface Route {
  * `#/` is the board, `#/t` the task list, `#/t/<task id>` a task's page (TASK-12),
  * `#/t/<task id>/chat` its chat, `#/t/<task id>/settings` its settings (UI-2), `#/all` every
  * task, `#/all?q=<words>` the tasks a search finds (BOARD-3), and `#/project` the project's settings.
+ * `#/a` lists the project's automations (AUTO-15), `#/a/new` creates one, `#/a/<automation id>`
+ * is an automation's page (AUTO-7), `/settings` its settings, `/chat/<session id>` a run's chat.
  */
 function readRoute(): Route {
-  if (window.location.hash === "#/project") return { page: "project", taskId: null, tab: "page", query: "" };
+  const none: Omit<Route, "page"> = { taskId: null, automationId: null, sessionId: null, tab: "page", query: "" };
+  if (window.location.hash === "#/project") return { ...none, page: "project" };
   const all = /^#\/all(?:\?q=(.*))?$/.exec(window.location.hash);
-  if (all !== null) return { page: "all", taskId: null, tab: "page", query: decodeURIComponent(all[1] ?? "") };
+  if (all !== null) return { ...none, page: "all", query: decodeURIComponent(all[1] ?? "") };
+  const automation = /^#\/a(?:\/(new|[0-9a-f-]{36})(?:\/(settings|chat\/([0-9a-f-]{36})))?)?$/.exec(window.location.hash);
+  if (automation !== null) {
+    const tab = automation[2] === "settings" ? "settings" : automation[3] !== undefined ? "chat" : "page";
+    return { ...none, page: "automations", automationId: automation[1] ?? null, sessionId: automation[3] ?? null, tab };
+  }
   const match = /^#\/t(?:\/([0-9a-f-]{36})(?:\/(chat|settings))?)?$/.exec(window.location.hash);
-  if (match === null) return { page: "board", taskId: null, tab: "page", query: "" };
-  return { page: "tasks", taskId: match[1] ?? null, tab: match[2] === "chat" ? "chat" : match[2] === "settings" ? "settings" : "page", query: "" };
+  if (match === null) return { ...none, page: "board" };
+  return { ...none, page: "tasks", taskId: match[1] ?? null, tab: match[2] === "chat" ? "chat" : match[2] === "settings" ? "settings" : "page" };
 }
 
 function useRoute(): Route {
@@ -169,6 +182,7 @@ function App() {
   const tasks = usePolled<TaskSummary[]>(project === null ? null : `/projects/${project.id}/tasks`, 3_000);
   const cards = usePolled<Card[]>(project === null ? null : `/projects/${project.id}/cards`, 2_000);
   const topics = usePolled<Topic[]>(project === null ? null : `/projects/${project.id}/topics`, 5_000);
+  const automations = usePolled<AutomationSummary[]>(project === null || page !== "automations" ? null : `/projects/${project.id}/automations`, 3_000);
   const people = usePolled<Person[]>("/people", 30_000);
   const me = usePolled<{ person: Person }>("/me", 60_000);
   // New projects are this gateway's own, so its owner is the one that matters there, not a hub's.
@@ -224,12 +238,16 @@ function App() {
   const peopleById = new Map((people.data ?? []).map((person) => [person.id, person]));
   const meId = me.data?.person.id ?? null;
   const current = tasks.data?.find((summary) => summary.task.id === taskId) ?? null;
-  const currentSession = page === "tasks" ? current?.sessionId ?? null : null;
+  const currentSession = page === "tasks" ? current?.sessionId ?? null : page === "automations" && tab === "chat" ? route.sessionId : null;
   const currentCard = currentSession === null ? null : cardsBySession.get(currentSession) ?? null;
   // A session just started has no card yet; its chat loads anyway.
   const running = cards.data === null || tasks.data === null
     ? null
-    : new Set([...cardsBySession.keys(), ...tasks.data.flatMap((summary) => (summary.sessionId === null ? [] : [summary.sessionId]))]);
+    : new Set([
+      ...cardsBySession.keys(),
+      ...tasks.data.flatMap((summary) => (summary.sessionId === null ? [] : [summary.sessionId])),
+      ...(automations.data ?? []).flatMap((summary) => (summary.sessionId === null ? [] : [summary.sessionId])),
+    ]);
   const waiting = (tasks.data ?? []).filter((summary) => (
     summary.sessionId !== null && waitsOnYou(summary, cardsBySession.get(summary.sessionId), meId)
   ));
@@ -245,6 +263,7 @@ function App() {
             <h1>{project.name}</h1>
             <nav className="board-bar" aria-label="Board views">
               <a className="button" href="#/all">All tasks</a>
+              <a className="button" href="#/a">Automations</a>
               <a className="button ghost" href="#/project">Project settings</a>
             </nav>
           </header>
@@ -261,27 +280,52 @@ function App() {
           <ProjectSettings project={project} me={me.data?.person ?? null} onSaved={stores.refresh} />
         </main>
       )}
-      {/* Kept while the board shows, so the chats stay loaded. */}
-      <div className="tasks-page" hidden={page !== "tasks"}>
-        <TaskList
-          stores={stores.data}
-          project={project}
-          onProject={choose}
-          onNewProject={() => setCreatingProject(true)}
-          tasks={tasks.data ?? []}
-          cards={cardsBySession}
-          selected={taskId}
-          onChanged={refresh}
-        />
+      {/* Kept while the board shows, so the chats stay loaded; the Automations page shows its runs' chats in them too. */}
+      <div className="tasks-page" hidden={page !== "tasks" && page !== "automations"}>
+        {page === "automations" ? (
+          <AutomationList
+            stores={stores.data}
+            project={project}
+            onProject={(id) => { select(id); window.location.hash = "#/a"; }}
+            onNewProject={() => setCreatingProject(true)}
+            automations={automations.data}
+            cards={cardsBySession}
+            selected={route.automationId}
+          />
+        ) : (
+          <TaskList
+            stores={stores.data}
+            project={project}
+            onProject={choose}
+            onNewProject={() => setCreatingProject(true)}
+            tasks={tasks.data ?? []}
+            cards={cardsBySession}
+            selected={taskId}
+            onChanged={refresh}
+          />
+        )}
         <main className="workspace">
           {error && <p className="error banner">{error}</p>}
-          {taskId === null && <p className="workspace-page muted">Choose a task, or create one.</p>}
-          {taskId !== null && current === null && (
+          {page === "automations" && route.automationId === null && <p className="workspace-page muted">Choose an automation, or create one.</p>}
+          {page === "automations" && route.automationId === "new" && <NewAutomation project={project} onCreated={automations.refresh} />}
+          {page === "automations" && route.automationId !== null && route.automationId !== "new" && (
+            <AutomationWorkspace
+              key={route.automationId}
+              project={project}
+              automationId={route.automationId}
+              tab={tab}
+              chatSessionId={route.sessionId}
+              hostSessions={project.hostSessions && owner}
+              onChanged={() => { automations.refresh(); cards.refresh(); }}
+            />
+          )}
+          {page === "tasks" && taskId === null && <p className="workspace-page muted">Choose a task, or create one.</p>}
+          {page === "tasks" && taskId !== null && current === null && (
             <p className="workspace-page muted">{nowhere === taskId ? "This task does not exist." : "Loading…"}</p>
           )}
-          {current !== null && (
+          {page === "tasks" && current !== null && (
             <>
-              <WorkspaceTabs taskId={current.task.id} tab={tab} />
+              <WorkspaceTabs base={`#/t/${current.task.id}`} tab={tab} chat={`#/t/${current.task.id}/chat`} />
               {tab === "page" && (
                 <TaskPage key={current.task.id} summary={current} card={currentCard} topics={topics.data ?? []} onChanged={refresh} />
               )}
@@ -293,7 +337,7 @@ function App() {
           )}
           <SessionFrames
             current={currentSession}
-            covered={tab !== "chat"}
+            covered={page === "tasks" && tab !== "chat"}
             running={running}
             stopped={new Set(cards.data?.filter((card) => card.turn === "stopped").map((card) => card.session.id))}
             hub={chosen?.store.url ?? null}
