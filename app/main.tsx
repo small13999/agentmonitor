@@ -83,9 +83,18 @@ function NewProject({ owner, onCreated, onCancel }: { owner: boolean; onCreated:
 /** BOARD-3: searching goes to the All tasks list of what it finds. */
 function SearchTasks({ query }: { query: string }) {
   const [words, setWords] = useState(query);
+  // The query the box last showed or searched for. A query from elsewhere (a link, Back) replaces
+  // the words; the box's own search landing does not, since the next words may be typed already.
+  const [known, setKnown] = useState(query);
+  if (query !== known) {
+    setKnown(query);
+    setWords(query);
+  }
   const submit = (event: SubmitEvent<HTMLFormElement>) => {
     event.preventDefault();
-    window.location.hash = words.trim() === "" ? "#/all" : `#/all?q=${encodeURIComponent(words.trim())}`;
+    const next = words.trim();
+    setKnown(next);
+    window.location.hash = next === "" ? "#/all" : `#/all?q=${encodeURIComponent(next)}`;
   };
   return (
     <form role="search" className="search" onSubmit={submit}>
@@ -126,7 +135,7 @@ function AppHeader({ route, waiting }: { route: Route; waiting: TaskSummary[] })
         <a className="menu" href="#/" aria-current={route.page === "board" ? "page" : undefined}>Board</a>
         <a className="menu" href="#/t" aria-current={route.page === "tasks" ? "page" : undefined}>Tasks</a>
       </nav>
-      <SearchTasks key={route.query} query={route.query} />
+      <SearchTasks query={route.query} />
       <WaitingOnYou waiting={waiting} />
     </header>
   );
