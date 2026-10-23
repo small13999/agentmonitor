@@ -1,7 +1,7 @@
 import { useState, type ReactNode, type SubmitEvent } from "react";
 import {
   api, storeUrl, usePolled, type Automation, type AutomationDetail, type AutomationSummary, type Card, type Firing, type FiringOutcome, type FiringVerdict, type FolderFile,
-  type Person, type Project, type RunOutcome, type Session, type SessionRuntime, type StoreListing, type Task, type Trigger,
+  type Person, type Project, type RunOutcome, type Session, type SessionRuntime, type StoreListing, type TaskDetail, type Trigger,
 } from "./api.ts";
 import { HostMark, Light } from "./Board.tsx";
 import { Folder, folderRoute, Preview, sizeOf, type FolderOwner } from "./Folder.tsx";
@@ -316,7 +316,7 @@ function RunActions({ automation, run, onChanged }: { automation: Automation; ru
           disabled={busy}
           aria-label={`Make a task from run ${short}`}
           onClick={() => call(async () => {
-            const task = await api<Task>("POST", `/automations/${automation.id}/runs/${run.id}/task`);
+            const { task } = await api<TaskDetail>("POST", `/runs/${run.id}/task`, {});
             window.location.hash = `#/t/${task.id}`;
           })}
         >
