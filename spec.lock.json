@@ -129,6 +129,8 @@
     "tests/app.test.ts::BOARD-3::done and cancelled tasks leave the board; search and the All tasks list find every task by title, description, and comments": "b4db0589a8a32400",
     "tests/app.test.ts::UI-4::a topic's name shows in its colour everywhere; clicking it opens its rendered status and linked tasks": "83a2036984bbe475",
     "tests/app.test.ts::UI-3::the project menu creates a project from its name, repository, and whether it allows host sessions": "f46b3da628546914",
+    "tests/automation-page.test.ts::AUTO-7::an automation's page shows first what its runs produced and what waits for review, then its runs and firings; a run's outputs download with one click": "fe713c1047e054bb",
+    "tests/automation-page.test.ts::AUTO-15::a person creates an automation with a trigger on the site, then changes it and its triggers": "92f59ed2bc41deea",
     "tests/automations.test.ts::AUTO-1::an automation has a name, instructions, a model, triggers, an end mode, a time limit, a folder, and an on/off switch; one that is off starts no runs": "af19c4667b87c7a6",
     "tests/automations.test.ts::AUTO-15::an agent creates and changes an automation with am automation, and people see it as the agent set it up": "068bfb03d1297eff",
     "tests/automations.test.ts::SESSION-5::sessions from before automations stay their tasks', and the store takes runs of automations beside them": "50182437fe09aafc",
