@@ -20,7 +20,7 @@ through Agent Monitor (dogfooding).
 | 2 | Bootstrap: host sessions, "+ Project", agentmonitor project in the store on the user's PC | Done: HOST-1..7, UI-3; the integrator runs as a main-checkout session of project `agentmonitor` |
 | 3 | SPEC draft for steps 4–8, reviewed by the user; its Concepts section is agreed | Done: step 4 claims in SPEC.md (`c55171c`); steps 5–8 stay in `SPEC-DRAFT.md` until their step |
 | 4 | Redesign from a clean slate: task page, comments, attachments (folder), people and assignee, board, session Settings tab, topic reader, visual identity; done through Agent Monitor itself | Done: slices merged (`cfb952a`), Studio (`5ff8e0e`, `4ffc0d2`); leftovers (project settings, `am` history/people/changes) in a step 5 slice |
-| 5 | Hub on Hetzner for draftcoach: Cloudflare Tunnel + Access, login, teammate access, flat hosts; the user's local Agent Monitor lists the hub's projects | In progress: AUTH-1..3, STORE-3/6, PREVIEW-2, project settings merged (`a9731fb`); deploying on the draftcoach box as user `agentmonitor` (Cloudflare through a draftcoach task), then moving draftcoach there |
+| 5 | Hub on Hetzner for draftcoach: Cloudflare Tunnel + Access, login, teammate access, flat hosts; the user's local Agent Monitor lists the hub's projects | Done: AUTH-1..3, STORE-3/6, PREVIEW-2, CLOUDFLARE-3 (`5386015`); hub live at am.draftcoach.gg, draftcoach moved there, the PC lists it through `hubs.json`; a hub session answered end to end |
 | 6 | Preview tab per task (and the draftcoach preview login), Deploy changes | |
 | 7 | Automations | |
 | 8 | Agent commits every turn and Agent Monitor pushes the task branch (replaces snapshots), idle stop, "Run session locally" | |
@@ -90,8 +90,10 @@ Still open:
   user's omp chats (HOST-7). Still open: how it pulls in other sessions' branches,
   and resuming chats in worktree or container sessions.
 - Unix socket paths are limited to 108 bytes; a long state dir breaks every
-  session (`<state>/sessions/<uuid>/run/am.sock`, and for host sessions
-  `run/tern-daemon.sock`).
+  session (`<state>/sessions/<uuid>/run/tern-daemon.sock` and the others). The
+  hub works around it with `AGENTMONITOR_STATE_DIR=/home/agentmonitor/am`, a
+  symlink to `~/.local/state/agentmonitor`; the gateway should refuse or shorten
+  such paths itself.
 
 ### Draftcoach preview login (step 6)
 - Prod cookie `__Host-draftcoach_session` is host-only; the API accepts only
@@ -103,9 +105,14 @@ Still open:
 ### Infrastructure (steps 5, 8)
 - Stores, hub, clients, machines, local runs, and the commit model: see the
   Concepts section of `SPEC-DRAFT.md` (moves into SPEC.md).
-- Hub on Hetzner. Cloudflare Tunnel + Access (JWT); hosts `am.draftcoach.gg`,
-  `am-p-<task>.draftcoach.gg`, `am-t-<session>.draftcoach.gg`. No Kubernetes, no
-  Tailscale, no new domain. Commits under the user's identity.
+- Hub on Hetzner, live since step 5: user `agentmonitor` on the draftcoach box,
+  `~/projects/agentmonitor` (deploy: `git pull`, `npm ci`, `npm run build`,
+  `npm run gateway:build`, `node scripts/build-image.ts` when `container/` changed,
+  `systemctl --user restart agentmonitor`), env in `~/.config/agentmonitor/hub.env`,
+  port 8470. Cloudflare: tunnel `draftcoach-admin` routes `am` and `*.draftcoach.gg`
+  to it, both requiring the Access app "Agent Monitor hub" (`am`, `am-*`). Hosts
+  `am.draftcoach.gg`, `am-t-<session>…`, `am-p-<task>…`. Commits under the user's
+  identity; the hub's own GitHub key, the user's gh token, its own omp login.
 - The user's PC is not a persistent runner (it is off too often); it runs hub
   sessions only when the user asks for a local run.
 
@@ -127,7 +134,10 @@ Still open:
 - Per-turn snapshots (TURN-1); TRANSCRIPT claims.
 - A failed turn (for example an expired model key) shows on the card as an error,
   not as "Turn done" with the previous reply.
-- Brotli for the 60 MB Tern wasm; `RECONNECT_SETTLE_MS` retest; AGENT-4 timeout
-  margin; stencil-hq/tern-sdk#99.
+- Brotli for the 60 MB Tern wasm; `RECONNECT_SETTLE_MS` retest;
+  stencil-hq/tern-sdk#99.
+- `cloudflared access login` from WSL opens no browser and its link expires after
+  about 9 minutes; the client could open the link itself (the user's Windows
+  browser) when a hub needs a login.
 - Features of the old UI not yet back: agentctl list, mobile page, cmux terminals,
   memory view, port previews.
