@@ -64,7 +64,7 @@ am folder rm PATH
 am people                             # the store's people
 am project show                       # name, repository, whether host sessions are allowed
 am automation list                    # the project's automations
-am automation show [NAME]             # fields, triggers, instructions, runs
+am automation show [NAME]             # fields, triggers, instructions, runs, recent firings
 am automation create NAME             # stdin is its instructions; see `am help` for fields
 am automation set NAME [FIELDS]       # change fields; --off stops it starting runs
 am automation trigger add NAME --cron "0 9 * * 1-5" [--timezone TZ]

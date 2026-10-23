@@ -116,6 +116,33 @@ through Agent Monitor (dogfooding).
   - Task from a run: the task takes the run's branch and snapshot. The run's outputs
     are copied (not linked) into the task's folder under the same `runs/<run>/`. A
     running run is ended first; only a person can do that.
+- Phase 2, scheduling built (AUTO-2, AUTO-8, the skip half of AUTO-9; server/scheduler/).
+  Decided there:
+  - The scheduler runs in the store service, started after its sockets, stopped first on
+    close. It looks at every trigger at each minute's start and whenever the clock jumps.
+    Crons are 5-field, parsed by croner in the trigger's timezone; day-of-month and
+    day-of-week combine with OR, as in cron.
+  - A firing is claimed first: recorded as `pending` (UNIQUE trigger and time), then
+    settled. Two gateways on one store never fire one time twice. Firings still pending
+    when a gateway starts failed with it.
+  - Catch-up goes by `scheduler.json` in the state directory: the time up to which
+    triggers were evaluated. On start, each trigger fires once, for its latest time
+    since then, marked caught up. A fresh state directory fires nothing for the past.
+  - Every automation's triggers are evaluated. An off automation, or one with a run
+    going, records `off` or `running` without running the guard or check, so turning
+    one back on does not fire what passed while it was off.
+  - Guard and check run in the session image with podman, also on gateways whose
+    sessions do not use podman, with the folder read-only at `/task-folder`. The guard
+    runs the interpreter its `#!` names, else `sh`, for at most 2 minutes. The check
+    (container/check.ts) runs `omp --print` with omp's `tiny` role from the user's omp
+    settings, with only read, grep, glob, and web_search, for at most 5 minutes. It answers
+    with JSON `{"answer":"yes"|"no","why":…}`; any other reply fails the check, with
+    what it said.
+  - The trigger context a scheduled run gets is text: the schedule, the time (local and
+    UTC), whether it caught up, the guard's output (first 16 KiB), and the check's why.
+  - Tests set the gateway's clock with `AGENTMONITOR_CLOCK_FILE`: the time stands still
+    until the file changes. The harness starts each gateway's clock at the real time
+    (or a test's `clock`) and moves it with `setClock`.
 
 ### Host sessions (built in step 2: HOST-1..7, UI-3)
 Still open:
