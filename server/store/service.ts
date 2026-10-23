@@ -1,13 +1,14 @@
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { userInfo } from "node:os";
 import { basename, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
-import type { Automation, Card, EndedSession, HistoryEntry, TaskChanges, UnpushedWork } from "../../shared/api.ts";
+import type { Automation, Card, EndedSession, HistoryEntry, TaskChanges, TaskDetail, UnpushedWork } from "../../shared/api.ts";
 import { gatewayZone, hostOrigin } from "../../shared/hosts.ts";
 import { projectCards } from "../cards.ts";
+import { Clock } from "../clock.ts";
 import { taskChanges } from "../changes.ts";
 import { CLOUDFLARE_API_PREFIX, CloudflareBroker } from "../cloudflare.ts";
 import type { GatewayConfig } from "../config.ts";
@@ -17,6 +18,7 @@ import {
   defaultBaseRef,
   deleteBranch,
   fetchOrigin,
+  git,
   removeWorktree,
   restoreSnapshot,
   saveSnapshot,
@@ -31,12 +33,22 @@ import type { LaunchInput, Runtime, WorkspaceDirs } from "../runtime/runtime.ts"
 import { newestTranscript } from "../transcript.ts";
 import { Folders } from "./folders.ts";
 import { ProjectMoves } from "./move.ts";
-import { handleStoreApi, type RunInput, type SessionInput, type StoreContext } from "./http.ts";
-import { folderOwnerOf, runShortId, Store, StoreError, type Principal, type Project, type Session, type SessionRuntime, type Task } from "./store.ts";
+import {
+  handleStoreApi,
+  type AutomationSessionInput,
+  type RunEndInput,
+  type RunInput,
+  type RunTaskInput,
+  type SessionInput,
+  type StoreContext,
+} from "./http.ts";
+import { checkOutcome, deleteRemoteBranch, endModeSection, MEMORY_FILE, overTimeLimit, runOutputs, runPrompt, turnEnded, type AgentOutcome } from "./runs.ts";
+import { folderOwnerOf, runShortId, Store, StoreError, type Principal, type Project, type RunOutcome, type Session, type SessionRuntime, type Task } from "./store.ts";
 
 type ServiceConfig = Pick<
   GatewayConfig,
-  "workspaceRuntime" | "workspaceMemoryMib" | "machineName" | "ompAgentDir" | "credentialsHome" | "cloudflareApi" | "ownerEmail" | "publicOrigin"
+  | "workspaceRuntime" | "workspaceMemoryMib" | "machineName" | "ompAgentDir" | "credentialsHome" | "cloudflareApi" | "ownerEmail" | "publicOrigin"
+  | "clockOffsetFile"
 >;
 
 export interface TernUpstream {
@@ -79,6 +91,12 @@ export class StoreService implements StoreContext {
   private readonly runtimes: Record<SessionRuntime, Runtime> | null;
   private readonly config: ServiceConfig;
   private readonly cloudflare: CloudflareBroker;
+  /** AUTO-14: the time runs' time limits are measured on. */
+  private readonly clock: Clock;
+  /** AUTO-10: runs whose agent said how they went; each ends when its agent's turn does. */
+  private readonly ending = new Set<string>();
+  /** AUTO-10, AUTO-14: runs being ended without a person, each once, whoever asks. */
+  private readonly runStops = new Map<string, Promise<void>>();
 
   constructor(stateDir: string, config: ServiceConfig) {
     this.store = new Store(join(stateDir, "store.sqlite"), userInfo().username);
@@ -93,6 +111,7 @@ export class StoreService implements StoreContext {
       : null;
     this.config = config;
     this.cloudflare = new CloudflareBroker({ store: this.store, upstream: config.cloudflareApi });
+    this.clock = new Clock(config.clockOffsetFile);
     this.moves = new ProjectMoves({
       store: this.store,
       folders: this.folders,
@@ -335,24 +354,51 @@ export class StoreService implements StoreContext {
   }
 
   /**
-   * AUTO-9: what a run's agent is told besides its first prompt: the automation and the run it
-   * serves, the run's own branch, and the automation's folder, which all its runs share.
+   * AUTO-9, AUTO-10: what a run's agent is told besides its first prompt: the automation and the
+   * run it serves, the run's own branch, how the run ends, and the automation's folder, which all
+   * its runs share. AUTO-11: a session on the automation that is no run is told so instead, and
+   * which run it goes on from: the run whose branch it has.
    */
-  private runContext(run: Session): string {
-    const owner = folderOwnerOf(run);
-    const { automation } = this.store.getAutomation(this.store.ownerPrincipal(), owner.id);
-    const folder = run.runtime === "container" ? CONTAINER_FOLDER : this.folders.dir(owner);
-    const sections = [
-      "# Your automation",
-      `You serve the automation "${automation.name}" (id ${automation.id}): this session is its run ${runShortId(run.id)} (session id ${run.id}), ` +
-        `started ${run.run?.startedBy == null ? "by one of its triggers" : "by hand"}. It belongs to no task.`,
-      run.branch === null
-        ? "The run works on no branch."
-        : `The run works on its own branch \`${run.branch}\`, made for it from \`${run.baseRef ?? "the default branch"}\`; only what is committed and pushed to it outlives the run.`,
-      "The automation's instructions are this chat's first prompt. `am automation show` prints the automation as it is now.",
+  private runContext(session: Session, restored: RestoredSnapshot = { kind: "none" }): string {
+    const owner = folderOwnerOf(session);
+    const { automation, runs } = this.store.getAutomation(this.store.ownerPrincipal(), owner.id);
+    const sections = ["# Your automation"];
+    if (session.run !== null) {
+      sections.push(
+        `You serve the automation "${automation.name}" (id ${automation.id}): this session is its run ${runShortId(session.id)} (session id ${session.id}), ` +
+          `started ${session.run.startedBy === null ? "by one of its triggers" : "by hand"}. It belongs to no task.`,
+        session.branch === null
+          ? "The run works on no branch."
+          : `The run works on its own branch \`${session.branch}\`, made for it from \`${session.baseRef ?? "the default branch"}\`; only what is committed and pushed to it outlives the run.`,
+        "This chat's first prompt holds the automation's instructions, what started the run, and the automation's memory. `am automation show` prints the automation as it is now.",
+        endModeSection(automation, session),
+      );
+    } else {
+      const from = session.branch === null ? undefined : runs.find((run) => run.run !== null && run.branch === session.branch);
+      sections.push(
+        `You work with a person on the automation "${automation.name}" (id ${automation.id}). This session is on the automation, not one of its runs: ` +
+          "it has no end mode and no time limit, and it ends when a person ends it. It belongs to no task.",
+        from === undefined
+          ? `It works on its own branch \`${session.branch ?? "none"}\`, made from \`${session.baseRef ?? "the default branch"}\`; only what is committed and pushed to it outlives the session.`
+          : `It goes on from run ${runShortId(from.id)} (session ${from.id}, outcome ${from.run?.outcome ?? "none"}): it works on the run's branch \`${from.branch ?? ""}\`, ` +
+            `and the run's outputs are in \`${runOutputs(from.id)}/\` of the folder.`,
+        "`am automation show` prints the automation, its instructions, and its runs; `am run task RUN` makes a task of a run, which takes over the run's branch.",
+      );
+    }
+    sections.push(
       "## Folder",
-      `The automation's folder is the directory \`${folder}\`, outside the worktree and outside git. Every run of the automation shares it.`,
-    ];
+      `The automation's folder is the directory \`${session.runtime === "container" ? CONTAINER_FOLDER : this.folders.dir(owner)}\`, outside the worktree and outside git. Every run of the automation shares it; ` +
+        `\`${MEMORY_FILE}\` in it is the automation's memory, which every run starts with, and \`runs/<run>/\` holds each run's outputs.`,
+    );
+    if (restored.kind === "restored") {
+      sections.push("## Restored work", "The run ended with uncommitted changes. They are back in the worktree, still uncommitted.");
+    } else if (restored.kind === "conflicts") {
+      sections.push(
+        "## Restored work",
+        "The run ended with uncommitted changes that did not apply cleanly to the branch as it is now. " +
+          `Conflicts are marked in the files where git could merge; the whole snapshot is kept at \`${restored.kept}\` (\`git diff ${restored.kept}^ ${restored.kept}\`).`,
+      );
+    }
     return `${sections.join("\n\n")}\n`;
   }
 
@@ -460,10 +506,13 @@ export class StoreService implements StoreContext {
       worktreeAdded = true;
       this.store.setSessionBranch(created.id, branch, baseRef);
       const started = { ...created, branch, baseRef };
+      // AUTO-13: memory.md as the run starts; a link there is no memory (an agent can make those).
+      const folder = this.folders.dir(folderOwnerOf(started));
+      const memory = join(folder, MEMORY_FILE);
       await this.launch(runtime, repo, project, started, {
         model: automation.model,
         resume: null,
-        prompt: automation.instructions,
+        prompt: runPrompt(automation, started, lstatSync(memory, { throwIfNoEntry: false })?.isFile() === true ? readFileSync(memory) : null, kind === "container" ? CONTAINER_FOLDER : folder),
         taskContext: this.runContext(started),
       });
       return started;
@@ -495,16 +544,199 @@ export class StoreService implements StoreContext {
   }
 
   /**
+   * AUTO-11: starts a session on the automation that is no run, for a person to work on it with
+   * its agent: on a branch of its own from the default branch, or from a run (`fromRun`), on the
+   * run's branch with the run's uncommitted work restored; the run's outputs are in the folder
+   * the session gets. A run whose session goes on is gone on with in that session instead.
+   * Undone if the launch fails.
+   */
+  async startAutomationSession(principal: Principal, automationId: string, input: AutomationSessionInput): Promise<Session> {
+    const { automation } = this.store.getAutomation(principal, automationId);
+    const project = this.store.getProject(principal, automation.projectId);
+    let from: Session | null = null;
+    if (input.fromRun !== undefined) {
+      const { session: found } = this.store.getSession(principal, input.fromRun);
+      if (found.automationId !== automationId || found.run === null) throw new StoreError(404, `"${automation.name}" has no run ${input.fromRun}`);
+      if (found.endedAt === null) {
+        throw new StoreError(409, `run ${runShortId(found.id)} of "${automation.name}" is still going: go on in its session instead`, { sessionId: found.id });
+      }
+      from = found;
+    }
+    const kind = input.runtime ?? "container";
+    const runtime = this.runtimes?.[kind] ?? null;
+    if (runtime !== null && project.repoPath === null) {
+      throw new StoreError(400, `project ${project.name} has no repository to create a worktree from`);
+    }
+    const repo = runtime === null ? null : project.repoPath;
+    const created = this.store.createAutomationSession(principal, automationId, { model: input.model, machine: this.config.machineName, runtime: kind });
+    const dirs = this.dirs(created.id);
+    const starting = Promise.withResolvers<void>();
+    this.starts.set(created.id, starting.promise);
+    const branch = from?.branch ?? `am/${automation.slug}-${runShortId(created.id)}`;
+    let worktreeAdded = false;
+    try {
+      await this.listen(created.id);
+      if (runtime === null || repo === null) return created;
+      const hasOrigin = await fetchOrigin(repo);
+      const baseRef = from?.baseRef ?? await defaultBaseRef(repo, hasOrigin);
+      // A run's branch is reused, or taken from origin; a branch nothing has any more starts again from its base.
+      await addWorktree(repo, branch, dirs.worktree, baseRef);
+      worktreeAdded = true;
+      this.store.setSessionBranch(created.id, branch, baseRef);
+      let restored: RestoredSnapshot = { kind: "none" };
+      if (from !== null) restored = await restoreSnapshot(repo, dirs.worktree, snapshotRef(from.id));
+      const started = { ...created, branch, baseRef };
+      await this.launch(runtime, repo, project, started, {
+        model: input.model ?? automation.model,
+        resume: null,
+        prompt: null,
+        taskContext: this.runContext(started, restored),
+      });
+      return started;
+    } catch (cause) {
+      this.unlisten(created.id);
+      let workspaceGone = true;
+      if (runtime !== null && repo !== null) {
+        await runtime.remove(created.id).catch(() => undefined);
+        // A run's restored work goes back to the run; a branch made a moment ago goes.
+        workspaceGone = !worktreeAdded || await (from === null
+          ? removeWorktree(repo, dirs.worktree).then(() => deleteBranch(repo, branch))
+          : saveSnapshot(repo, dirs.worktree, snapshotRef(from.id)).then(() => removeWorktree(repo, dirs.worktree)))
+          .then(() => true, () => false);
+      }
+      if (workspaceGone) rmSync(dirs.root, { recursive: true, force: true });
+      this.store.discardSession(created.id);
+      throw new StoreError(500, `could not launch the session: ${failure(cause)}`);
+    } finally {
+      this.starts.delete(created.id);
+      starting.resolve();
+    }
+  }
+
+  /**
+   * AUTO-10: a run says how it went: its own agent (`am run end`), or a person. The outcome must
+   * suit the automation's end mode (Wait for review deploys only after a review) and be true of
+   * the run's work (checkOutcome); nothing to deploy also deletes the branch from origin. `review`
+   * leaves the session open, waiting on a person; any other outcome ends it once its agent's
+   * turn ends, so the agent's last reply stays in its chat.
+   */
+  async endRun(principal: Principal, runId: string, input: RunEndInput): Promise<Session> {
+    const { session, automation } = this.store.getSession(principal, runId);
+    if (session.run === null || automation === null) throw new StoreError(404, `session ${session.name} is no run of an automation`);
+    if (principal.kind === "agent" && principal.sessionId !== runId) throw new StoreError(403, "how a run went is for its own agent or a person to say");
+    if (session.endedAt !== null || this.ending.has(runId) || this.runStops.has(runId)) {
+      throw new StoreError(409, `run ${runShortId(runId)} has ended or is ending (${session.run.outcome ?? "ended"})`);
+    }
+    const outcome: AgentOutcome = input.outcome;
+    if (outcome === "review" && automation.endMode !== "review") {
+      throw new StoreError(409, `"${automation.name}" ends its runs with Finish: deploy and end with finished, or end with nothing_to_deploy or failed`);
+    }
+    if (outcome === "finished" && automation.endMode === "review" && session.run.outcome !== "review") {
+      throw new StoreError(409, `"${automation.name}" waits for review before it deploys: push the branch and end with review; a person tells you when to deploy`);
+    }
+    const repo = this.runtimes === null ? null : this.store.getProject(principal, session.projectId).repoPath;
+    const dirs = this.dirs(runId);
+    if (repo !== null && existsSync(dirs.worktree)) {
+      try {
+        await checkOutcome(repo, dirs.worktree, session, outcome);
+        if (outcome === "nothing_to_deploy" && session.branch !== null) await deleteRemoteBranch(repo, session.branch);
+      } catch (cause) {
+        if (cause instanceof StoreError) throw cause;
+        throw new StoreError(500, `could not check the run's branch: ${failure(cause)}`);
+      }
+    }
+    this.store.setRunOutcome(runId, outcome, input.reason ?? null);
+    if (outcome !== "review") {
+      this.ending.add(runId);
+      void turnEnded(dirs.run).then(() => this.stopRun(runId, principal, outcome)).finally(() => this.ending.delete(runId));
+    }
+    return this.store.getSession(principal, runId).session;
+  }
+
+  /**
+   * AUTO-10, AUTO-14: ends a run without a person: its agent said how it went (`endedBy`), or its
+   * time limit stopped it (null, `timed_out`). Its work is kept as a person's ending keeps it
+   * (endSession); a run with nothing to deploy loses its branch. Once per run, whoever asks.
+   */
+  private stopRun(runId: string, endedBy: Principal | null, outcome: RunOutcome): Promise<void> {
+    const pending = this.runStops.get(runId);
+    if (pending !== undefined) return pending;
+    const stopping = (async () => {
+      const { session } = this.store.getSession(this.store.ownerPrincipal(), runId);
+      if (session.endedAt !== null) return;
+      const { session: ended } = await this.closeSession(session, () => this.store.endRun(endedBy, runId, outcome));
+      const repo = this.runtimes === null ? null : this.store.getProject(this.store.ownerPrincipal(), ended.projectId).repoPath;
+      if (ended.run?.outcome === "nothing_to_deploy" && repo !== null && ended.branch !== null) await deleteBranch(repo, ended.branch);
+    })()
+      .catch((cause: unknown) => console.error(`could not end run ${runId}: ${failure(cause)}`))
+      .finally(() => this.runStops.delete(runId));
+    this.runStops.set(runId, stopping);
+    return stopping;
+  }
+
+  /** AUTO-14: stops every run past its automation's time limit by the gateway's clock; on every tick, and when the gateway starts. */
+  private stopRunsOverTime(): void {
+    const system = this.store.ownerPrincipal();
+    const now = this.clock.now();
+    for (const id of this.store.runningSessionIds()) {
+      const { session, automation } = this.store.getSession(system, id);
+      if (automation !== null && overTimeLimit(session, automation, now)) void this.stopRun(id, null, "timed_out");
+    }
+  }
+
+  /**
+   * AUTO-12: makes a task of a run. The task takes over the run's branch and the uncommitted work
+   * the run left (its snapshot, SESSION-9), and the run's outputs are copied into the task's
+   * folder, under the same `runs/<run>/`: copies, so the task keeps them whatever becomes of the
+   * automation. A run still going ends first, which only a person does.
+   */
+  async taskFromRun(principal: Principal, runId: string, input: RunTaskInput): Promise<TaskDetail> {
+    const { session, automation } = this.store.getSession(principal, runId);
+    if (session.run === null || automation === null) throw new StoreError(404, `session ${session.name} is no run of an automation`);
+    await this.runStops.get(runId);
+    if (this.store.getSession(principal, runId).session.endedAt === null) {
+      if (principal.kind !== "human") throw new StoreError(409, `run ${runShortId(runId)} is still going: end it first (am run end), or ask a person to make the task`);
+      await this.endSession(principal, runId);
+    }
+    const short = runShortId(runId);
+    const outputs = runOutputs(runId);
+    const task = this.store.createTask(principal, session.projectId, {
+      title: input.title ?? `${automation.name}: run ${short}`,
+      description: input.description ??
+        `Made from run ${short} of the automation "${automation.name}" (session ${runId}). ` +
+          `The task works on the run's branch${session.branch === null ? "" : ` \`${session.branch}\``}; the run's outputs are copied into this task's folder under \`${outputs}/\`.`,
+    });
+    if (session.branch !== null && session.baseRef !== null) {
+      this.store.setTaskBranch(task.id, session.branch, session.baseRef);
+      const repo = this.runtimes === null ? null : this.store.getProject(principal, session.projectId).repoPath;
+      if (repo !== null && (await git(repo, ["for-each-ref", snapshotRef(runId)])) !== "") {
+        await git(repo, ["update-ref", snapshotRef(task.id), snapshotRef(runId)]);
+        await git(repo, ["update-ref", "-d", snapshotRef(runId)]);
+      }
+    }
+    this.folders.copy(principal, { kind: "automation", id: automation.id }, outputs, { kind: "task", id: task.id });
+    return this.store.getTask(principal, task.id);
+  }
+
+  /**
    * SESSION-8/SESSION-9: removes the session's workspace and keeps its chats (omp-home) and its
    * branch. Uncommitted work becomes the task's snapshot first, or the run's (AUTO-9), so ending
    * never loses it; `kept` lists those files. A checkout session (HOST-6) only stops: the main
    * checkout and its uncommitted work stay as they are.
    */
   async endSession(principal: Principal, sessionId: string): Promise<EndedSession> {
-    const { session } = this.store.getSession(principal, sessionId);
     if (principal.kind !== "human") throw new StoreError(403, "only a human can do this");
+    // A run its agent or its time limit is ending ends that way.
+    await this.runStops.get(sessionId);
+    const { session } = this.store.getSession(principal, sessionId);
     if (session.endedAt !== null) throw new StoreError(409, `session ${session.name} has already ended`);
-    const project = this.store.getProject(principal, session.projectId);
+    return this.closeSession(session, () => this.store.endSession(principal, sessionId));
+  }
+
+  /** Ends the session as endSession says; `record` records the end in the store once the workspace has stopped. */
+  private async closeSession(session: Session, record: () => Session): Promise<EndedSession> {
+    const sessionId = session.id;
+    const project = this.store.getProject(this.store.ownerPrincipal(), session.projectId);
     const dirs = this.dirs(sessionId);
     const runtime = this.runtimes?.[session.runtime] ?? null;
     const repo = runtime === null || session.checkout ? null : project.repoPath;
@@ -520,7 +752,7 @@ export class StoreService implements StoreContext {
     }
     // Recorded now, what its agent wrote into the folder is the agent's; after the session, no one is known to write there (FOLDER-3).
     this.folders.sync(folderOwnerOf(session));
-    const ended = this.store.endSession(principal, sessionId);
+    const ended = record();
     this.unlisten(sessionId);
     if (repo !== null) {
       try {
@@ -566,13 +798,27 @@ export class StoreService implements StoreContext {
     return this.store.finishTask(principal, taskId, state);
   }
 
-  /** Re-open every running session's socket after a gateway restart. */
+  /**
+   * Re-open every running session's socket after a gateway restart. AUTO-14: runs' time limits
+   * hold across restarts: the runs past theirs stop now, the others on a later tick. AUTO-10: a
+   * run whose agent said how it went before the restart ends once its turn does, as its agent's.
+   */
   async start(): Promise<void> {
     await Promise.all(this.store.runningSessionIds().map((id) => this.listen(id)));
+    const system = this.store.ownerPrincipal();
+    for (const id of this.store.runningSessionIds()) {
+      const outcome = this.store.getSession(system, id).session.run?.outcome ?? null;
+      if (outcome === null || outcome === "review") continue;
+      this.ending.add(id);
+      void turnEnded(this.dirs(id).run).then(() => this.stopRun(id, { kind: "agent", sessionId: id }, outcome)).finally(() => this.ending.delete(id));
+    }
+    this.clock.onTick(() => this.stopRunsOverTime());
+    this.stopRunsOverTime();
   }
 
   /** Closes the agent sockets and the database; for a dev server that reloads its config. */
   close(): void {
+    this.clock.close();
     for (const id of [...this.servers.keys()]) this.unlisten(id);
     this.store.close();
   }

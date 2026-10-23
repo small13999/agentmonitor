@@ -41,7 +41,11 @@ function isTaskState(value: unknown): value is TaskState {
   return TASK_STATES.some((state) => state === value);
 }
 
-/** SESSION-5: a session belongs to one task or one automation; AUTO-9: a session of an automation is one of its runs. */
+/**
+ * SESSION-5: a session belongs to one task or one automation; AUTO-9: a session of an automation
+ * is one of its runs when it has a trigger context (empty for "run now"), and otherwise a session
+ * on the automation (AUTO-11).
+ */
 function sessionsTable(name: string): string {
   return `CREATE TABLE ${name} (
   id TEXT PRIMARY KEY,
@@ -63,6 +67,7 @@ function sessionsTable(name: string): string {
   run_outcome TEXT,
   run_ended_by_kind TEXT,
   run_ended_by_id TEXT,
+  run_reason TEXT,
   CHECK ((task_id IS NULL) != (automation_id IS NULL))
 );`;
 }
@@ -357,7 +362,7 @@ function sessionEvent(found: Session, event: "started" | "ended"): HistoryEvent 
   return { kind: "session", sessionId: found.id, event, machine: found.machine, runtime: found.runtime };
 }
 
-const RUN_OUTCOMES: readonly RunOutcome[] = ["finished", "review", "timed_out", "failed", "ended"];
+const RUN_OUTCOMES: readonly RunOutcome[] = ["finished", "nothing_to_deploy", "review", "timed_out", "failed", "ended"];
 
 function session(row: Row): Session {
   return {
@@ -374,10 +379,11 @@ function session(row: Row): Session {
     model: row.model === null ? null : String(row.model),
     startedAt: Number(row.started_at),
     endedAt: row.ended_at === null ? null : Number(row.ended_at),
-    run: row.automation_id === null ? null : {
+    run: row.automation_id === null || row.run_trigger_context === null ? null : {
       startedBy: actorOfRow(row.run_started_by_kind, row.run_started_by_id),
-      triggerContext: row.run_trigger_context === null ? "" : String(row.run_trigger_context),
+      triggerContext: String(row.run_trigger_context),
       outcome: RUN_OUTCOMES.find((outcome) => outcome === row.run_outcome) ?? null,
+      reason: row.run_reason === null ? null : String(row.run_reason),
       endedBy: actorOfRow(row.run_ended_by_kind, row.run_ended_by_id),
     },
   };
@@ -473,6 +479,8 @@ export class Store {
     this.addColumn("sessions", "runtime", "TEXT NOT NULL DEFAULT 'container'");
     this.addColumn("sessions", "checkout", "INTEGER NOT NULL DEFAULT 0");
     this.migrateSessionOwners();
+    // AUTO-10: stores from before runs said why they failed.
+    this.addColumn("sessions", "run_reason", "TEXT");
     // PERSON-1: every store has its owner; TASK-13 and UI-4 on stores from before people.
     if (this.db.prepare("SELECT 1 FROM people WHERE owner = 1").get() === undefined) {
       this.db.prepare("INSERT INTO people (id, name, color, owner, created_at) VALUES (?, ?, ?, 1, ?)").run(randomUUID(), ownerName, PALETTE[5], Date.now());
@@ -1209,19 +1217,34 @@ export class Store {
    */
   endSession(principal: Principal, sessionId: string): Session {
     this.requireHuman(principal);
+    return this.transaction(() => this.closeSession(principal, this.visibleSession(principal, sessionId)));
+  }
+
+  /**
+   * AUTO-10, AUTO-14: a run that ends without a person: its agent said how it went (`endedBy`
+   * that agent), or its time limit stopped it (`endedBy` null), which says so as its outcome
+   * unless it already had one.
+   */
+  endRun(endedBy: Principal | null, sessionId: string, outcome: RunOutcome): Session {
     return this.transaction(() => {
-      const found = this.visibleSession(principal, sessionId);
-      if (found.endedAt !== null) throw new StoreError(409, `session ${found.name} has already ended`);
-      const endedAt = Date.now();
-      this.db.prepare("UPDATE sessions SET ended_at = ? WHERE id = ?").run(endedAt, sessionId);
-      if (found.taskId !== null) this.recordTaskEvent(found.taskId, principal, sessionEvent(found, "ended"), endedAt);
-      if (found.run === null) return { ...found, endedAt };
-      const endedBy = actorOf(principal);
-      const outcome = found.run.outcome ?? "ended";
-      const [kind, id] = actorColumns(endedBy);
-      this.db.prepare("UPDATE sessions SET run_outcome = ?, run_ended_by_kind = ?, run_ended_by_id = ? WHERE id = ?").run(outcome, kind, id, sessionId);
-      return { ...found, endedAt, run: { ...found.run, outcome, endedBy } };
+      const found = this.visibleSession(this.ownerPrincipal(), sessionId);
+      if (found.run === null) throw new StoreError(404, `session ${found.name} is no run`);
+      if (found.run.outcome === null) this.db.prepare("UPDATE sessions SET run_outcome = ? WHERE id = ?").run(outcome, sessionId);
+      return this.closeSession(endedBy, { ...found, run: { ...found.run, outcome: found.run.outcome ?? outcome } });
     });
+  }
+
+  private closeSession(principal: Principal | null, found: Session): Session {
+    if (found.endedAt !== null) throw new StoreError(409, `session ${found.name} has already ended`);
+    const endedAt = Date.now();
+    this.db.prepare("UPDATE sessions SET ended_at = ? WHERE id = ?").run(endedAt, found.id);
+    if (found.taskId !== null) this.recordTaskEvent(found.taskId, principal, sessionEvent(found, "ended"), endedAt);
+    if (found.run === null) return { ...found, endedAt };
+    const endedBy = principal === null ? null : actorOf(principal);
+    const outcome = found.run.outcome ?? "ended";
+    const [kind, id] = actorColumns(endedBy);
+    this.db.prepare("UPDATE sessions SET run_outcome = ?, run_ended_by_kind = ?, run_ended_by_id = ? WHERE id = ?").run(outcome, kind, id, found.id);
+    return { ...found, endedAt, run: { ...found.run, outcome, endedBy } };
   }
 
   /** TASK-9: records a finished task; its session and branch are the caller's job. */
@@ -1239,16 +1262,18 @@ export class Store {
   /**
    * FOLDER-1, FOLDER-3: brings an owner's recorded files in line with what its folder's
    * directory holds, `entries`. A file that appeared there was written by the agent of the
-   * task's running session, or of the automation's running run, the only one with the
-   * directory; with none running, by no one known. New files of a task go into its history
-   * (TASK-14) as added when they were written.
+   * task's running session, or of the automation's running session (its run, or the newest
+   * session on it, AUTO-11), the only ones with the directory; with none running, by no one
+   * known. New files of a task go into its history (TASK-14) as added when they were written.
    */
   syncFolder(owner: FolderOwner, entries: FolderEntry[]): FolderFile[] {
     const { table, column } = folderTable(owner);
     return this.transaction(() => {
       const recorded = new Map(this.db.prepare(`SELECT * FROM ${table} WHERE ${column} = ?`).all(owner.id).map((row) => [String(row.path), folderFile(row)]));
-      const running = owner.kind === "task" ? this.runningSessionOf(owner.id) : this.runningRunOf(owner.id);
-      const writer: Principal | null = running === null ? null : { kind: "agent", sessionId: running.id };
+      const running = owner.kind === "task"
+        ? this.runningSessionOf(owner.id)
+        : this.db.prepare("SELECT id FROM sessions WHERE automation_id = ? AND ended_at IS NULL ORDER BY started_at DESC").get(owner.id) ?? null;
+      const writer: Principal | null = running === null ? null : { kind: "agent", sessionId: String(running.id) };
       for (const entry of entries) {
         const known = recorded.get(entry.path);
         recorded.delete(entry.path);
@@ -1299,9 +1324,9 @@ export class Store {
     this.db.prepare(`DELETE FROM ${table} WHERE ${column} = ? AND path = ?`).run(owner.id, path);
   }
 
-  /** AUTO-9: the automation's run that is still going, if any. */
+  /** AUTO-9: the automation's run that is still going, if any; a session on it that is no run does not count. */
   private runningRunOf(automationId: string): Session | null {
-    const row = this.db.prepare("SELECT * FROM sessions WHERE automation_id = ? AND ended_at IS NULL").get(automationId);
+    const row = this.db.prepare("SELECT * FROM sessions WHERE automation_id = ? AND run_trigger_context IS NOT NULL AND ended_at IS NULL").get(automationId);
     return row === undefined ? null : session(row);
   }
 
@@ -1449,7 +1474,7 @@ export class Store {
     });
   }
 
-  /** AUTO-7, AUTO-9: the automation's runs, newest first. */
+  /** AUTO-7, AUTO-9, AUTO-11: the automation's runs, and the sessions on it that are none (`run` null), newest first. */
   listRuns(principal: Principal, automationId: string): Session[] {
     this.visibleAutomation(principal, automationId);
     return this.db.prepare("SELECT * FROM sessions WHERE automation_id = ? ORDER BY started_at DESC").all(automationId).map(session);
@@ -1525,7 +1550,7 @@ export class Store {
         model: owner.model,
         startedAt: Date.now(),
         endedAt: null,
-        run: { startedBy, triggerContext: input.triggerContext ?? "", outcome: null, endedBy: null },
+        run: { startedBy, triggerContext: input.triggerContext ?? "", outcome: null, reason: null, endedBy: null },
       };
       const [kind, id] = actorColumns(startedBy);
       this.db.prepare(
@@ -1536,9 +1561,45 @@ export class Store {
     });
   }
 
-  /** AUTO-10, AUTO-14: how a run ended, or ends: its end mode's outcome, or that it timed out. */
-  setRunOutcome(sessionId: string, outcome: RunOutcome): void {
-    this.db.prepare("UPDATE sessions SET run_outcome = ? WHERE id = ? AND automation_id IS NOT NULL").run(outcome, sessionId);
+  /** AUTO-10: how a run ended, or waits for review, and why; it ends separately (endRun). */
+  setRunOutcome(sessionId: string, outcome: RunOutcome, reason: string | null): void {
+    this.db.prepare("UPDATE sessions SET run_outcome = ?, run_reason = ? WHERE id = ? AND run_trigger_context IS NOT NULL").run(outcome, reason, sessionId);
+  }
+
+  /**
+   * AUTO-11: a session on the automation that is no run: a person works on it with its agent,
+   * on a branch of its own or a run's. Like a task's session (TASK-3), people start it; host
+   * ones only the owner, where the project allows them (HOST-1). Its worktree and container are
+   * the caller's job.
+   */
+  createAutomationSession(principal: Principal, automationId: string, input: { machine?: string; model?: string; runtime: SessionRuntime }): Session {
+    if (input.runtime === "host") this.requireOwner(principal);
+    else this.requireHuman(principal);
+    return this.transaction(() => {
+      const owner = this.visibleAutomation(principal, automationId);
+      if (input.runtime === "host" && !this.visibleProject(principal, owner.projectId).hostSessions) {
+        throw new StoreError(403, "this project does not allow host sessions");
+      }
+      const created: Session = {
+        id: randomUUID(),
+        projectId: owner.projectId,
+        taskId: null,
+        automationId,
+        name: owner.name,
+        branch: null,
+        baseRef: null,
+        machine: input.machine ?? null,
+        runtime: input.runtime,
+        checkout: false,
+        model: input.model ?? owner.model,
+        startedAt: Date.now(),
+        endedAt: null,
+        run: null,
+      };
+      this.db.prepare("INSERT INTO sessions (id, project_id, automation_id, name, machine, runtime, checkout, model, started_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)")
+        .run(created.id, created.projectId, automationId, created.name, created.machine, created.runtime, created.model, created.startedAt);
+      return created;
+    });
   }
 
   /**
@@ -1674,10 +1735,11 @@ export class Store {
         const [endedKind, endedId] = actorColumns(actorHere(found.run?.endedBy ?? null));
         this.db.prepare(
           "INSERT INTO sessions (id, project_id, task_id, automation_id, name, branch, base_ref, machine, runtime, checkout, model, started_at, ended_at, " +
-            "run_started_by_kind, run_started_by_id, run_trigger_context, run_outcome, run_ended_by_kind, run_ended_by_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "run_started_by_kind, run_started_by_id, run_trigger_context, run_outcome, run_ended_by_kind, run_ended_by_id, run_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         ).run(
           found.id, moved.id, found.taskId, found.automationId, found.name, found.branch, found.baseRef, found.machine, found.runtime, found.checkout ? 1 : 0,
           found.model, found.startedAt, found.endedAt, startedKind, startedId, found.run?.triggerContext ?? null, found.run?.outcome ?? null, endedKind, endedId,
+          found.run?.reason ?? null,
         );
       }
       for (const found of records.firings) {

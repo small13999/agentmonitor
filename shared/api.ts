@@ -145,9 +145,9 @@ export type SessionRuntime = "container" | "host";
 export interface Session {
   id: string;
   projectId: string;
-  /** The task it works on; null for a run of an automation. */
+  /** The task it works on; null for a session of an automation. */
   taskId: string | null;
-  /** AUTO-9: the automation it is a run of; null for a task's session. */
+  /** The automation it belongs to: one of its runs (AUTO-9), or a session on it that is none (AUTO-11); null for a task's session. */
   automationId: string | null;
   /** The task's title, or the automation's name, when the session started. */
   name: string;
@@ -162,7 +162,7 @@ export interface Session {
   model: string | null;
   startedAt: number;
   endedAt: number | null;
-  /** What a run of an automation has besides a session's fields; null for a task's session. */
+  /** What a run of an automation has besides a session's fields; null for a task's session, and for a session on an automation that is no run (AUTO-11). */
   run: Run | null;
 }
 
@@ -207,10 +207,12 @@ export interface Trigger {
 }
 
 /**
- * How a run ended; null on a run that has not. `ended`: a person ended its session before
- * anything else said how it went.
+ * How a run ended, or waits (AUTO-10); null on a run that has not said. `finished`: it deployed
+ * its work; `nothing_to_deploy`: it had none, and its branch is deleted; `review`: it waits for a
+ * person, its session open; `timed_out`: its time limit stopped it (AUTO-14); `failed`: its agent
+ * gave up, saying why; `ended`: a person ended its session before anything else said how it went.
  */
-export type RunOutcome = "finished" | "review" | "timed_out" | "failed" | "ended";
+export type RunOutcome = "finished" | "nothing_to_deploy" | "review" | "timed_out" | "failed" | "ended";
 
 /** AUTO-9: a session of an automation is one of its runs. */
 export interface Run {
@@ -219,7 +221,9 @@ export interface Run {
   /** What its trigger's guard and check found, which its prompt holds (AUTO-13); empty for "run now". */
   triggerContext: string;
   outcome: RunOutcome | null;
-  /** PERSON-1: who ended its session; null while it runs, or when it ended on its own. */
+  /** Why it failed, or what else its agent said with its outcome; null: nothing. */
+  reason: string | null;
+  /** PERSON-1: who ended its session: a person, or its own agent with its outcome (AUTO-10); null while it runs, or when its time limit stopped it. */
   endedBy: Actor | null;
 }
 

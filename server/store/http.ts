@@ -2,7 +2,7 @@ import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from "node:
 import type { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { z } from "zod";
-import type { Automation, Card, EndedSession, HistoryEntry, TaskChanges } from "../../shared/api.ts";
+import type { Automation, Card, EndedSession, HistoryEntry, TaskChanges, TaskDetail } from "../../shared/api.ts";
 import { email } from "../config.ts";
 import { folderPath } from "./bundle.ts";
 import type { Folders } from "./folders.ts";
@@ -20,6 +20,12 @@ export interface StoreContext {
   startSession(principal: Principal, taskId: string, input: SessionInput): Promise<Session>;
   /** AUTO-9: "run now": records a run of the automation and launches it on its own branch; undone if the launch fails. */
   startRun(principal: Principal | null, automationId: string, input: RunInput): Promise<Session>;
+  /** AUTO-11: a session on the automation that is no run, optionally from a run: its branch and its outputs. */
+  startAutomationSession(principal: Principal, automationId: string, input: AutomationSessionInput): Promise<Session>;
+  /** AUTO-10: a run's agent, or a person, says how the run went; all but review end it once its agent's turn ends. */
+  endRun(principal: Principal, runId: string, input: RunEndInput): Promise<Session>;
+  /** AUTO-12: a task that takes over the run's branch, with the run's outputs copied into its folder. */
+  taskFromRun(principal: Principal, runId: string, input: RunTaskInput): Promise<TaskDetail>;
   /** Deletes an automation with its runs' records and chats, and its folder. */
   deleteAutomation(principal: Principal, automationId: string): Automation;
   /** Ends the session and removes its workspace; its uncommitted work becomes the task's snapshot. */
@@ -74,6 +80,22 @@ export type RunInput = z.infer<typeof runBody> & {
   /** AUTO-13: what the trigger's guard and check found; the scheduler's, never a request's. */
   triggerContext?: string;
 };
+// AUTO-11: a session on an automation that is no run; `fromRun` goes on from a run's branch and outputs.
+const automationSessionBody = z.strictObject({
+  model: z.string().min(1).optional(),
+  runtime: z.enum(["container", "host"]).optional(),
+  fromRun: z.uuid().optional(),
+});
+export type AutomationSessionInput = z.infer<typeof automationSessionBody>;
+// AUTO-10: how a run went, as its agent says it; a failed run says why.
+const runEndBody = z.strictObject({
+  outcome: z.enum(["finished", "nothing_to_deploy", "review", "failed"]),
+  reason: z.string().trim().min(1).max(4000).optional(),
+}).refine((input) => input.outcome !== "failed" || input.reason !== undefined, { message: "a failed run says why (reason)", path: ["reason"] });
+export type RunEndInput = z.infer<typeof runEndBody>;
+// AUTO-12: the task's title and description; by default they name the run.
+const runTaskBody = z.strictObject({ title: name.optional(), description: description.optional() });
+export type RunTaskInput = z.infer<typeof runTaskBody>;
 // AUTO-1: a slug names the automation's runs' branches, `am/<slug>-<run>` (AUTO-9).
 const slug = z.string().max(40).regex(/^[a-z0-9]+(?:[.-][a-z0-9]+)*$/, "a slug is lowercase letters and digits, joined by single dots or dashes");
 const automationFields = {
@@ -320,6 +342,14 @@ const routes: Route[] = [
     handler: async (c, p, [automationId], body) => c.startRun(p, automationId, runBody.parse(await body())),
   },
   { method: "GET", pattern: new RegExp(`^/automations/${id}/firings$`), handler: (c, p, [automationId]) => c.store.listFirings(p, automationId) },
+  {
+    method: "POST",
+    pattern: new RegExp(`^/automations/${id}/sessions$`),
+    handler: async (c, p, [automationId], body) => c.startAutomationSession(p, automationId, automationSessionBody.parse(await body())),
+  },
+  // AUTO-10, AUTO-12: a run is a session; these are what only runs have.
+  { method: "POST", pattern: new RegExp(`^/runs/${id}/end$`), handler: async (c, p, [runId], body) => c.endRun(p, runId, runEndBody.parse(await body())) },
+  { method: "POST", pattern: new RegExp(`^/runs/${id}/task$`), handler: async (c, p, [runId], body) => c.taskFromRun(p, runId, runTaskBody.parse(await body())) },
   ...folderRoutes("automation"),
   {
     method: "POST",

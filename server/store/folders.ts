@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { constants, createWriteStream, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, rmSync, unlinkSync, utimesSync } from "node:fs";
+import { constants, copyFileSync, createWriteStream, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, rmSync, unlinkSync, utimesSync } from "node:fs";
 import { open, readlink, type FileHandle } from "node:fs/promises";
 import { basename, dirname, extname, join, sep } from "node:path";
 import { Readable } from "node:stream";
@@ -245,6 +245,24 @@ export class Folders {
   list(principal: Principal, owner: FolderOwner): FolderFile[] {
     this.store.folderName(principal, owner);
     return this.sync(owner);
+  }
+
+  /**
+   * AUTO-12: copies the files under `dir` of one folder into the same directory of another, as
+   * added now by `principal`, replacing files of the same path there; answers the copies. Links
+   * are not copied (scan).
+   */
+  copy(principal: Principal, from: FolderOwner, dir: string, to: FolderOwner): FolderFile[] {
+    this.store.folderName(principal, from);
+    this.store.folderName(principal, to);
+    const source = join(this.dir(from), dir);
+    if (!existsSync(source)) return [];
+    const target = join(this.dir(to), dir);
+    for (const file of scan(source)) {
+      mkdirSync(dirname(join(target, file.path)), { recursive: true });
+      copyFileSync(join(source, file.path), join(target, file.path));
+    }
+    return scan(target).map((file) => this.store.addFolderFile(principal, to, { ...file, path: `${dir}/${file.path}` }));
   }
 
   /**

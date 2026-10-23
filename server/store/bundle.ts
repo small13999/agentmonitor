@@ -108,7 +108,8 @@ const topicLink: z.ZodType<TopicLink> = z.object({ taskId: id, topicId: id, link
 const run: z.ZodType<Run> = z.object({
   startedBy: actor.nullable(),
   triggerContext: z.string(),
-  outcome: z.enum(["finished", "review", "timed_out", "failed", "ended"]).nullable(),
+  outcome: z.enum(["finished", "nothing_to_deploy", "review", "timed_out", "failed", "ended"]).nullable(),
+  reason: z.string().nullable(),
   endedBy: actor.nullable(),
 });
 const session: z.ZodType<Session> = z.object({
@@ -247,10 +248,10 @@ export const projectRecords: z.ZodType<ProjectRecords> = z.object({
     if (!automations.has(found.automationId)) problem(`trigger ${found.id} belongs to an automation not in the bundle`);
   }
   for (const found of records.sessions) {
-    // SESSION-5: one task or one automation; a run's fields only on a run.
+    // SESSION-5: one task or one automation; a run's fields only on a session of an automation (AUTO-11: not on every one).
     const owned = found.taskId !== null ? tasks.has(found.taskId) && found.automationId === null : found.automationId !== null && automations.has(found.automationId);
     if (!owned) problem(`session ${found.id} belongs to no task or automation of the bundle, or to both`);
-    if ((found.run !== null) !== (found.automationId !== null)) problem(`session ${found.id} is a run of no automation, or an automation's session that is no run`);
+    if (found.run !== null && found.automationId === null) problem(`session ${found.id} is a run of no automation`);
     if (found.run !== null && (!knownActor(found.run.startedBy) || !knownActor(found.run.endedBy))) problem(`run ${found.id} names a record not in the bundle`);
     if (found.endedAt === null) problem(`session ${found.name} (${found.id}) has not ended`);
   }
