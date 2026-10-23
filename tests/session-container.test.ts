@@ -462,7 +462,7 @@ spec("AGENT-1", "the session page opens the session's chat in Tern; only the gat
   for (const frame of chat.page.frames()) assert.ok(!frame.url().includes(token), `${frame.url()} carries Tern's token`);
   // The gateway adds the token to Tern's socket for pages on the session's Tern host only:
   // another site open in the same browser cannot drive the session.
-  const host = `tern-${a.id}.localhost:${new URL(gateway.url).port}`;
+  const host = `am-t-${a.id}.localhost:${new URL(gateway.url).port}`;
   assert.equal(await openWire(host, `http://${host}`), "open");
   assert.equal(await openWire(host, "http://elsewhere.example"), "403");
 });
@@ -545,7 +545,7 @@ spec("AGENT-7", "text in any script, symbols and emoji show in a font that has t
   const text = "한국어✓😀العربية";
   await prompt(a, channelA, `say:${text}`, "done");
   const chat = await chatShowing(a, text);
-  const frame = chat.page.frames().find((candidate) => candidate.url().startsWith(`http://tern-${a.id}.localhost`));
+  const frame = chat.page.frames().find((candidate) => candidate.url().startsWith(`http://am-t-${a.id}.localhost`));
   assert.ok(frame, "the chat view holds no Tern page");
   // Tern's web client asks the workspace's Tern for fonts covering what its own faces lack
   // (here Korean and Arabic), and loads them.
@@ -566,7 +566,7 @@ spec("AGENT-7", "text in any script, symbols and emoji show in a font that has t
   }, asked);
   assert.deepEqual(uncovered, []);
   // Only the session's Tern pages get fonts through the gateway.
-  const host = `tern-${a.id}.localhost:${new URL(gateway.url).port}`;
+  const host = `am-t-${a.id}.localhost:${new URL(gateway.url).port}`;
   assert.equal(await fontsStatus(host, `http://${host}`), 200);
   assert.equal(await fontsStatus(host, "http://elsewhere.example"), 403);
 });

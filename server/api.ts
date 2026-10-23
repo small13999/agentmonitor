@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { isHealthPath, validOrigin, type Auth } from "./auth.ts";
+import { isHealthPath, validHost, validOrigin, type Auth } from "./auth.ts";
 import type { GatewayConfig } from "./config.ts";
 import { HUB_API_PREFIX, type Hubs } from "./hubs.ts";
 import { handleStoreApi } from "./store/http.ts";
@@ -31,6 +31,11 @@ export async function handleApi(request: IncomingMessage, response: ServerRespon
   if (!isHealthPath(pathname) && !pathname.startsWith("/api/store/") && !stores) return false;
   const { config, auth, store, hubs } = deps;
 
+  // Only the monitor's own host reaches its API; a chat, preview, or unknown host answers as unknown.
+  if (!validHost(request, config.publicOrigin)) {
+    sendJson(response, 404, { ok: false, error: "unknown endpoint" });
+    return true;
+  }
   if (request.method === "GET" && isHealthPath(pathname)) {
     sendJson(response, 200, { ok: true, data: { machine: config.machineName, auth: config.authMode } });
     return true;
@@ -43,7 +48,7 @@ export async function handleApi(request: IncomingMessage, response: ServerRespon
       return true;
     }
     if (pathname.startsWith("/api/store/") || stores) {
-      if (request.method !== "GET" && !validOrigin(request)) {
+      if (request.method !== "GET" && !validOrigin(request, config.publicOrigin)) {
         sendJson(response, 403, { ok: false, error: "cross-origin mutation refused" });
         return true;
       }

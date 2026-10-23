@@ -32,6 +32,7 @@ before(async () => {
   [gateway, chrome] = await Promise.all([
     Gateway.start({
       runtime: "none",
+      hub: true,
       env: {
         AGENTMONITOR_AUTH_MODE: "access",
         AGENTMONITOR_ACCESS_TEAM_DOMAIN: access.url,
@@ -55,10 +56,13 @@ after(async () => {
 
 const ownerToken = () => access.token("armin@example.com");
 
-/** A request to a session's Tern host, as the browser sends it; with `upgrade`, the chat's socket. */
-function tern(sessionId: string, headers: Record<string, string>, upgrade = false): Promise<number> {
+/**
+ * A request to a session's chat host (`am-t-<session id>`) or a task's preview host
+ * (`am-p-<task id>`), as the browser sends it; with `upgrade`, the chat's socket.
+ */
+function onHost(label: string, headers: Record<string, string>, upgrade = false): Promise<number> {
   const { port } = new URL(gateway.url);
-  const host = `tern-${sessionId}.localhost:${port}`;
+  const host = `${label}.localhost:${port}`;
   const { promise, resolve, reject } = Promise.withResolvers<number>();
   const sent = request({
     host: "127.0.0.1",
@@ -85,18 +89,19 @@ function tern(sessionId: string, headers: Record<string, string>, upgrade = fals
   return promise;
 }
 
-spec("AUTH-1", "the hub's API, app, and session hosts refuse requests without a valid Cloudflare Access token for the hub", async () => {
+spec("AUTH-1", "the hub's API, app, session hosts, and previews refuse requests without a valid Cloudflare Access token for the hub", async () => {
   const owner = edge(ownerToken());
   const target = await gateway.data<Task>("POST", `/projects/${project.id}/tasks`, { title: "Patch notes 26.21" }, owner);
   const session = await gateway.data<Session>("POST", `/tasks/${target.id}/sessions`, {}, owner);
 
-  // A valid token, in Cloudflare's header or its cookie, reaches the API, the app, and the
-  // session's host (whose Tern does not run without containers).
+  // A valid token, in Cloudflare's header or its cookie, reaches the API, the app, the
+  // session's host (whose Tern does not run without containers), and the task's preview host.
   assert.equal((await gateway.api("GET", "/projects", undefined, owner)).status, 200);
   assert.equal((await gateway.api("GET", "/projects", undefined, { cookie: `theme=dark; CF_Authorization=${ownerToken()}` })).status, 200);
   assert.equal((await fetch(gateway.url, { headers: owner })).status, 200);
-  assert.equal(await tern(session.id, owner), 409);
-  assert.equal(await tern(session.id, owner, true), 409);
+  assert.equal(await onHost(`am-t-${session.id}`, owner), 409);
+  assert.equal(await onHost(`am-t-${session.id}`, owner, true), 409);
+  assert.equal(await onHost(`am-p-${target.id}`, owner), 404);
 
   // Keys Cloudflare rotates in are fetched when a token names one.
   const rotated = signingKey();
@@ -120,8 +125,9 @@ spec("AUTH-1", "the hub's API, app, and session hosts refuse requests without a 
     const app = await fetch(gateway.url, { headers });
     assert.equal(app.status, 401, `the app refuses ${what}`);
     assert.match(await app.text(), /Refused: /);
-    assert.equal(await tern(session.id, headers), 401, `the session's host refuses ${what}`);
-    assert.equal(await tern(session.id, headers, true), 401, `the session's socket refuses ${what}`);
+    assert.equal(await onHost(`am-t-${session.id}`, headers), 401, `the session's host refuses ${what}`);
+    assert.equal(await onHost(`am-t-${session.id}`, headers, true), 401, `the session's socket refuses ${what}`);
+    assert.equal(await onHost(`am-p-${target.id}`, headers), 401, `the task's preview host refuses ${what}`);
   }
 });
 

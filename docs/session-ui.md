@@ -75,7 +75,7 @@ with Mesa's software Vulkan (`mesa-vulkan-drivers`), driven by `tern ctl` (`run`
 - Reported as stencil-hq/tern-sdk#99; remove the filter once Tern draws such results (AGENT-6
   covers the glob case).
 - The web client reads its settings from the page's `localStorage["settings.json"]`, not the
-  container's settings file, and each `tern-<id>.localhost` origin starts light. The stored page
+  container's settings file, and each chat host's origin (`am-t-<id>`) starts light. The stored page
   seeds `{"theme":"Dark"}` when the key is unset, so a theme picked in Tern still wins.
 - Load time (headless, software WebGPU), ~2.3 s to a synced chat before: each proxied request
   ran `podman port`/`podman inspect` (~250 ms each; the gateway now caches the upstream and drops
@@ -86,9 +86,9 @@ with Mesa's software Vulkan (`mesa-vulkan-drivers`), driven by `tern ctl` (`run`
 - A web client that connects within ~2 s of the previous one leaving (a reload) took ~11 s to
   sync instead of ~2; at ≥2.8 s it was fast. The gateway holds a session's next `/wire` until
   3 s after its last one closed.
-- Gateway: `server/tern-proxy.ts` serves `tern-<id>.localhost` from the container's published
-  port. It adds the token and the accepted origin on `/wire` and `/fonts`, and refuses both to
-  other origins. Local mode only, since `*.localhost` resolves on the browser's machine.
+- Gateway: `server/tern-proxy.ts` serves a session's chat host, `am-t-<id>.<zone>`
+  (`shared/hosts.ts`), from the container's published port. It adds the token and the accepted
+  origin on `/wire` and `/fonts`, and refuses both to other origins.
 - Fonts: the client asks `tern web serve` for fonts covering characters its built-in faces lack
   (`/fonts?chars=HEX,…` → `{"fonts":[{id,index}]}`, then `/fonts/<id>`). The server needs
   `?token=` there too and draws on the container's system fonts, which the image installs.

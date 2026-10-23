@@ -183,15 +183,20 @@ worktree, open pull requests from `gh` (cached 30 s), and the other sessions
 that changed the same files.
 
 A task's Chat tab shows its session's chat in Tern's web client, framed from the
-session's own host, `tern-<id>.localhost:<monitor port>`, since the client
-loads everything from root paths. The gateway proxies that host to the
-container's published port (`server/tern-proxy.ts`) and adds what `tern web
-serve` asks for: the token from `run/tern-token` on `/wire` and `/fonts` and
-the origin it accepts, so neither reaches the browser. It opens `/wire` and
-`/fonts` only for pages on that Tern host. `/fonts` serves the image's fallback
-fonts (Noto CJK, Noto core scripts, DejaVu) for characters the client's
-built-in faces lack. `*.localhost` names resolve on the browser's own machine,
-so this needs the monitor in local mode; WebGPU needs Chrome or Edge.
+session's own host, since the client loads everything from root paths. The UI,
+each session's chat, and each task's preview are each their own origin, flat
+hosts under one zone (`shared/hosts.ts`): `am.<zone>` the UI, `am-t-<session
+id>.<zone>` a chat, `am-p-<task id>.<zone>` a preview, which says "no preview
+yet" until previews exist. A hub's zone is its `AGENTMONITOR_PUBLIC_ORIGIN`
+after `am.`; a local monitor's is `localhost` on the monitor's port
+(`am-t-<id>.localhost:<port>`), names that resolve on the browser's own machine.
+The gateway proxies a chat host to the container's published port
+(`server/tern-proxy.ts`) and adds what `tern web serve` asks for: the token from
+`run/tern-token` on `/wire` and `/fonts` and the origin it accepts, so neither
+reaches the browser. It opens `/wire` and `/fonts` only for pages on that chat
+host. `/fonts` serves the image's fallback fonts (Noto CJK, Noto core scripts,
+DejaVu) for characters the client's built-in faces lack. WebGPU needs Chrome or
+Edge.
 
 The app keeps the last four sessions' clients loaded and hidden, so going back
 to one is instant. The image names the client's script and wasm by content
@@ -264,18 +269,20 @@ gateway:build`, then `npm run gateway:start`; port `AGENTMONITOR_PORT`, default
   gateway's store and of each hub (STORE-3); `/api/hubs/<name>/store/*`, a
   hub's store API through the gateway.
 
-Every other request, the app's pages, the store API and Tern hosts alike, goes
-through `Auth.identify` (`server/auth.ts`), which says which person it is or
-refuses it. `AGENTMONITOR_AUTH_MODE=local` (the default) is the user's PC: every
-request is the store's owner. `AGENTMONITOR_AUTH_MODE=access` is a hub behind a
-Cloudflare Tunnel and Access: the gateway verifies the Access token itself
-(the `Cf-Access-Jwt-Assertion` header, else the `CF_Authorization` cookie;
-RS256 against the team's keys, issuer, audience, expiry) and acts as the person
-with the token's email; other emails get a page saying they are no person of
-the hub. It requires `AGENTMONITOR_ACCESS_TEAM_DOMAIN` (the issuer, e.g.
+Every other request, the app's pages, the store API, chat and preview hosts
+alike, goes through `Auth.identify` (`server/auth.ts`), which says which person
+it is or refuses it. `AGENTMONITOR_AUTH_MODE=local` (the default) is the user's
+PC: every request is the store's owner. `AGENTMONITOR_AUTH_MODE=access` is a hub
+behind a Cloudflare Tunnel and Access: the gateway verifies the Access token
+itself (the `Cf-Access-Jwt-Assertion` header, else the `CF_Authorization`
+cookie; RS256 against the team's keys, issuer, audience, expiry) and acts as the
+person with the token's email; other emails get a page saying they are no person
+of the hub. It requires `AGENTMONITOR_ACCESS_TEAM_DOMAIN` (the issuer, e.g.
 `https://draftcoach.cloudflareaccess.com`; keys at `/cdn-cgi/access/certs`),
-`AGENTMONITOR_ACCESS_AUD` (the Access application's audience tag) and
+`AGENTMONITOR_ACCESS_AUD` (the Access application's audience tag),
 `AGENTMONITOR_OWNER_EMAIL` (the owner's email, written to the store's owner on
-start). On a hub every person works on every project; only the owner adds
-people, allows and starts host sessions, and allows Cloudflare writes. Vite's
-dev server runs without its HMR socket in access mode.
+start) and `AGENTMONITOR_PUBLIC_ORIGIN` (the UI's exact https origin, host
+`am.<zone>`, from which the chat and preview hosts derive); only the UI's host
+reaches the API and the app. On a hub every person works on every project; only
+the owner adds people, allows and starts host sessions, and allows Cloudflare
+writes. Vite's dev server runs without its HMR socket in access mode.

@@ -1,10 +1,12 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, watch as watchDir, writeFileSync } from "node:fs";
 import { watch } from "node:fs/promises";
+import { createServer as createHttpsServer, type Server as HttpsServer } from "node:https";
 import { connect, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import httpProxy from "http-proxy";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -105,13 +107,16 @@ export class Gateway {
   /**
    * `runtime: "none"` keeps sessions as store records only: store claims do not need
    * containers, and starting one per session would cost seconds per test. `stateDir` starts
-   * the gateway on an existing state directory, e.g. a store from an older version.
+   * the gateway on an existing state directory, e.g. a store from an older version. `hub`
+   * names its hosts as a hub's (shared/hosts.ts) under `localhost`: its UI, which `url` names,
+   * is `http://am.localhost:<port>`.
    */
   static async start(
-    options: { runtime: "podman" | "none"; env?: Record<string, string>; stateDir?: string } = { runtime: "none" },
+    options: { runtime: "podman" | "none"; env?: Record<string, string>; stateDir?: string; hub?: boolean } = { runtime: "none" },
   ): Promise<Gateway> {
     const stateDir = options.stateDir ?? mkdtempSync(join(tmpdir(), "am-gw-"));
     const port = await freePort();
+    const url = options.hub === true ? `http://am.localhost:${port}` : `http://127.0.0.1:${port}`;
     const child = spawn(process.execPath, [join(root, "server", "index.ts")], {
       cwd: root,
       env: {
@@ -122,6 +127,7 @@ export class Gateway {
         AGENTMONITOR_WORKSPACE_RUNTIME: options.runtime,
         // Never the user's settings, e.g. the hubs of their hubs.json (STORE-3).
         AGENTMONITOR_CONFIG_DIR: join(stateDir, "config"),
+        ...(options.hub === true ? { AGENTMONITOR_PUBLIC_ORIGIN: url } : {}),
         ...options.env,
       },
       stdio: ["ignore", "pipe", "pipe"],
@@ -134,7 +140,7 @@ export class Gateway {
     });
     child.stderr?.on("data", (chunk) => { log += chunk; });
     child.once("exit", (code) => reject(new Error(`gateway exited with ${code}:\n${log}`)));
-    const gateway = new Gateway(stateDir, `http://127.0.0.1:${port}`, child);
+    const gateway = new Gateway(stateDir, url, child);
     try {
       await listening;
     } catch (error) {
@@ -198,6 +204,54 @@ export class Gateway {
   /** The gateway's channel into a session's live omp chat, once omp has started it. */
   async omp(sessionId: string): Promise<OmpChannel> {
     return OmpChannel.open(join(this.stateDir, "sessions", sessionId, "run"));
+  }
+}
+
+/**
+ * Cloudflare's tunnel in front of a hub, as the browser and the gateway see it: TLS ends before
+ * the gateway, which gets the browser's Host and, with `edge`, the headers Access's edge adds
+ * (its token). Chromium reaches it under the hub's names with `chromeArgs`, in a context that
+ * accepts its self-signed certificate (`ignoreHTTPSErrors`).
+ */
+export class Tunnel {
+  readonly port: number;
+  private readonly server: HttpsServer;
+
+  private constructor(port: number, server: HttpsServer) {
+    this.port = port;
+    this.server = server;
+  }
+
+  static async start(gateway: Gateway, edge: () => Record<string, string> = () => ({})): Promise<Tunnel> {
+    const dir = mkdtempSync(join(tmpdir(), "am-tunnel-"));
+    const made = spawnSync("openssl", [
+      "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-days", "1",
+      "-subj", "/CN=tunnel", "-keyout", join(dir, "key.pem"), "-out", join(dir, "cert.pem"),
+    ], { encoding: "utf8" });
+    if (made.status !== 0) throw new Error(`openssl failed:\n${made.stderr}`);
+    const tls = { key: readFileSync(join(dir, "key.pem")), cert: readFileSync(join(dir, "cert.pem")) };
+    rmSync(dir, { recursive: true, force: true });
+    const proxy = httpProxy.createProxyServer({ target: `http://127.0.0.1:${new URL(gateway.url).port}` });
+    const server = createHttpsServer(tls, (request, response) => proxy.web(request, response, { headers: edge() }));
+    server.on("upgrade", (request, socket, head) => proxy.ws(request, socket, head, { headers: edge() }));
+    const { promise, resolve } = Promise.withResolvers<number>();
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      resolve(typeof address === "object" && address !== null ? address.port : 0);
+    });
+    return new Tunnel(await promise, server);
+  }
+
+  /** Chromium's arguments that send every name under `zone` to the tunnel. */
+  chromeArgs(zone: string): string[] {
+    return [`--host-resolver-rules=MAP *.${zone} 127.0.0.1:${this.port}`];
+  }
+
+  async stop(): Promise<void> {
+    const { promise, resolve } = Promise.withResolvers<void>();
+    this.server.close(() => resolve());
+    this.server.closeAllConnections();
+    await promise;
   }
 }
 
