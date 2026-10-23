@@ -1,3 +1,4 @@
+import { watch } from "node:fs";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 import type { Plugin, PreviewServer, ViteDevServer } from "vite";
@@ -50,8 +51,29 @@ function gateway(): Plugin {
   };
 }
 
+/**
+ * Restarts the dev server when an `npm install` finishes. Vite does not watch node_modules and
+ * keeps a failed import's resolution cached, so a merge that adds a package leaves the app
+ * broken until a restart even once the package is installed. npm writes
+ * `node_modules/.package-lock.json` last in every install.
+ */
+function restartOnInstall(): Plugin {
+  return {
+    name: "agentmonitor-restart-on-install",
+    configureServer(server) {
+      const watcher = watch("node_modules", (_event, file) => {
+        if (file !== ".package-lock.json") return;
+        server.config.logger.info("packages changed: restarting", { timestamp: true });
+        watcher.close();
+        void server.restart(true);
+      });
+      server.httpServer?.once("close", () => watcher.close());
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [gateway(), react()],
+  plugins: [gateway(), restartOnInstall(), react()],
   server: {
     allowedHosts: [".localhost"],
     port: 5173,

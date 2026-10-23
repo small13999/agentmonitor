@@ -49,3 +49,14 @@ The main checkout (`~/projects/agentmonitor`) is what the user's live Agent Moni
 the gateway restarts on every saved file under `server/`. Only the integrator (the
 session in the main checkout) works there; every other session works in its own
 worktree and pushes its task branch, and the integrator merges it.
+
+Merging onto the live main checkout:
+
+1. Merge in a separate worktree, run `npx tsc -b`, `npm run spec:check` and `npm test`
+   there with `AGENTMONITOR_STATE_DIR` set to a scratch directory.
+2. If the merge migrates the store, back up the live store first and check the backup.
+3. Fast-forward `main`, then run `npm install` if `package-lock.json` changed. The dev
+   server restarts itself once an install finishes (`vite.config.ts`).
+4. Check the live app with `node scripts/smoke-live.ts`. It fails on any failed request or
+   error on the way to the board. A 200 for `/` proves nothing: Vite serves the page even
+   when its scripts fail to build.
