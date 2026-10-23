@@ -41,7 +41,8 @@ export function PersonAvatar({ person, alone = false }: { person: Person; alone?
 /**
  * PERSON-1, PERSON-2: who did something, with their avatar. A person shows by name; an agent
  * as the agent of its session, on the session's avatar, linking to the session: its chat while
- * it runs, else its task's page, which lists it.
+ * it runs, else its task's page, which lists it. A run of an automation (AUTO-9) has no task
+ * page to link to.
  */
 export function ActorName({ actor, directory }: { actor: Actor | null; directory: Directory }) {
   if (actor === null) return <span className="actor"><span className="avatar avatar-system" data-initials="GH" aria-hidden="true" /><span className="actor-name">GitHub</span></span>;
@@ -52,7 +53,7 @@ export function ActorName({ actor, directory }: { actor: Actor | null; directory
   }
   const session = directory.sessions.get(actor.sessionId);
   const label = session === undefined ? "Agent" : `Agent · ${session.name}`;
-  const href = session === undefined ? undefined : session.endedAt === null ? `#/t/${session.taskId}/chat` : `#/t/${session.taskId}`;
+  const href = session === undefined || session.taskId === null ? undefined : session.endedAt === null ? `#/t/${session.taskId}/chat` : `#/t/${session.taskId}`;
   const title = session === undefined
     ? undefined
     : `The agent of the session started ${new Date(session.startedAt).toLocaleString()}${session.machine === null ? "" : ` on ${session.machine}`}${session.endedAt === null ? "" : ", ended"}`;

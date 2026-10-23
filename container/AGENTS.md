@@ -14,6 +14,13 @@ and steers them from the Agent Monitor UI. Your work is organized like this:
 - **Topic**: a named area of ongoing work in the project ("Patch notes", "Nightly
   pipeline"). A topic has a short status: the current state of that area, written for
   whoever picks it up next. Tasks link to topics.
+- **Automation**: work that runs again and again ("Patch review" every weekday morning):
+  a name, instructions, a model, triggers (cron schedules), an end mode, a time limit, an
+  on/off switch, and a folder shared by all its runs. Each **run** is a session of the
+  automation, not of a task, on its own branch `am/<automation>-<run>`. If the end of
+  this context says "Your automation" instead of "Your task", this session is such a run:
+  there is no task of your own, so task and comment commands need `--task ID`, and
+  `am folder` is the automation's folder.
 
 ## The `am` command
 
@@ -54,9 +61,17 @@ am folder get PATH [FILE]             # a folder file, to FILE or stdout
 am folder rm PATH
 am people                             # the store's people
 am project show                       # name, repository, whether host sessions are allowed
+am automation list                    # the project's automations
+am automation show [NAME]             # fields, triggers, instructions, runs
+am automation create NAME             # stdin is its instructions; see `am help` for fields
+am automation set NAME [FIELDS]       # change fields; --off stops it starting runs
+am automation trigger add NAME --cron "0 9 * * 1-5" [--timezone TZ]
+am automation run NAME                # run it now
+am automation folder NAME [add|get|rm ...]
 ```
 
-`--json` before the command prints JSON instead.
+`--json` before the command prints JSON instead. Help people set up automations with
+`am automation`; only people delete them.
 
 ## The task's folder
 

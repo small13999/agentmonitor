@@ -151,7 +151,7 @@ async function cardShowing(target: Session, test: (shown: Card) => boolean, what
   for (const deadline = Date.now() + 20_000; ;) {
     const shown = await card(target);
     if (test(shown)) return shown;
-    assert.ok(Date.now() < deadline, `the card of ${target.name} never showed ${what}`);
+    assert.ok(Date.now() < deadline, `the card of ${target.name} never showed ${what}: ${JSON.stringify(shown)}`);
   }
 }
 
@@ -245,7 +245,7 @@ async function send(chat: Chat, text: string): Promise<void> {
   await chat.page.keyboard.press("Enter");
 }
 
-spec("SESSION-5", "a session belongs to one task and works in a worktree of the task's branch on one machine", async () => {
+spec("SESSION-5", "a session belongs to one task or one automation and works in a worktree of its branch on one machine", async () => {
   const { task } = await taskOf(a);
   assert.equal(task.title, "Patch Notes JP");
   assert.match(a.branch, /^am\/patch-notes-jp-[0-9a-f]{4}$/);
@@ -255,6 +255,29 @@ spec("SESSION-5", "a session belongs to one task and works in a worktree of the 
   assert.equal(exec(a, ["git", "-C", "/workspace/fixture", "branch", "--show-current"]), a.branch);
   assert.equal(exec(a, ["cat", "/workspace/fixture/AGENTS.md"]), `# Fixture\n\n${REPO_RULE}`);
   assert.match(exec(a, ["am", "whoami"]), new RegExp(`^task {4}Patch Notes JP \\(${task.id}, in_progress\\)$`, "m"));
+
+  // AUTO-9: "run now" starts a session of the automation, of no task, on a branch of its own
+  // from the default branch; the automation's instructions are its chat's first prompt.
+  const automation = await gateway.data<{ id: string }>("POST", `/projects/${projectId}/automations`, {
+    name: "Patch review",
+    instructions: "say:reviewed-3f9a",
+    model: "fake/scripted",
+  });
+  const run = await gateway.data<Session & { automationId: string | null }>("POST", `/automations/${automation.id}/runs`, {});
+  try {
+    assert.equal(run.taskId, null);
+    assert.equal(run.automationId, automation.id);
+    assert.equal(run.branch, `am/patch-review-${run.id.slice(0, 8)}`);
+    assert.equal(exec(run, ["git", "-C", "/workspace/fixture", "branch", "--show-current"]), run.branch);
+    assert.equal(exec(run, ["git", "-C", "/workspace/fixture", "rev-parse", "HEAD"]), execFileSync("git", ["rev-parse", "main"], { cwd: repo, encoding: "utf8" }).trim());
+    await cardShowing(run, (shown) => shown.lastUserMessage === "say:reviewed-3f9a" && shown.lastReply === "reviewed-3f9a", "its instructions answered");
+    assert.match(exec(run, ["am", "whoami"]), new RegExp(`^automation Patch review \\(${automation.id}\\), run ${run.id.slice(0, 8)}$`, "m"));
+    const taskless = spawnSync("podman", ["exec", `am-${run.id}`, "am", "task", "show"], { encoding: "utf8" });
+    assert.equal(taskless.status, 1);
+    assert.match(taskless.stderr, /belongs to no task: name one with --task ID/);
+  } finally {
+    await gateway.data("POST", `/sessions/${run.id}/end`);
+  }
 });
 
 spec("SESSION-4", "a chat starts with the workflow context and the repository's AGENTS.md", async () => {

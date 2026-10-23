@@ -82,10 +82,19 @@ through Agent Monitor (dogfooding).
   what waits for review; the run list is secondary.
 - No Discord; the teammate uses the site. Posting to Instagram comes later as an
   after-approval step.
+- Phase 1 (foundation) built: the store model (automations, triggers, firings, runs as
+  sessions of an automation with `taskId` null), the automation's folder on the task
+  folder's code, the routes and `am automation`, "run now", and moves. Decided there: a
+  run's branch is `am/<slug>-<first 8 hex of its session id>`; one run of an automation
+  at a time, and none while it is off (409); a firing records each trigger's scheduled
+  time once; a run's uncommitted work at its end is kept as a snapshot under its
+  session's id; only people delete automations.
 
 ### Host sessions (built in step 2: HOST-1..7, UI-3)
 Still open:
-- Host sessions of automations, once automations exist.
+- Host runs of automations: "run now" by the owner with `runtime: "host"` works in
+  projects that allow host sessions (HOST-1); whether a trigger may start host runs is
+  open (the store refuses host runs nobody started).
 - Integrator: a checkout session (HOST-6) works in the main checkout among the
   user's omp chats (HOST-7). Still open: how it pulls in other sessions' branches,
   and resuming chats in worktree or container sessions.
