@@ -11,8 +11,6 @@ import { newestTranscript, readTranscript } from "./transcript.ts";
 
 const run = promisify(execFile);
 
-const SORT: Record<TurnLight, number> = { blocked: 0, done: 1, working: 2, stopped: 3 };
-
 // omp's messages as its transcript stores them; only what a card shows is checked.
 const blocks = z.array(z.object({ type: z.string(), text: z.string().optional() }));
 const userMessage = z.object({ role: z.literal("user"), content: z.union([z.string(), blocks]) });
@@ -78,7 +76,7 @@ async function pullRequests(worktree: string, branch: string): Promise<PullReque
   return prs;
 }
 
-/** CARD-1..5: one card per running session of the project, waiting-on-you first. */
+/** CARD-1, CARD-3, CARD-4: one card per running session of the project, oldest first. */
 export async function projectCards(
   store: Store,
   dirsOf: (sessionId: string) => WorkspaceDirs,
@@ -122,5 +120,5 @@ export async function projectCards(
       if (files.length > 0) card.overlaps.push({ sessionId: other.session.id, name: other.session.name, files });
     }
   }
-  return cards.sort((a, b) => SORT[a.turn] - SORT[b.turn] || a.session.startedAt - b.session.startedAt);
+  return cards;
 }

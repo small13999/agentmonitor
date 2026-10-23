@@ -47,7 +47,8 @@ export type SessionInput = z.infer<typeof sessionBody>;
 const statusBody = z.strictObject({ status: z.string().max(64 * 1024), baseRevision: z.int().min(0) });
 const notesBody = z.strictObject({ text: z.string().max(64 * 1024), baseRevision: z.int().min(0) });
 
-type Handler = (c: StoreContext, principal: Principal, params: string[], body: () => Promise<unknown>) => unknown;
+/** `query` is the request URL's search parameters, e.g. a task search's words. */
+type Handler = (c: StoreContext, principal: Principal, params: string[], body: () => Promise<unknown>, query: URLSearchParams) => unknown;
 
 interface Route {
   method: string;
@@ -101,7 +102,12 @@ const routes: Route[] = [
     pattern: new RegExp(`^/projects/${id}/cards$`),
     handler: (c, p, [projectId]) => c.cards(p, projectId),
   },
-  { method: "GET", pattern: new RegExp(`^/projects/${id}/tasks$`), handler: (c, p, [projectId]) => c.store.listTasks(p, projectId) },
+  // BOARD-3: `?q=` finds tasks by their words; without it every task is listed.
+  {
+    method: "GET",
+    pattern: new RegExp(`^/projects/${id}/tasks$`),
+    handler: (c, p, [projectId], _, query) => c.store.listTasks(p, projectId, query.get("q") ?? ""),
+  },
   {
     method: "POST",
     pattern: new RegExp(`^/projects/${id}/tasks$`),
@@ -201,7 +207,8 @@ export async function handleStoreApi(
   context: StoreContext,
   principal: Principal,
 ): Promise<void> {
-  const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
+  const url = new URL(request.url ?? "/", "http://localhost");
+  const pathname = url.pathname;
   const path = pathname.startsWith(STORE_API_PREFIX) ? pathname.slice(STORE_API_PREFIX.length) : null;
   const candidates = path === null ? [] : routes.filter((route) => route.pattern.test(path));
   const route = candidates.find((candidate) => candidate.method === request.method);
@@ -211,7 +218,7 @@ export async function handleStoreApi(
   }
   try {
     const params = route.pattern.exec(path)?.slice(1) ?? [];
-    const data = await route.handler(context, principal, params, () => readBody(request));
+    const data = await route.handler(context, principal, params, () => readBody(request), url.searchParams);
     send(response, 200, { ok: true, data });
   } catch (cause) {
     if (cause instanceof StoreError) {

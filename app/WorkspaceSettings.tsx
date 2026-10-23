@@ -2,6 +2,7 @@ import { useState, type SubmitEvent } from "react";
 import { api, ApiError, type Card, type EndedSession, type Task, type TaskState, type TaskSummary, type Topic } from "./api.ts";
 import { HostMark, Light, STATE_LABEL } from "./Board.tsx";
 import { InlineCreate } from "./InlineCreate.tsx";
+import { TopicName } from "./Topics.tsx";
 
 const UNFINISHED: TaskState[] = ["open", "in_progress", "in_review"];
 
@@ -84,7 +85,7 @@ function TopicsPanel({ summary, topics, onChanged }: { summary: TaskSummary; top
         {linked.length === 0 && <span className="muted small">This task has no topics.</span>}
         {linked.map((topic) => (
           <span key={topic.id} className="chip">
-            {topic.name}
+            <TopicName topic={topic} />
             <button type="button" className="chip-x" aria-label={`Unlink ${topic.name}`} onClick={() => change("DELETE", topic.id)}>×</button>
           </span>
         ))}
@@ -105,16 +106,6 @@ function TopicsPanel({ summary, topics, onChanged }: { summary: TaskSummary; top
           onChanged();
         }}
       />
-      {linked.map((linkedTopic) => {
-        // Status text comes from the project's topic list, which is polled with the tasks.
-        const topic = topics.find((candidate) => candidate.id === linkedTopic.id) ?? linkedTopic;
-        return (
-          <div key={topic.id} className="status">
-            <h4>{topic.name} <span className="muted small">rev {topic.statusRevision}</span></h4>
-            {topic.status === "" ? <p className="muted small">No status yet.</p> : <pre>{topic.status}</pre>}
-          </div>
-        );
-      })}
     </section>
   );
 }

@@ -1,10 +1,12 @@
 import { useState, type SubmitEvent } from "react";
-import { api, type Card, type Project, type Task, type TaskState, type TaskSummary } from "./api.ts";
+import { api, type Card, type Person, type Project, type Task, type TaskState, type TaskSummary } from "./api.ts";
+import { Avatar } from "./People.tsx";
+import { TopicName } from "./Topics.tsx";
 
 export const LIGHT_LABEL: Record<Card["turn"], string> = {
   blocked: "Waiting on you",
   working: "Working",
-  done: "Turn done",
+  done: "Idle",
   stopped: "Stopped",
 };
 
@@ -27,54 +29,46 @@ export function HostMark({ card }: { card: Card | null | undefined }) {
   return <span className="host-mark" title="Runs on this machine as you, without a container">Host</span>;
 }
 
-function GitLine({ card }: { card: Card }) {
-  const parts: string[] = [];
-  if (card.git !== null) {
-    if (card.git.uncommitted.length > 0) parts.push(`${card.git.uncommitted.length} uncommitted`);
-    if (card.git.unpushed > 0) parts.push(`${card.git.unpushed} unpushed`);
-  }
-  return (
-    <div className="git-line">
-      {parts.length === 0 && (card.pullRequests ?? []).length === 0 && <span className="muted">Nothing unsaved</span>}
-      {parts.length > 0 && <span className="unsaved">{parts.join(" · ")}</span>}
-      {(card.pullRequests ?? []).map((pr) => (
-        <a key={pr.number} href={pr.url} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()}>
-          PR #{pr.number}
-        </a>
-      ))}
-    </div>
-  );
+/** BOARD-2 and UI-5: its running session waits on a person, and the task is yours or nobody's. */
+export function waitsOnYou(summary: TaskSummary, card: Card | null | undefined, meId: string | null): boolean {
+  return card?.turn === "blocked" && (summary.task.assigneeId === null || summary.task.assigneeId === meId);
 }
 
-/** BOARD-1: the task's title and topics, and its running session's light, last messages, and changes. */
-function TaskCard({ summary, card }: { summary: TaskSummary; card: Card | null }) {
+/** CARD-4: the other running tasks that changed any of the same files. */
+function OverlapMark({ card }: { card: Card }) {
+  if (card.overlaps.length === 0) return null;
+  const others = card.overlaps.map((overlap) => `${overlap.name} (${overlap.files.join(", ")})`).join("; ");
+  return <span className="overlap-mark" title={`Same files changed in ${others}`}>Overlaps</span>;
+}
+
+/**
+ * BOARD-1: the task's title, topic names, and assignee, and its running session's light (CARD-1)
+ * and machine. The whole card opens the task's page.
+ */
+function TaskCard({ summary, card, assignee }: { summary: TaskSummary; card: Card | null; assignee: Person | null }) {
   const { task } = summary;
   return (
-    <a className={`card${card === null ? "" : ` card-${card.turn}`}`} href={`#/t/${task.id}`} data-task={task.title}>
+    <article className={`card${card === null ? "" : ` card-${card.turn}`}`} aria-label={task.title} data-task={task.title}>
       <header>
-        {card !== null && <Light turn={card.turn} />}
-        <strong>{task.title}</strong>
-        <HostMark card={card} />
-        <span className="state">{card === null ? (task.state === "cancelled" ? "Cancelled" : "No session") : LIGHT_LABEL[card.turn]}</span>
+        <a className="card-link" href={`#/t/${task.id}`}>{task.title}</a>
+        {assignee !== null && <Avatar person={assignee} />}
       </header>
       {summary.topics.length > 0 && (
-        <div className="meta">{summary.topics.map((topic) => <span key={topic.id} className="chip">{topic.name}</span>)}</div>
+        <div className="meta">{summary.topics.map((topic) => <TopicName key={topic.id} topic={topic} />)}</div>
       )}
-      {card !== null && (
-        <>
-          {card.lastUserMessage !== null && <p className="said you"><b>You</b> {card.lastUserMessage}</p>}
-          {card.lastReply !== null && <p className="said agent"><b>Agent</b> {card.lastReply}</p>}
-          {card.lastUserMessage === null && card.lastReply === null && <p className="muted">No conversation yet</p>}
-          <GitLine card={card} />
-          {card.overlaps.map((overlap) => (
-            <p key={overlap.sessionId} className="overlap">
-              Also changed in <b>{overlap.name}</b>: {overlap.files.join(", ")}
-            </p>
-          ))}
-        </>
-      )}
-      {card === null && task.description.trim() !== "" && <p className="said agent">{task.description}</p>}
-    </a>
+      <footer className="card-session">
+        {card === null && <span className="muted">{summary.sessionId === null ? "No session" : "Starting…"}</span>}
+        {card !== null && (
+          <>
+            <Light turn={card.turn} />
+            <span>{LIGHT_LABEL[card.turn]}</span>
+            {card.session.machine !== null && <span className="machine" title="Machine">{card.session.machine}</span>}
+            <HostMark card={card} />
+            <OverlapMark card={card} />
+          </>
+        )}
+      </footer>
+    </article>
   );
 }
 
@@ -110,47 +104,47 @@ function NewTask({ project, onCreated }: { project: Project; onCreated: (task: T
   );
 }
 
-const COLUMNS: Array<{ label: string; states: TaskState[] }> = [
-  { label: "Open", states: ["open"] },
-  { label: "In progress", states: ["in_progress"] },
-  { label: "In review", states: ["in_review"] },
-  { label: "Done", states: ["done", "cancelled"] },
+/** BOARD-1: active work only; done and cancelled tasks are found by search and the All tasks list (BOARD-3). */
+const COLUMNS: Array<{ label: string; state: TaskState }> = [
+  { label: "Open", state: "open" },
+  { label: "In progress", state: "in_progress" },
+  { label: "In review", state: "in_review" },
 ];
 
-/** Finished tasks the Done column shows; the newest. */
-const DONE_SHOWN = 20;
-
 /**
- * BOARD-1/BOARD-2: the project's tasks in columns by state. Tasks waiting on you come first in
- * their column; the rest keep the order they were created in, so cards stay put as their
- * lights change. Done shows the most recently finished.
+ * BOARD-1/BOARD-2: the project's active tasks in columns by state. Tasks waiting on you come
+ * first in their column; the rest keep the order they were created in, so cards stay put as
+ * their lights change.
  */
-export function Board({ project, tasks, cards, onChanged }: {
+export function Board({ project, tasks, cards, people, meId, onChanged }: {
   project: Project;
   tasks: TaskSummary[] | null;
   cards: Map<string, Card>;
+  people: Map<string, Person>;
+  meId: string | null;
   onChanged: () => void;
 }) {
   if (tasks === null) return <p className="muted">Loading…</p>;
   const cardOf = (summary: TaskSummary) => (summary.sessionId === null ? null : cards.get(summary.sessionId) ?? null);
-  const waiting = (summary: TaskSummary) => (cardOf(summary)?.turn === "blocked" ? 0 : 1);
+  const waiting = (summary: TaskSummary) => (waitsOnYou(summary, cardOf(summary), meId) ? 0 : 1);
   return (
     <section className="board" aria-label="Board">
       {COLUMNS.map((column) => {
-        const finished = column.states.includes("done");
         const shown = tasks
-          .filter((summary) => column.states.includes(summary.task.state))
-          .toSorted((a, b) => finished
-            ? b.task.updatedAt - a.task.updatedAt
-            : waiting(a) - waiting(b) || a.task.createdAt - b.task.createdAt)
-          .slice(0, finished ? DONE_SHOWN : undefined);
+          .filter((summary) => summary.task.state === column.state)
+          .toSorted((a, b) => waiting(a) - waiting(b) || a.task.createdAt - b.task.createdAt);
         return (
           <section key={column.label} className="column" aria-label={column.label}>
             <h2>{column.label} <span className="muted small">{shown.length}</span></h2>
-            {column.states.includes("open") && (
-              <NewTask project={project} onCreated={onChanged} />
-            )}
-            {shown.map((summary) => <TaskCard key={summary.task.id} summary={summary} card={cardOf(summary)} />)}
+            {column.state === "open" && <NewTask project={project} onCreated={onChanged} />}
+            {shown.map((summary) => (
+              <TaskCard
+                key={summary.task.id}
+                summary={summary}
+                card={cardOf(summary)}
+                assignee={summary.task.assigneeId === null ? null : people.get(summary.task.assigneeId) ?? null}
+              />
+            ))}
           </section>
         );
       })}

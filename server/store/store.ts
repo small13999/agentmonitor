@@ -553,12 +553,18 @@ export class Store {
     });
   }
 
-  /** Every task of a project with its topics and running session, oldest first. */
-  listTasks(principal: Principal, projectId: string): TaskSummary[] {
+  /**
+   * Every task of a project with its topics and running session, oldest first. BOARD-3: with
+   * `search`, only the tasks whose title or description holds each of its words, ignoring case.
+   */
+  listTasks(principal: Principal, projectId: string, search = ""): TaskSummary[] {
     this.visibleProject(principal, projectId);
-    return this.db.prepare("SELECT * FROM tasks WHERE project_id = ? ORDER BY created_at").all(projectId).map((row) => {
+    const words = search.toLowerCase().split(/\s+/).filter(Boolean);
+    return this.db.prepare("SELECT * FROM tasks WHERE project_id = ? ORDER BY created_at").all(projectId).flatMap((row) => {
       const found = task(row);
-      return { task: found, topics: this.topicsOf(found.id), sessionId: this.runningSessionOf(found.id)?.id ?? null };
+      const text = `${found.title}\n${found.description}`.toLowerCase();
+      if (!words.every((word) => text.includes(word))) return [];
+      return [{ task: found, topics: this.topicsOf(found.id), sessionId: this.runningSessionOf(found.id)?.id ?? null }];
     });
   }
 

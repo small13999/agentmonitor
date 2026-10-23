@@ -9,7 +9,7 @@ import { chromium, type Browser, type FrameLocator, type Locator, type Page } fr
 import { WebSocket } from "ws";
 import { buildImage } from "../scripts/build-image.ts";
 import { FakeModel } from "./fake-model.ts";
-import { buildApp, Gateway, type OmpChannel } from "./harness.ts";
+import { buildApp, Gateway, rgb, type OmpChannel } from "./harness.ts";
 import { spec } from "./spec.ts";
 
 // Every claim in this file runs against one gateway and its session containers, in order.
@@ -179,12 +179,12 @@ interface Chat {
 }
 
 /**
- * A fresh session page. Earlier pages close first: a second web client on the session takes
- * several times as long to sync. All chat claims share one browser, since starting Tern's
- * web client in a new one costs seconds. The client draws with WebGPU; without a GPU,
- * Chromium runs it on Mesa's llvmpipe Vulkan driver.
+ * A fresh page on `hash`. Earlier pages close first: a second web client on a session takes
+ * several times as long to sync. All chat claims share one browser, since starting Tern's web
+ * client in a new one costs seconds. The client draws with WebGPU; without a GPU, Chromium runs
+ * it on Mesa's llvmpipe Vulkan driver.
  */
-async function sessionPage(target: Session): Promise<Page> {
+async function freshPage(hash: string): Promise<Page> {
   await closePages();
   chrome ??= await chromium.launch({
     args: ["--enable-unsafe-webgpu", "--ignore-gpu-blocklist", "--enable-features=Vulkan,VulkanFromANGLE", "--use-vulkan=native", "--use-angle=vulkan"],
@@ -192,14 +192,18 @@ async function sessionPage(target: Session): Promise<Page> {
   const page = await chrome.newPage();
   openPages.add(page);
   page.setDefaultTimeout(15_000);
-  await page.goto(`${gateway.url}/#/t/${target.taskId}`);
+  await page.goto(`${gateway.url}/${hash}`);
   return page;
 }
 
-/** A fresh page on the board. */
+/** A fresh session page. */
+async function sessionPage(target: Session): Promise<Page> {
+  return freshPage(`#/t/${target.taskId}`);
+}
+
+/** A fresh page on the board; no chat loads. */
 async function boardPage(): Promise<Page> {
-  const page = await sessionPage(a);
-  await page.getByRole("navigation", { name: "Menus" }).getByRole("link", { name: "Board" }).click();
+  const page = await freshPage("#/");
   await page.getByRole("region", { name: "Board" }).waitFor();
   return page;
 }
@@ -267,13 +271,6 @@ spec("TASK-6", "a session's first chat starts with its task's title, description
   }
 });
 
-spec("CARD-2", "a card shows the last user message and the agent's last reply", async () => {
-  await prompt(a, channelA, "say:hello", "done");
-  const shown = await card(a);
-  assert.equal(shown.lastUserMessage, "say:hello");
-  assert.equal(shown.lastReply, "hello");
-});
-
 spec("CARD-3", "a card shows uncommitted changes, unpushed commits, and open pull requests", async () => {
   exec(a, ["sh", "-c", [
     "cd /workspace/fixture",
@@ -290,7 +287,7 @@ spec("CARD-3", "a card shows uncommitted changes, unpushed commits, and open pul
 
 let b: Session;
 
-spec("CARD-4", "a card names other sessions that changed the same files", async () => {
+spec("CARD-4", "a card marks that other running tasks changed the same files", async () => {
   b = await session("Client fixes");
   const worktreeB = join(gateway.stateDir, "sessions", b.id, "worktree");
   writeFileSync(join(worktreeB, "AGENTS.md"), "# Fixture\n\nrewritten\n");
@@ -300,42 +297,76 @@ spec("CARD-4", "a card names other sessions that changed the same files", async 
   const shownB = await card(b);
   assert.deepEqual(shownA.overlaps, [{ sessionId: b.id, name: "Client fixes", files: ["AGENTS.md"] }]);
   assert.deepEqual(shownB.overlaps, [{ sessionId: a.id, name: "Patch Notes JP", files: ["AGENTS.md"] }]);
-});
-
-spec("CARD-5", "sessions waiting on you sort first", async () => {
-  const channelB = await gateway.omp(b.id);
-  try {
-    await prompt(b, channelB, "ask:Proceed?", "blocked");
-    const order = await cards();
-    assert.deepEqual(order.map((shown) => [shown.session.name, shown.turn]), [["Client fixes", "blocked"], ["Patch Notes JP", "done"]]);
-  } finally {
-    channelB.close();
-  }
+  const page = await boardPage();
+  const mark = page.getByRole("article", { name: "Patch Notes JP" }).locator(".overlap-mark");
+  await mark.waitFor();
+  assert.equal(await mark.getAttribute("title"), "Same files changed in Client fixes (AGENTS.md)");
 });
 
 spec("BOARD-2", "tasks waiting on you sort first in their column, and the header counts them", async () => {
-  // CARD-5 left b waiting on you; a's turn is done. Both tasks are in progress.
+  await prompt(a, channelA, "say:hello", "done");
+  const channelB = await gateway.omp(b.id);
+  try {
+    await prompt(b, channelB, "ask:Proceed?", "blocked");
+  } finally {
+    channelB.close();
+  }
+  // b waits on you; a's turn is done. Both tasks are in progress; a was created first.
   const page = await boardPage();
   const column = page.getByRole("region", { name: "In progress" });
+  const waiting = page.locator(".app-header .waiting summary");
   await column.locator(".card-blocked").waitFor();
-  assert.deepEqual(await column.locator(".card strong").allTextContents(), ["Client fixes", "Patch Notes JP"]);
-  assert.equal(await page.getByRole("navigation", { name: "Menus" }).getByRole("link", { name: "Board" }).locator(".badge").textContent(), "1");
+  assert.deepEqual(await column.locator(".card-link").allTextContents(), ["Client fixes", "Patch Notes JP"]);
+  assert.equal(await waiting.textContent(), "1 waiting on you");
+
+  // A task assigned to someone else waits on them, not on you.
+  const jogi = await gateway.data<{ id: string }>("POST", "/people", { name: "Jogi" });
+  await gateway.data("PATCH", `/tasks/${b.taskId}`, { assigneeId: jogi.id });
+  await waiting.waitFor({ state: "detached" });
+  assert.deepEqual(await column.locator(".card-link").allTextContents(), ["Patch Notes JP", "Client fixes"]);
+  await gateway.data("PATCH", `/tasks/${b.taskId}`, { assigneeId: null });
+  await waiting.waitFor();
 });
 
-spec("BOARD-1", "the board shows tasks in columns by state, each with its topics and its session's light, messages, and changes", async () => {
-  const release = await gateway.data<{ id: string }>("POST", `/projects/${projectId}/topics`, { name: "Release" });
+spec("UI-5", "the header counts the tasks waiting on you, on every page, and links to them", async () => {
+  // BOARD-2 left b waiting on you.
+  const page = await boardPage();
+  const header = page.locator(".app-header");
+  for (const hash of ["#/", `#/t/${a.taskId}`, "#/t", "#/all"]) {
+    await page.evaluate((target) => { window.location.hash = target; }, hash);
+    assert.equal(await header.locator(".waiting summary").textContent(), "1 waiting on you", `on ${hash}`);
+  }
+  await header.locator(".waiting summary").click();
+  const links = header.getByRole("navigation", { name: "Waiting on you" }).getByRole("link");
+  assert.deepEqual(await links.allTextContents(), ["Client fixes"]);
+  await links.first().click();
+  await page.waitForURL(new RegExp(`#/t/${b.taskId}$`));
+  assert.equal(await page.getByRole("navigation", { name: "Tasks" }).getByRole("link", { name: /Client fixes/ }).getAttribute("aria-current"), "page");
+});
+
+spec("BOARD-1", "the board shows open, in-progress, and in-review tasks, each with its topics, assignee, and session light and machine", async () => {
+  const release = await gateway.data<{ id: string; color: string }>("POST", `/projects/${projectId}/topics`, { name: "Release" });
   await gateway.data("PUT", `/tasks/${a.taskId}/topics/${release.id}`);
+  const { person: owner } = await gateway.data<{ person: { id: string; name: string; color: string } }>("GET", "/me");
+  await gateway.data("PATCH", `/tasks/${a.taskId}`, { assigneeId: owner.id });
   await gateway.data("POST", `/projects/${projectId}/tasks`, { title: "Leaderboard filters" });
   const page = await boardPage();
-  assert.deepEqual(await page.getByRole("region", { name: "Board" }).locator(".column h2").allTextContents(), ["Open 1", "In progress 2", "In review 0", "Done 0"]);
-  await page.getByRole("region", { name: "Open" }).getByRole("link", { name: /Leaderboard filters.*No session/ }).waitFor();
-  // b's card names a's session among its overlaps, so pick a's card by its title.
-  const cardA = page.getByRole("region", { name: "In progress" }).locator(".card").filter({ has: page.locator("strong", { hasText: "Patch Notes JP" }) });
-  await cardA.locator(".chip", { hasText: "Release" }).waitFor();
-  await cardA.getByLabel("Turn done").waitFor();
-  await cardA.getByText("say:hello").waitFor();
-  await cardA.getByText("2 uncommitted · 1 unpushed").waitFor();
-  await cardA.getByRole("link", { name: "PR #7" }).waitFor();
+  const board = page.getByRole("region", { name: "Board" });
+  await board.getByRole("article", { name: "Leaderboard filters" }).getByText("No session").waitFor();
+  assert.deepEqual(await board.locator(".column h2").allTextContents(), ["Open 1", "In progress 2", "In review 0"]);
+
+  const cardA = board.getByRole("article", { name: "Patch Notes JP" });
+  const topic = cardA.getByRole("button", { name: "Release" });
+  await topic.waitFor();
+  assert.equal(await topic.evaluate((element) => getComputedStyle(element).color), rgb(release.color));
+  const avatar = cardA.getByRole("img", { name: owner.name });
+  await avatar.waitFor();
+  assert.equal(await avatar.evaluate((element) => getComputedStyle(element).backgroundColor), rgb(owner.color));
+  await cardA.getByLabel("Idle").waitFor();
+  assert.equal(await cardA.locator(".machine").textContent(), a.machine);
+  // No messages, no git: what the session said and changed is on its task's page.
+  assert.equal(await cardA.getByText("say:hello").count(), 0);
+  assert.equal(await cardA.getByText(/uncommitted|unpushed|PR #/).count(), 0);
   await cardA.click();
   await page.waitForURL(new RegExp(`#/t/${a.taskId}$`));
 });
@@ -371,7 +402,7 @@ spec("AGENT-1", "the session page opens the session's chat in Tern; only the gat
 });
 
 spec("AGENT-3", "web and Tern prompts land in the same conversation", async () => {
-  // CARD-2 typed say:hello in Tern; the web shows it and its reply.
+  // BOARD-2 typed say:hello in Tern; the web shows it and its reply.
   const chat = await chatShowing(a, "say:hello");
   await chat.frame.getByText("hello", { exact: true }).first().waitFor({ state: "attached" });
   const done = turnDone();
@@ -474,19 +505,28 @@ spec("AGENT-7", "text in any script, symbols and emoji show in a font that has t
   assert.equal(await fontsStatus(host, "http://elsewhere.example"), 403);
 });
 
-spec("CARD-1", "a card shows whether its session is blocked on you, working, done, or stopped", async () => {
+spec("CARD-1", "a card shows whether its session is waiting on you, working, idle, or stopped; working pulses", async () => {
   assert.equal((await card(b)).turn, "blocked");
+  const page = await boardPage();
+  const lightOf = (title: string, label: string) => page.getByRole("article", { name: title }).locator(".card-session").getByLabel(label, { exact: true });
+  await lightOf("Client fixes", "Waiting on you").waitFor();
 
   await prompt(a, channelA, "hold:later", "working");
   assert.equal((await card(a)).turn, "working");
+  const working = lightOf("Patch Notes JP", "Working");
+  await working.waitFor();
+  assert.equal(await working.evaluate((element) => getComputedStyle(element).animationName), "pulse");
   const done = channelA.event((event) => event.type === "turn" && event.turn === "done");
   await fake.holding();
   fake.release();
   await done;
   assert.equal((await card(a)).turn, "done");
+  await lightOf("Patch Notes JP", "Idle").waitFor();
+  assert.equal(await lightOf("Patch Notes JP", "Idle").evaluate((element) => getComputedStyle(element).animationName), "none");
 
   execFileSync("podman", ["stop", "-t", "0", `am-${a.id}`]);
   assert.equal((await card(a)).turn, "stopped");
+  await lightOf("Patch Notes JP", "Stopped").waitFor();
 });
 
 spec("SESSION-10", "opening a session whose container stopped starts it again on its last chat", async () => {
