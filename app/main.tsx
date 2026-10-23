@@ -4,7 +4,7 @@ import "@fontsource/dm-mono/500.css";
 import { StrictMode, useEffect, useState, type SubmitEvent } from "react";
 import { createRoot } from "react-dom/client";
 import { AllTasks } from "./AllTasks.tsx";
-import { api, usePolled, type Card, type Person, type Project, type TaskSummary, type Topic } from "./api.ts";
+import { api, chooseStore, LOCAL_STORE, usePolled, type Card, type Person, type Project, type StoreListing, type TaskSummary, type Topic } from "./api.ts";
 import { Board, waitsOnYou } from "./Board.tsx";
 import { SessionFrames } from "./SessionFrames.tsx";
 import { TaskList } from "./TaskList.tsx";
@@ -56,7 +56,7 @@ function NewProject({ onCreated, onCancel }: { onCreated: (project: Project) => 
       name: String(form.get("name")).trim(),
       ...(repoPath === "" ? {} : { repoPath }),
       hostSessions: form.get("hostSessions") === "on",
-    }).then(onCreated, (cause: Error) => setError(cause.message));
+    }, LOCAL_STORE).then(onCreated, (cause: Error) => setError(cause.message));
   };
   return (
     <form className="panel new-project" onSubmit={submit} aria-label="New project">
@@ -149,13 +149,18 @@ function AppHeader({ route, waiting }: { route: Route; waiting: TaskSummary[] })
 }
 
 function App() {
-  const projects = usePolled<Project[]>("/projects", 30_000);
+  // STORE-3: the gateway's own projects and its hubs'.
+  const stores = usePolled<StoreListing[]>("/stores", 30_000, "/api");
   const [projectId, setProjectId] = useState<string | null>(() => localStorage.getItem("am.project"));
   const route = useRoute();
   const { page, taskId, tab } = route;
   const [creatingProject, setCreatingProject] = useState(false);
   const [openTopic, setOpenTopic] = useState<string | null>(null);
-  const project = projects.data?.find((candidate) => candidate.id === projectId) ?? projects.data?.[0] ?? null;
+  const listed = (stores.data ?? []).flatMap((store) => store.projects.map((project) => ({ store, project })));
+  const chosen = listed.find((entry) => entry.project.id === projectId) ?? listed[0] ?? null;
+  const project = chosen?.project ?? null;
+  // Before the store's data loads below: everything the page reads comes from the project's store.
+  chooseStore(chosen?.store.hub ?? null);
   const tasks = usePolled<TaskSummary[]>(project === null ? null : `/projects/${project.id}/tasks`, 3_000);
   const cards = usePolled<Card[]>(project === null ? null : `/projects/${project.id}/cards`, 2_000);
   const topics = usePolled<Topic[]>(project === null ? null : `/projects/${project.id}/topics`, 5_000);
@@ -172,13 +177,13 @@ function App() {
     window.location.hash = "#/";
   };
 
-  if (projects.error === "authentication required") return <main className="empty"><Login onLoggedIn={projects.refresh} /></main>;
-  if (projects.data === null) return <main className="empty">{projects.error ?? "Loading…"}</main>;
+  if (stores.error === "authentication required") return <main className="empty"><Login onLoggedIn={stores.refresh} /></main>;
+  if (stores.data === null) return <main className="empty">{stores.error ?? "Loading…"}</main>;
   if (project === null || creatingProject) {
     return (
       <main className="empty">
         <NewProject
-          onCreated={(created) => { projects.refresh(); choose(created.id); }}
+          onCreated={(created) => { stores.refresh(); choose(created.id); }}
           onCancel={project === null ? null : () => setCreatingProject(false)}
         />
       </main>
@@ -225,7 +230,7 @@ function App() {
       {/* Kept while the board shows, so the chats stay loaded. */}
       <div className="tasks-page" hidden={page !== "tasks"}>
         <TaskList
-          projects={projects.data}
+          stores={stores.data}
           project={project}
           onProject={choose}
           onNewProject={() => setCreatingProject(true)}
@@ -257,6 +262,7 @@ function App() {
             covered={tab !== "chat"}
             running={running}
             stopped={new Set(cards.data?.filter((card) => card.turn === "stopped").map((card) => card.session.id))}
+            hub={chosen?.store.url ?? null}
           />
         </main>
       </div>

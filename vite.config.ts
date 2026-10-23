@@ -5,6 +5,7 @@ import type { Plugin, PreviewServer, ViteDevServer } from "vite";
 import { handleApi } from "./server/api.ts";
 import { AuthStore } from "./server/auth.ts";
 import { loadConfig } from "./server/config.ts";
+import { Hubs, loadHubs } from "./server/hubs.ts";
 import { StoreService } from "./server/store/service.ts";
 import { TernProxy } from "./server/tern-proxy.ts";
 
@@ -26,6 +27,7 @@ function gateway(): Plugin {
     globalThis.agentmonitorStore?.close();
     const config = loadConfig();
     const auth = new AuthStore(config);
+    const hubs = new Hubs(loadHubs(config.configDir));
     const store = new StoreService(config.stateDir, config);
     const tern = new TernProxy({ config, auth, store });
     globalThis.agentmonitorStore = store;
@@ -33,7 +35,7 @@ function gateway(): Plugin {
     server.middlewares.use(async (request, response, next) => {
       // Tern hosts first: Vite would answer them with the monitor's own pages.
       if (await tern.handleRequest(request, response)) return;
-      if (await handleApi(request, response, { config, auth, store })) return;
+      if (await handleApi(request, response, { config, auth, store, hubs })) return;
       next();
     });
     // Upgrades Tern does not take are Vite's own (HMR), so they are left alone.

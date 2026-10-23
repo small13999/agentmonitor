@@ -126,6 +126,8 @@
     "tests/host-session.test.ts::HOST-7::a session in the main checkout has the user's omp chats there, as omp in a terminal does": "72151c6679806619",
     "tests/host-session.test.ts::HOST-6::a host session works in the main checkout, one per project, and ending it leaves the checkout as it is": "bfd54fecda06d080",
     "tests/host-session.test.ts::HOST-5::a host session never changes the user's omp, Tern, ssh, git, or gh configuration": "8cd5da1a27ae4749",
+    "tests/hubs.test.ts::STORE-3::a client lists its hubs' projects beside its own, shows a hub project as the hub's site does, and marks an unreachable hub unavailable": "94d4e1fae64f3b80",
+    "tests/hubs.test.ts::STORE-4::starting a session in a hub project starts it on the hub, and fails naming the hub when it is unreachable": "291d3db565361054",
     "tests/session-container.test.ts::SESSION-5::a session belongs to one task and works in a worktree of the task's branch on one machine": "b806d9dbd16423c1",
     "tests/session-container.test.ts::SESSION-4::a chat starts with the workflow context and the repository's AGENTS.md": "784c5cf4713acc08",
     "tests/session-container.test.ts::TASK-6::a session's first chat starts with its task's title, description, status, and comments": "e1a27b5bcb8c9d52",

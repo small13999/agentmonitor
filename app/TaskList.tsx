@@ -1,4 +1,4 @@
-import { api, type Card, type Project, type Task, type TaskSummary } from "./api.ts";
+import { api, type Card, type Project, type StoreListing, type Task, type TaskSummary } from "./api.ts";
 import { HostMark, Light } from "./Board.tsx";
 import { InlineCreate } from "./InlineCreate.tsx";
 
@@ -11,7 +11,7 @@ const NEW_PROJECT = "new";
  * project menu also creates projects (UI-3).
  */
 export function TaskList(props: {
-  projects: Project[];
+  stores: StoreListing[];
   project: Project;
   onProject: (id: string) => void;
   onNewProject: () => void;
@@ -28,7 +28,15 @@ export function TaskList(props: {
         onChange={(event) => (event.target.value === NEW_PROJECT ? props.onNewProject() : props.onProject(event.target.value))}
         aria-label="Project"
       >
-        {props.projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+        {props.stores.length === 1
+          ? props.stores[0].projects.map(projectOption)
+          : props.stores.map((store) => (
+            // STORE-3: grouped by store; a hub that cannot be reached says why, its last known projects stay.
+            <optgroup key={store.hub ?? ""} label={store.unavailable === null ? store.name : `${store.name} (unavailable)`}>
+              {store.projects.map(projectOption)}
+              {store.unavailable !== null && <option disabled value="">{`Unavailable: ${store.unavailable}`}</option>}
+            </optgroup>
+          ))}
         <option value={NEW_PROJECT}>+ Project</option>
       </select>
       <InlineCreate
@@ -59,4 +67,8 @@ export function TaskList(props: {
       })}
     </nav>
   );
+}
+
+function projectOption(project: Project) {
+  return <option key={project.id} value={project.id}>{project.name}</option>;
 }

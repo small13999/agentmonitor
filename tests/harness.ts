@@ -79,6 +79,8 @@ export class Gateway {
         AGENTMONITOR_STATE_DIR: stateDir,
         AGENTMONITOR_AUTH_MODE: "local",
         AGENTMONITOR_WORKSPACE_RUNTIME: options.runtime,
+        // Never the user's settings, e.g. the hubs of their hubs.json (STORE-3).
+        AGENTMONITOR_CONFIG_DIR: join(stateDir, "config"),
         ...options.env,
       },
       stdio: ["ignore", "pipe", "pipe"],
@@ -102,7 +104,8 @@ export class Gateway {
   }
 
   async stop(): Promise<void> {
-    if (this.child.exitCode === null) {
+    // A gateway already stopped (by a test, then again after it) exited on its signal: no exit code.
+    if (this.child.exitCode === null && this.child.signalCode === null) {
       const { promise, resolve } = Promise.withResolvers<void>();
       this.child.once("exit", () => resolve());
       this.child.kill();

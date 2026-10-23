@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { isAuthPath, isHealthPath, type AuthStore } from "./auth.ts";
 import type { GatewayConfig } from "./config.ts";
+import { HUB_API_PREFIX, type Hubs } from "./hubs.ts";
 import { handleStoreApi } from "./store/http.ts";
 import type { StoreService } from "./store/service.ts";
 
@@ -8,6 +9,8 @@ export interface ApiDeps {
   config: GatewayConfig;
   auth: AuthStore;
   store: StoreService;
+  /** STORE-3: the hubs whose projects this gateway lists beside its own. */
+  hubs: Hubs;
 }
 
 export function sendJson(response: ServerResponse, status: number, body: unknown): void {
@@ -46,9 +49,10 @@ function clientIp(request: IncomingMessage): string {
  * (remote mode), and the store. Returns true when the request was handled.
  */
 export async function handleApi(request: IncomingMessage, response: ServerResponse, deps: ApiDeps): Promise<boolean> {
-  const { pathname } = new URL(request.url ?? "/", "http://localhost");
-  if (!isHealthPath(pathname) && !isAuthPath(pathname) && !pathname.startsWith("/api/store/")) return false;
-  const { config, auth, store } = deps;
+  const { pathname, search } = new URL(request.url ?? "/", "http://localhost");
+  const stores = pathname === "/api/stores" || pathname.startsWith(HUB_API_PREFIX);
+  if (!isHealthPath(pathname) && !isAuthPath(pathname) && !pathname.startsWith("/api/store/") && !stores) return false;
+  const { config, auth, store, hubs } = deps;
 
   // Only the monitor's own host reaches its API; a Tern host or any other answers as unknown.
   if (!auth.validHost(request, config.publicOrigin)) {
@@ -93,14 +97,23 @@ export async function handleApi(request: IncomingMessage, response: ServerRespon
       sendJson(response, 401, { ok: false, error: "authentication required" });
       return true;
     }
-    if (pathname.startsWith("/api/store/")) {
+    if (pathname.startsWith("/api/store/") || stores) {
       if (request.method !== "GET" && !auth.validOrigin(request, config.publicOrigin)) {
         sendJson(response, 403, { ok: false, error: "cross-origin mutation refused" });
         return true;
       }
-      // PERSON-1: until login exists every human request is the store's owner.
-      await handleStoreApi(request, response, store, store.store.ownerPrincipal());
-      return true;
+      // STORE-3: the gateway's own projects, then each hub's.
+      if (request.method === "GET" && pathname === "/api/stores") {
+        const own = { hub: null, name: config.machineName, url: null, projects: store.store.listProjects(store.store.ownerPrincipal()), unavailable: null };
+        sendJson(response, 200, { ok: true, data: [own, ...(await hubs.listings())] });
+        return true;
+      }
+      if (await hubs.handle(request, response, pathname, search)) return true;
+      if (pathname.startsWith("/api/store/")) {
+        // PERSON-1: until login exists every human request is the store's owner.
+        await handleStoreApi(request, response, store, store.store.ownerPrincipal());
+        return true;
+      }
     }
     sendJson(response, 404, { ok: false, error: "unknown endpoint" });
     return true;
