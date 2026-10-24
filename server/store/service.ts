@@ -5,12 +5,14 @@ import { userInfo } from "node:os";
 import { basename, join } from "node:path";
 import { z } from "zod";
 import type { Automation, Card, EndedSession, HistoryEntry, TaskDetail, TaskSummary, UnpushedWork, Work } from "../../shared/api.ts";
+import { gatewayZone, hostOrigin } from "../../shared/hosts.ts";
 import { projectCards } from "../cards.ts";
 import { CHAT_SOCKET, chatAnswers, sendPrompt } from "../chat.ts";
 import { DEPLOY_INSTRUCTION } from "../deploy.ts";
 import { fileClock, systemClock, type Clock } from "../scheduler/clock.ts";
 import { runWork, taskWork, withBadges } from "../work.ts";
 import { CLOUDFLARE_API_PREFIX, CloudflareBroker } from "../cloudflare.ts";
+import { PREVIEW_SOCKET } from "../previews.ts";
 import type { GatewayConfig } from "../config.ts";
 import {
   addWorktree,
@@ -52,11 +54,17 @@ import { blobFile, workspaceFile, type WorkspaceRoot } from "./workspace-files.t
 type ServiceConfig = Pick<
   GatewayConfig,
   | "workspaceRuntime" | "workspaceMemoryMib" | "machineName" | "ompAgentDir" | "credentialsHome" | "cloudflareApi" | "ownerEmail"
-  | "clockFile"
+  | "clockFile" | "publicOrigin"
 >;
 
 /** The part of run/launch.json the gateway reads back: the agent's working directory and folder as it sees them. */
 const launchFile = z.object({ cwd: z.string(), agentFolder: z.string().nullable() });
+
+/** What a task's preview host shows (PREVIEW-1, PREVIEW-3). */
+export type PreviewTarget =
+  | { kind: "none"; task: Task }
+  | { kind: "stopped" | "closed"; task: Task; session: Session }
+  | { kind: "open"; task: Task; session: Session; socket: string; port: number };
 
 function failure(cause: unknown): string {
   return cause instanceof Error && "stderr" in cause ? String(cause.stderr).trim() : String(cause);
@@ -203,10 +211,13 @@ export class StoreService implements StoreContext {
    * SESSION-10: the session's processes, started again on its newest chat when they have
    * stopped, or when they run without a chat host (started before sessions had one);
    * everyone asking waits on the one start. `starting` is called when there is a start to wait on.
+   * `needs` names the run directory's sockets the processes must serve: a preview also needs
+   * the preview relay, which sessions started before previews lack.
    */
-  private async startIfStopped(runtime: Runtime, session: Session, starting: () => void = () => undefined): Promise<void> {
+  private async startIfStopped(runtime: Runtime, session: Session, starting: () => void = () => undefined, needs = [CHAT_SOCKET]): Promise<void> {
     let start = this.starts.get(session.id);
-    if (start === undefined && !(existsSync(join(this.dirs(session.id).run, CHAT_SOCKET)) && await runtime.running(session.id))) {
+    const run = this.dirs(session.id).run;
+    if (start === undefined && !(needs.every((socket) => existsSync(join(run, socket))) && await runtime.running(session.id))) {
       // Another request may have begun the start while this one asked the runtime.
       start = this.starts.get(session.id);
       if (start === undefined) {
@@ -217,6 +228,44 @@ export class StoreService implements StoreContext {
     if (start === undefined) return;
     starting();
     await start;
+  }
+
+  /**
+   * PREVIEW-1: opens the task's preview on a port of the session's workspace, or closes it
+   * (null). The URL is the preview host's under a hub's public origin; a local monitor's
+   * depends on the port the browser uses, so the task's page links it instead.
+   */
+  setPreviewPort(principal: Principal, sessionId: string, port: number | null): { session: Session; url: string | null } {
+    const session = this.store.setPreviewPort(principal, sessionId, port);
+    const { publicOrigin } = this.config;
+    const url = port === null || publicOrigin === null || session.taskId === null
+      ? null
+      : `${hostOrigin(gatewayZone(publicOrigin), { kind: "preview", taskId: session.taskId })}/`;
+    return { session, url };
+  }
+
+  /**
+   * PREVIEW-1, PREVIEW-3: what the task's preview host shows: nothing without a running
+   * session, the session as stopped while its processes are not running (or run without a
+   * preview relay, from before previews), nothing while the agent opened no port, else the
+   * relay's socket and the port.
+   */
+  async previewTarget(principal: Principal, taskId: string): Promise<PreviewTarget> {
+    const { task, session } = this.store.previewSession(principal, taskId);
+    const runtime = session === null ? undefined : this.runtimes?.[session.runtime];
+    if (session === null || runtime === undefined) return { kind: "none", task };
+    const socket = join(this.dirs(session.id).run, PREVIEW_SOCKET);
+    if (this.starts.has(session.id) || !existsSync(socket) || !(await runtime.running(session.id))) return { kind: "stopped", task, session };
+    if (session.previewPort === null) return { kind: "closed", task, session };
+    return { kind: "open", task, session, socket, port: session.previewPort };
+  }
+
+  /** PREVIEW-3: starts the task's running session again, as opening its chat would, also when it runs without a preview relay. */
+  async startPreview(principal: Principal, taskId: string): Promise<void> {
+    const { session } = this.store.previewSession(principal, taskId);
+    const runtime = session === null ? undefined : this.runtimes?.[session.runtime];
+    if (session === null || runtime === undefined) throw new StoreError(409, "the task has no running session");
+    await this.startIfStopped(runtime, session, undefined, [CHAT_SOCKET, PREVIEW_SOCKET]);
   }
 
   /**

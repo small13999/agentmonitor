@@ -61,6 +61,10 @@ const USAGE = `usage: am [--json] COMMAND [--task ID]
   topic unlink NAME...                unlink the task from topics
   session show [ID]                   a session, its task or automation, and its state
                                       (default: this one)
+  preview PORT                        show the server listening on PORT in this session's
+                                      workspace as the task's preview: a link people open
+                                      from the task's page (and the hub's URL, printed)
+  preview off                         close the task's preview
   folder                              the files in the task's folder (a run's: its
                                       automation's), who added each, when
   folder add FILE [PATH]              put FILE into the folder as PATH (default: its name),
@@ -1289,6 +1293,18 @@ async function main(args: string[]): Promise<void> {
       session.endedAt === null ? `running${card === undefined ? "" : `: ${LIGHT_LABEL[card.turn]}`}` : `ended ${new Date(session.endedAt).toISOString()}`,
       ...(card === undefined ? [] : [`cloudflare ${cloudflareLine(card.cloudflare)}`]),
     ].join("\n"));
+    return;
+  }
+
+  // PREVIEW-1: the task's preview shows a port of this session's workspace.
+  if (group === "preview" && command !== undefined && rest.length === 0) {
+    const port = command === "off" ? null : Number(command);
+    if (port !== null && (!Number.isInteger(port) || port < 1 || port > 65535)) throw new CliError(`no port: ${command}`);
+    const opened = await call("PUT", `/sessions/${me.session.id}/preview`, { port });
+    const url = isRecord(opened) && typeof opened.url === "string" ? opened.url : null;
+    print(json, opened, () => port === null
+      ? "the task's preview is closed"
+      : `the task's preview shows port ${port}${url === null ? ": people open it from the task's page (Preview)" : ` at ${url}`}`);
     return;
   }
 

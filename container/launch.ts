@@ -3,7 +3,7 @@
 // container entrypoint and the host entry (HOST-2) share it; each says where things live.
 import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { createServer, connect } from "node:net";
+import { createServer, connect, type Socket } from "node:net";
 import { join } from "node:path";
 import { startChatHost } from "./chat-host.ts";
 
@@ -54,6 +54,66 @@ function readLaunch(run: string): Launch {
   }
   const { cwd, model, resume, prompt, agentFolder, cloudflare } = launch;
   return { cwd, model, resume, prompt, agentFolder, cloudflare };
+}
+
+/** A connection to the port on this machine's loopback, IPv4 or IPv6 (dev servers listen on either for `localhost`); null when nothing listens. */
+async function connectLocal(port: number): Promise<Socket | null> {
+  for (const host of ["127.0.0.1", "::1"]) {
+    const socket = connect(port, host);
+    const opened = Promise.withResolvers<boolean>();
+    socket.once("connect", () => opened.resolve(true));
+    socket.once("error", () => opened.resolve(false));
+    if (await opened.promise) return socket;
+    socket.destroy();
+  }
+  return null;
+}
+
+/**
+ * PREVIEW-1: the gateway reaches the servers in the session's workspace through
+ * run/preview.sock (server/previews.ts): each connection names a port on its first line, then
+ * carries that port's traffic. When nothing listens there, the gateway gets a 502 that says so.
+ */
+async function servePreviews(run: string): Promise<void> {
+  const path = join(run, "preview.sock");
+  rmSync(path, { force: true });
+  const server = createServer((client) => {
+    client.on("error", () => client.destroy());
+    let buffered = Buffer.alloc(0);
+    const onData = (chunk: Buffer): void => {
+      buffered = Buffer.concat([buffered, chunk]);
+      const end = buffered.indexOf(10);
+      if (end === -1) {
+        if (buffered.length > 8) client.destroy();
+        return;
+      }
+      client.off("data", onData);
+      client.pause();
+      const port = Number(buffered.subarray(0, end).toString());
+      const rest = buffered.subarray(end + 1);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        client.destroy();
+        return;
+      }
+      void connectLocal(port).then((upstream) => {
+        if (upstream === null) {
+          const body = `Nothing in the session listens on port ${port}.\n`;
+          client.end(`HTTP/1.1 502 Bad Gateway\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: ${Buffer.byteLength(body)}\r\nconnection: close\r\n\r\n${body}`);
+          return;
+        }
+        upstream.on("error", () => client.destroy());
+        upstream.on("close", () => client.destroy());
+        client.on("close", () => upstream.destroy());
+        if (rest.length > 0) upstream.write(rest);
+        client.pipe(upstream).pipe(client);
+      });
+    };
+    client.on("data", onData);
+  });
+  const listening = Promise.withResolvers<void>();
+  server.once("error", listening.reject);
+  server.listen(path, listening.resolve);
+  await listening.promise;
 }
 
 export async function startSession(paths: SessionPaths): Promise<void> {
@@ -110,7 +170,7 @@ export async function startSession(paths: SessionPaths): Promise<void> {
     env.CLOUDFLARE_API_BASE_URL = `http://127.0.0.1:${address.port}/client/v4`;
     env.CLOUDFLARE_API_TOKEN = "agent-monitor";
   }
-
+  await servePreviews(paths.run);
   await startChatHost({
     run: paths.run,
     cwd: launch.cwd,

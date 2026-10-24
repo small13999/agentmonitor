@@ -68,12 +68,12 @@ spec("PREVIEW-2", "the UI and a task's preview each answer on their own origin u
   const projectId = await created("/projects", { name: "draftcoach" });
   const taskId = await created(`/projects/${projectId}/tasks`, { title: "Hosts" });
 
-  // The task's preview host answers on its own origin; there is no preview yet.
+  // The task's preview host answers on its own origin; with no running session it has no preview.
   const previewOrigin = `https://am-p-${taskId}.${ZONE}`;
   const preview = await context.newPage();
   const answer = await preview.goto(`${previewOrigin}/`);
   assert.equal(answer?.status(), 404);
-  assert.equal(await preview.locator("body").textContent(), "This task has no preview yet.");
+  assert.match(await preview.locator("body").textContent() ?? "", /The task has no running session, so it has no preview/);
   assert.equal(await preview.evaluate(() => location.origin), previewOrigin);
 
   // The hub sets no cookie, so no host shares one with another.

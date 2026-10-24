@@ -68,6 +68,7 @@ function sessionsTable(name: string): string {
   run_ended_by_id TEXT,
   run_reason TEXT,
   is_run INTEGER NOT NULL DEFAULT 0,
+  preview_port INTEGER,
   CHECK ((task_id IS NULL) != (automation_id IS NULL))
 );`;
 }
@@ -381,6 +382,7 @@ function session(row: Row): Session {
     model: row.model === null ? null : String(row.model),
     startedAt: Number(row.started_at),
     endedAt: row.ended_at === null ? null : Number(row.ended_at),
+    previewPort: row.preview_port === null || row.preview_port === undefined ? null : Number(row.preview_port),
     run: Number(row.is_run) !== 1 ? null : {
       startedBy: actorOfRow(row.run_started_by_kind, row.run_started_by_id),
       triggerContext: row.run_trigger_context === null ? "" : String(row.run_trigger_context),
@@ -493,6 +495,8 @@ export class Store {
       this.db.exec("ALTER TABLE sessions ADD COLUMN is_run INTEGER NOT NULL DEFAULT 0");
       this.db.exec("UPDATE sessions SET is_run = 1 WHERE automation_id IS NOT NULL");
     }
+    // PREVIEW-1: stores from before previews.
+    this.addColumn("sessions", "preview_port", "INTEGER");
     // PERSON-1: every store has its owner; TASK-13 and UI-4 on stores from before people.
     if (this.db.prepare("SELECT 1 FROM people WHERE owner = 1").get() === undefined) {
       this.db.prepare("INSERT INTO people (id, name, color, owner, created_at) VALUES (?, ?, ?, 1, ?)").run(randomUUID(), ownerName, PALETTE[5], Date.now());
@@ -814,6 +818,24 @@ export class Store {
   private runningSessionOf(taskId: string): Session | null {
     const row = this.db.prepare("SELECT * FROM sessions WHERE task_id = ? AND ended_at IS NULL").get(taskId);
     return row === undefined ? null : session(row);
+  }
+
+  /**
+   * PREVIEW-1: the port of the session's workspace its task's preview shows; null closes the
+   * preview. People who see the project set it, and the session's own agent (`am preview`).
+   */
+  setPreviewPort(principal: Principal, sessionId: string, port: number | null): Session {
+    const found = this.visibleSession(principal, sessionId);
+    if (principal.kind === "agent" && principal.sessionId !== sessionId) throw new StoreError(403, "an agent opens previews of its own session only");
+    if (found.endedAt !== null) throw new StoreError(409, `session ${found.name} has ended`);
+    if (found.taskId === null) throw new StoreError(409, "previews are a task's: this session belongs to an automation");
+    this.db.prepare("UPDATE sessions SET preview_port = ? WHERE id = ?").run(port, sessionId);
+    return { ...found, previewPort: port };
+  }
+
+  /** PREVIEW-1: the task's running session, for its preview host; null when none runs. */
+  previewSession(principal: Principal, taskId: string): { task: Task; session: Session | null } {
+    return { task: this.visibleTask(principal, taskId), session: this.runningSessionOf(taskId) };
   }
 
   whoami(principal: Principal):
@@ -1200,6 +1222,7 @@ export class Store {
         model: input.model ?? null,
         startedAt: Date.now(),
         endedAt: null,
+        previewPort: null,
         run: null,
       };
       this.db.prepare(
@@ -1580,6 +1603,7 @@ export class Store {
         model: owner.model,
         startedAt: Date.now(),
         endedAt: null,
+        previewPort: null,
         run: { startedBy, triggerContext: input.triggerContext ?? "", outcome: null, reason: null, endedBy: null },
       };
       const [kind, id] = actorColumns(startedBy);
@@ -1624,6 +1648,7 @@ export class Store {
         model: input.model ?? owner.model,
         startedAt: Date.now(),
         endedAt: null,
+        previewPort: null,
         run: null,
       };
       this.db.prepare("INSERT INTO sessions (id, project_id, automation_id, name, machine, runtime, checkout, model, started_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)")

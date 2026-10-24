@@ -714,7 +714,7 @@ export function AutomationWorkspace({ project, automationId, tab, chatSessionId,
   const chatSession = sessions.find((session) => session.id === chatSessionId) ?? null;
   return (
     <>
-      <WorkspaceTabs base={pageHref(automationId)} tab={tab} chat={chatOf === null ? null : chatHref(automationId, chatOf)} />
+      <WorkspaceTabs base={pageHref(automationId)} tab={tab} chat={chatOf === null ? null : chatHref(automationId, chatOf)} preview={null} />
       {tab === "page" && (
         <AutomationPage
           detail={detail.data}

@@ -183,7 +183,7 @@ spec("SESSION-5", "sessions from before automations stay their tasks', and the s
   const migrated = await Gateway.start({ runtime: "none", stateDir });
   try {
     const { sessions } = await migrated.data<TaskDetail>("GET", "/tasks/00000000-0000-4000-8000-000000000021");
-    const kept = { projectId: "00000000-0000-4000-8000-000000000001", taskId: "00000000-0000-4000-8000-000000000021", automationId: null, name: "Patch notes", branch: "am/patch-notes-1a2b", baseRef: "main", machine: "pc", checkout: false, run: null };
+    const kept = { projectId: "00000000-0000-4000-8000-000000000001", taskId: "00000000-0000-4000-8000-000000000021", automationId: null, name: "Patch notes", branch: "am/patch-notes-1a2b", baseRef: "main", machine: "pc", checkout: false, previewPort: null, run: null };
     assert.deepEqual(sessions, [
       { ...kept, id: "00000000-0000-4000-8000-000000000032", runtime: "host", model: null, startedAt: 5, endedAt: null },
       { ...kept, id: "00000000-0000-4000-8000-000000000031", runtime: "container", model: "fake/scripted", startedAt: 3, endedAt: 4 },

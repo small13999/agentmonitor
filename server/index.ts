@@ -6,7 +6,7 @@ import { Auth, sendRefusal, validHost } from "./auth.ts";
 import { ChatSockets } from "./chat.ts";
 import { loadConfig } from "./config.ts";
 import { Hubs, loadHubs } from "./hubs.ts";
-import { handlePreview } from "./previews.ts";
+import { Previews } from "./previews.ts";
 import { StoreService } from "./store/service.ts";
 
 const CONTENT_TYPES: Record<string, string> = {
@@ -53,13 +53,14 @@ async function main(): Promise<void> {
   await store.start();
   const auth = new Auth(config, store.store);
   const chats = new ChatSockets({ config, auth, store, hubs });
+  const previews = new Previews({ config, auth, store });
   const distDir = resolve(process.cwd(), "dist");
   const bindHost = process.env.AGENTMONITOR_BIND_HOST ?? "127.0.0.1";
 
   const server = createServer(async (request, response) => {
     try {
       // Preview hosts first: they are tasks' previews, not the monitor.
-      if (await handlePreview(request, response, { config, auth })) return;
+      if (await previews.handleRequest(request, response)) return;
       if (await handleApi(request, response, { config, auth, store, hubs })) return;
       const visitor = await auth.identify(request);
       if (visitor.kind === "refused") {
@@ -76,7 +77,7 @@ async function main(): Promise<void> {
   });
 
   server.on("upgrade", (request, socket, head) => {
-    chats.handleUpgrade(request, socket, head).then(
+    previews.handleUpgrade(request, socket, head).then((handled) => handled || chats.handleUpgrade(request, socket, head)).then(
       (handled) => { if (!handled) socket.destroy(); },
       (cause: unknown) => {
         console.error("upgrade handling failed", cause);

@@ -55,6 +55,8 @@ export interface StoreContext {
   /** CLOUDFLARE-2: humans only; allows the session's Cloudflare writes for 10 minutes from now. */
   allowCloudflareWrites(principal: Principal, sessionId: string): { writesUntil: number };
   revokeCloudflareWrites(principal: Principal, sessionId: string): { writesUntil: null };
+  /** PREVIEW-1: opens the task's preview on a port of the session's workspace, or closes it; the URL where a hub has one. */
+  setPreviewPort(principal: Principal, sessionId: string, port: number | null): { session: Session; url: string | null };
 }
 
 /** Prefix shared by the human gateway route and every agent socket. */
@@ -158,6 +160,8 @@ const draftBody = z.strictObject({
 });
 // CHAT-5: a path as the agent sees it, absolute or relative to its working directory.
 const workspacePathQuery = z.string().min(1).max(4096);
+// PREVIEW-1: the port of the session's workspace the task's preview shows; null closes it.
+const previewBody = z.strictObject({ port: z.int().min(1).max(65535).nullable() });
 /** The most a JSON body may hold; a route may allow more. */
 const JSON_BODY_BYTES = 128 * 1024;
 
@@ -433,6 +437,11 @@ const routes: Route[] = [
     method: "DELETE",
     pattern: new RegExp(`^/sessions/${id}/cloudflare-writes$`),
     handler: (c, p, [sessionId]) => c.revokeCloudflareWrites(p, sessionId),
+  },
+  {
+    method: "PUT",
+    pattern: new RegExp(`^/sessions/${id}/preview$`),
+    handler: async (c, p, [sessionId], body) => c.setPreviewPort(p, sessionId, previewBody.parse(await body()).port),
   },
   // CHAT-6: the person's draft of the session's prompt box; an empty one deletes it.
   { method: "GET", pattern: new RegExp(`^/sessions/${id}/draft$`), handler: (c, p, [sessionId]) => c.drafts.get(p, sessionId) },

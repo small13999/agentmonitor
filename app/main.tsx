@@ -3,6 +3,7 @@ import "@fontsource/dm-mono/400.css";
 import "@fontsource/dm-mono/500.css";
 import { StrictMode, useEffect, useRef, useState, type SubmitEvent } from "react";
 import { createRoot } from "react-dom/client";
+import { hostOrigin, zoneOf } from "../shared/hosts.ts";
 import { AllTasks } from "./AllTasks.tsx";
 import { api, chooseStore, LOCAL_STORE, storeOf, usePolled, type AutomationSummary, type Card, type Person, type Project, type StoreListing, type TaskDetail, type TaskSummary, type Topic } from "./api.ts";
 import { AutomationList, AutomationWorkspace, NewAutomation } from "./Automations.tsx";
@@ -342,7 +343,14 @@ function App() {
           )}
           {page === "tasks" && current !== null && (
             <>
-              <WorkspaceTabs base={`#/t/${current.task.id}`} tab={tab} chat={`#/t/${current.task.id}/chat`} />
+              <WorkspaceTabs
+                base={`#/t/${current.task.id}`}
+                tab={tab}
+                chat={`#/t/${current.task.id}/chat`}
+                preview={currentCard?.session.previewPort == null
+                  ? null
+                  : `${hostOrigin(zoneOf(chosen?.store.url == null ? location : new URL(chosen.store.url)), { kind: "preview", taskId: current.task.id })}/`}
+              />
               {tab === "page" && (
                 <TaskPage key={current.task.id} summary={current} card={currentCard} topics={topics.data ?? []} onChanged={refresh} />
               )}

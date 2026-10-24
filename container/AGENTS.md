@@ -57,6 +57,8 @@ am topic create NAME
 am topic link NAME...                 # link the task to topics
 am topic unlink NAME...
 am session show [ID]                  # a session, its task, its state, its Cloudflare access
+am preview PORT                       # show the server on PORT as the task's preview
+am preview off
 am folder                             # the files in the task's folder, who added each, when
 am folder add FILE [PATH]             # put a file into the folder
 am folder get PATH [FILE]             # a folder file, to FILE or stdout
@@ -76,6 +78,15 @@ am run task RUN                       # make a task of a run: its branch, its ou
 
 `--json` before the command prints JSON instead. Help people set up automations with
 `am automation`; only people delete them.
+
+## Previews
+
+People cannot reach this machine's ports, and must never be sent its IP address. To
+show them a running app (a dev server, a built site), start it in the background
+listening on localhost (or 0.0.0.0), then run `am preview PORT`: the task's page gets a
+Preview link, a URL only people of the store can open, with live reload working. Give
+that URL (it prints on a hub), never `http://localhost:…`. The server stops with the
+session's processes: when the session starts again, start the server again (the port stays open).
 
 ## The task's folder
 

@@ -7,7 +7,7 @@ import { Auth, sendRefusal, validHost } from "./server/auth.ts";
 import { ChatSockets } from "./server/chat.ts";
 import { loadConfig } from "./server/config.ts";
 import { Hubs, loadHubs } from "./server/hubs.ts";
-import { handlePreview } from "./server/previews.ts";
+import { Previews } from "./server/previews.ts";
 import { StoreService } from "./server/store/service.ts";
 
 // Local development gateway. Production uses server/index.ts; both share the server/*
@@ -31,11 +31,12 @@ function gateway(): Plugin {
     const store = new StoreService(config.stateDir, config);
     const auth = new Auth(config, store.store);
     const chats = new ChatSockets({ config, auth, store, hubs });
+    const previews = new Previews({ config, auth, store });
     globalThis.agentmonitorStore = store;
     await store.start();
     server.middlewares.use(async (request, response, next) => {
       // Preview hosts first: Vite would answer them with the monitor's own pages.
-      if (await handlePreview(request, response, { config, auth })) return;
+      if (await previews.handleRequest(request, response)) return;
       if (await handleApi(request, response, { config, auth, store, hubs })) return;
       // AUTH-1: the app's pages and modules too, on the UI's host only.
       const visitor = await auth.identify(request);
@@ -46,7 +47,7 @@ function gateway(): Plugin {
     // Upgrades that are no chat socket are Vite's own (HMR), so they are left alone; in access
     // mode Vite has no socket, so nothing would answer them.
     server.httpServer?.on("upgrade", (request, socket, head) => {
-      chats.handleUpgrade(request, socket, head).then(
+      previews.handleUpgrade(request, socket, head).then((handled) => handled || chats.handleUpgrade(request, socket, head)).then(
         (handled) => { if (!handled && config.authMode === "access") socket.destroy(); },
         (cause: unknown) => {
           console.error("upgrade handling failed", cause);
@@ -89,6 +90,8 @@ export default defineConfig({
     allowedHosts: [".localhost"],
     port: 5173,
     strictPort: true,
+    // Previews' dev servers keep their live reload on `/`: the monitor's own takes another path.
+    hmr: { path: "/__agentmonitor_hmr" },
     // AUTH-1: Vite's own socket (HMR) would take upgrades the gateway never checks.
     ws: process.env.AGENTMONITOR_AUTH_MODE === "access" ? false : undefined,
   },

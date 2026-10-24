@@ -3,7 +3,7 @@ import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
-import { request } from "node:http";
+import { createServer, request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -11,6 +11,7 @@ import { promisify } from "node:util";
 import { after, afterEach, before } from "node:test";
 import { chromium, type Browser, type Locator, type Page } from "playwright";
 import { z } from "zod";
+import { WebSocket, WebSocketServer } from "ws";
 import { DEPLOY_INSTRUCTION } from "../server/deploy.ts";
 import type { ChatDraft } from "../shared/chat.ts";
 import { FakeModel } from "./fake-model.ts";
@@ -307,6 +308,106 @@ spec("HOST-4", "a stopped host session starts again on its last chat when its pa
   channel = await gateway.omp(host.id);
   const shown = await card(host);
   assert.deepEqual([shown.turn, shown.lastUserMessage], ["done", "bash:am whoami"]);
+});
+
+interface PreviewAnswer { status: number; headers: Record<string, string | string[] | undefined>; body: string }
+
+/** A request to the task's preview host on the gateway, as a browser sends it. */
+async function preview(path: string, headers: Record<string, string> = {}, method = "GET"): Promise<PreviewAnswer> {
+  const { promise, resolve, reject } = Promise.withResolvers<PreviewAnswer>();
+  const sent = request({ port: new URL(gateway.url).port, host: "127.0.0.1", method, path, headers: { host: previewHost(), ...headers } }, (response) => {
+    let body = "";
+    response.setEncoding("utf8");
+    response.on("data", (chunk: string) => { body += chunk; });
+    response.on("end", () => resolve({ status: response.statusCode ?? 0, headers: response.headers, body }));
+  });
+  sent.on("error", reject);
+  sent.end();
+  return promise;
+}
+
+function previewHost(): string {
+  return `am-p-${task.id}.localhost:${new URL(gateway.url).port}`;
+}
+
+/** A dev server of the session's: it answers with what it got, redirects to its own localhost, and echoes on a socket. */
+async function devServer(): Promise<{ port: number; close: () => void }> {
+  const server = createServer((incoming, answer) => {
+    if (incoming.url === "/go") {
+      answer.writeHead(302, { location: `http://${incoming.headers.host ?? ""}/there` });
+      answer.end();
+      return;
+    }
+    answer.writeHead(200, { "content-type": "application/json" });
+    answer.end(JSON.stringify({ url: incoming.url, host: incoming.headers.host, cookie: incoming.headers.cookie ?? null, access: incoming.headers["cf-access-jwt-assertion"] ?? null }));
+  });
+  const sockets = new WebSocketServer({ server });
+  sockets.on("connection", (socket) => socket.on("message", (data) => socket.send(`echo ${String(data)}`)));
+  const listening = Promise.withResolvers<void>();
+  server.listen(0, "127.0.0.1", listening.resolve);
+  await listening.promise;
+  const address = server.address();
+  assert.ok(address !== null && typeof address === "object");
+  return { port: address.port, close: () => { sockets.close(); server.close(); } };
+}
+
+spec("PREVIEW-1", "a server in the session's workspace is the task's preview once its agent opens the port: requests, redirects, and sockets reach it without the person's credentials", async () => {
+  const dev = await devServer();
+  try {
+    const before = await preview("/");
+    assert.equal(before.status, 404);
+    assert.match(before.body, /am preview PORT/);
+
+    const opened = gateway.am(host.id, ["preview", String(dev.port)]);
+    assert.equal(opened.code, 0, opened.stderr);
+    const shown = await preview("/hello?x=1", { cookie: "CF_Authorization=secret; app=1", "cf-access-jwt-assertion": "secret" });
+    assert.equal(shown.status, 200);
+    assert.deepEqual(JSON.parse(shown.body), { url: "/hello?x=1", host: `localhost:${dev.port}`, cookie: "app=1", access: null });
+
+    const moved = await preview("/go");
+    assert.equal(moved.status, 302);
+    assert.equal(moved.headers.location, `http://${previewHost()}/there`);
+
+    const socket = new WebSocket(`ws://127.0.0.1:${new URL(gateway.url).port}/live`, { headers: { host: previewHost() } });
+    const echoed = Promise.withResolvers<string>();
+    socket.on("open", () => socket.send("ping"));
+    socket.on("message", (data) => echoed.resolve(String(data)));
+    socket.on("error", echoed.reject);
+    assert.equal(await echoed.promise, "echo ping");
+    socket.close();
+
+    // The task's page links the preview.
+    const page = await openPage(`#/t/${task.id}`);
+    assert.equal(await page.getByRole("link", { name: "Preview" }).getAttribute("href"), `http://${previewHost()}/`);
+  } finally {
+    dev.close();
+  }
+  const gone = await preview("/");
+  assert.equal(gone.status, 502);
+  assert.match(gone.body, new RegExp(`Nothing in the session listens on port`));
+});
+
+spec("PREVIEW-3", "a preview whose session is stopped says so, and its button starts the session again", async () => {
+  const dev = await devServer();
+  try {
+    assert.equal(gateway.am(host.id, ["preview", String(dev.port)]).code, 0);
+    channel.close();
+    for (const { pid } of sessionProcesses(host)) process.kill(pid, "SIGKILL");
+    const stopped = await preview("/");
+    assert.equal(stopped.status, 503);
+    assert.match(stopped.body, /is stopped/);
+    assert.match(stopped.body, /<button>Start the session<\/button>/);
+
+    const origin = `http://${previewHost()}`;
+    assert.equal((await preview("/__agentmonitor/start", { origin: "http://elsewhere.example" }, "POST")).status, 403);
+    const started = await preview("/__agentmonitor/start", { origin }, "POST");
+    assert.equal(started.status, 303);
+    assert.equal(started.headers.location, `${origin}/`);
+    assert.equal(JSON.parse((await preview("/")).body).url, "/");
+    channel = await gateway.omp(host.id);
+  } finally {
+    dev.close();
+  }
 });
 
 spec("SESSION-17", "a session's agent runs with the user's omp settings, the session's own winning, and the user's file stays as it is", async () => {

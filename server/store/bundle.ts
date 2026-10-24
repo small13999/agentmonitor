@@ -126,6 +126,8 @@ const session: z.ZodType<Session> = z.object({
   checkout: z.boolean(),
   model: z.string().nullable(),
   startedAt: z.number(),
+  // Bundles from stores before previews (PREVIEW-1) have no port.
+  previewPort: z.int().nullable().default(null),
   endedAt: z.number().nullable(),
   run: run.nullable(),
 });

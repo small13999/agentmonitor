@@ -21,7 +21,7 @@ through Agent Monitor (dogfooding).
 | 3 | SPEC draft for steps 4–8, reviewed by the user; its Concepts section is agreed | Done: step 4 claims in SPEC.md (`c55171c`); steps 5–8 stay in `SPEC-DRAFT.md` until their step |
 | 4 | Redesign from a clean slate: task page, comments, attachments (folder), people and assignee, board, session Settings tab, topic reader, visual identity; done through Agent Monitor itself | Done: slices merged (`cfb952a`), Studio (`5ff8e0e`, `4ffc0d2`); leftovers (project settings, `am` history/people/changes) in a step 5 slice |
 | 5 | Hub on Hetzner for draftcoach: Cloudflare Tunnel + Access, login, teammate access, flat hosts; the user's local Agent Monitor lists the hub's projects | Done: AUTH-1..3, STORE-3/6, PREVIEW-2, CLOUDFLARE-3 (`5386015`); hub live at am.draftcoach.gg, draftcoach moved there, the PC lists it through `hubs.json`; a hub session answered end to end |
-| 6 | Preview tab per task (and the draftcoach preview login), Deploy changes | Built: Work section and Deploy (CARD-3/4/6, DEPLOY-1, AUTO-16); checks read from GitHub Actions runs (`gh run list --commit`), since fine-grained tokens have no Checks permission. Preview tab next |
+| 6 | Preview tab per task (and the draftcoach preview login), Deploy changes | Built: Work section and Deploy (CARD-3/4/6, DEPLOY-1, AUTO-16); checks read from GitHub Actions runs (`gh run list --commit`), since fine-grained tokens have no Checks permission; previews (PREVIEW-1/3, `am preview PORT`, a Preview link in the task's tabs). Draftcoach preview login next |
 | 7 | Automations | Built: AUTO-1, AUTO-2, AUTO-7..15, SESSION-5 (`fe69e3f`), live on the PC and the hub; first automation (draftcoach Patch review) next |
 | 8 | Agent commits every turn and Agent Monitor pushes the task branch (replaces snapshots), idle stop, "Run session locally" | |
 
@@ -153,10 +153,24 @@ Still open:
   user's omp chats (HOST-7). Still open: how it pulls in other sessions' branches,
   and resuming chats in worktree or container sessions.
 - Unix socket paths are limited to 108 bytes; a long state dir breaks every
-  session (`<state>/sessions/<uuid>/run/tern-daemon.sock` and the others). The
+  session (`<state>/sessions/<uuid>/run/preview.sock` and the others). The
   hub works around it with `AGENTMONITOR_STATE_DIR=/home/agentmonitor/am`, a
   symlink to `~/.local/state/agentmonitor`; the gateway should refuse or shorten
   such paths itself.
+
+### Previews (step 6)
+- A session's ports are never published: the session's launcher serves
+  `run/preview.sock`, a relay to its own loopback (IPv4, then IPv6); each connection
+  names the port on its first line. The agent opens one port per session with
+  `am preview PORT` (`PUT /sessions/<id>/preview`, `sessions.preview_port`); the task's
+  preview host `am-p-<task>` proxies requests and upgrades (live reload) to it as
+  `localhost:<port>`, without Access's cookie and header, and rewrites redirects to
+  the server's own localhost. The task's tabs link it while a port is open.
+- A session without the relay (running since before previews) or whose processes stopped
+  shows as stopped; its Start button restarts it on its newest chat (PREVIEW-3). The
+  dev server dies with the processes: the agent starts it again.
+- The local dev monitor's own Vite live reload moved to `/__agentmonitor_hmr`, so a
+  preview's dev server keeps `/`.
 
 ### Draftcoach preview login (step 6)
 - Prod cookie `__Host-draftcoach_session` is host-only; the API accepts only
@@ -208,15 +222,17 @@ Still open:
 - Next: hub deploy (image rebuild); a tool line's timer starts at `tool_execution_start`,
   so an `ask` shows 0.0s until omp starts it; ended sessions' chats are not shown yet
   (SESSION-2 view).
+- To check: omp's `ask` tool (a form: several questions, options, multi-select, a
+  recommended choice, "Other") through RPC dialogs, so that a question can never block a
+  session: every shape answerable on the page, and an unattended run (automation) that
+  asks must not wait forever.
 
 ## Backlog
 - Per-turn snapshots (TURN-1); TRANSCRIPT claims.
 - A failed turn (for example an expired model key) shows on the card as an error,
   not as "Turn done" with the previous reply.
-- Brotli for the 60 MB Tern wasm; `RECONNECT_SETTLE_MS` retest;
-  stencil-hq/tern-sdk#99.
 - `cloudflared access login` from WSL opens no browser and its link expires after
   about 9 minutes; the client could open the link itself (the user's Windows
   browser) when a hub needs a login.
 - Features of the old UI not yet back: agentctl list, mobile page, cmux terminals,
-  memory view, port previews.
+  memory view.

@@ -164,6 +164,8 @@ export interface Session {
   model: string | null;
   startedAt: number;
   endedAt: number | null;
+  /** PREVIEW-1: the port in the session's workspace that its task's preview host shows; null: no preview. */
+  previewPort: number | null;
   /** What a run of an automation has besides a session's fields; null for a task's session, and for a session on an automation that is no run (AUTO-11). */
   run: Run | null;
 }
