@@ -257,10 +257,10 @@ spec("AUTO-11", "a run is followed up in its session, or in a session on the aut
   const refused = await gateway.api("POST", `/automations/${reviewed.automationId}/sessions`, { runtime: "host", model: "fake/scripted", fromRun: reviewed.id });
   assert.equal(refused.status, 409);
   // A person goes on in the reviewed run's chat and has it deploy.
-  const env = { ...process.env, TERN_DAEMON_SOCKET: join(runDir(reviewed), "tern-daemon.sock"), TERN_CONFIG_DIR: join(runDir(reviewed), "tern-config") };
   const deployed = ended(reviewed);
-  execFileSync("tern", ["send", "workspace/@focused", "text", "bash:gh pr create --fill && gh pr merge --merge && am run end finished"], { env });
-  execFileSync("tern", ["send", "workspace/@focused", "keys", "Enter"], { env });
+  const chat = await gateway.chat(reviewed.id);
+  await chat.rpc({ type: "prompt", message: "bash:gh pr create --fill && gh pr merge --merge && am run end finished" });
+  chat.close();
   const done = await deployed;
   assert.equal(done.run?.outcome, "finished");
   assert.ok(originHas("Audit 5f1b"), "what the person reviewed is deployed");

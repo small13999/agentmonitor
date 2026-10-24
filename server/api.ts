@@ -31,7 +31,7 @@ export async function handleApi(request: IncomingMessage, response: ServerRespon
   if (!isHealthPath(pathname) && !pathname.startsWith("/api/store/") && !stores) return false;
   const { config, auth, store, hubs } = deps;
 
-  // Only the monitor's own host reaches its API; a chat, preview, or unknown host answers as unknown.
+  // Only the monitor's own host reaches its API; a preview or unknown host answers as unknown.
   if (!validHost(request, config.publicOrigin)) {
     sendJson(response, 404, { ok: false, error: "unknown endpoint" });
     return true;

@@ -3,11 +3,11 @@ import { readFile, stat } from "node:fs/promises";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { handleApi, sendJson } from "./api.ts";
 import { Auth, sendRefusal, validHost } from "./auth.ts";
+import { ChatSockets } from "./chat.ts";
 import { loadConfig } from "./config.ts";
 import { Hubs, loadHubs } from "./hubs.ts";
 import { handlePreview } from "./previews.ts";
 import { StoreService } from "./store/service.ts";
-import { TernProxy } from "./tern-proxy.ts";
 
 const CONTENT_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -52,14 +52,13 @@ async function main(): Promise<void> {
   const store = new StoreService(config.stateDir, config);
   await store.start();
   const auth = new Auth(config, store.store);
-  const tern = new TernProxy({ config, auth, store });
+  const chats = new ChatSockets({ config, auth, store, hubs });
   const distDir = resolve(process.cwd(), "dist");
   const bindHost = process.env.AGENTMONITOR_BIND_HOST ?? "127.0.0.1";
 
   const server = createServer(async (request, response) => {
     try {
-      // Chat and preview hosts first: they are sessions' chats and tasks' previews, not the monitor.
-      if (await tern.handleRequest(request, response)) return;
+      // Preview hosts first: they are tasks' previews, not the monitor.
       if (await handlePreview(request, response, { config, auth })) return;
       if (await handleApi(request, response, { config, auth, store, hubs })) return;
       const visitor = await auth.identify(request);
@@ -77,7 +76,7 @@ async function main(): Promise<void> {
   });
 
   server.on("upgrade", (request, socket, head) => {
-    tern.handleUpgrade(request, socket, head).then(
+    chats.handleUpgrade(request, socket, head).then(
       (handled) => { if (!handled) socket.destroy(); },
       (cause: unknown) => {
         console.error("upgrade handling failed", cause);

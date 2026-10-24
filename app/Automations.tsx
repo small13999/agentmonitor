@@ -684,7 +684,7 @@ function AutomationPage({ detail, firings, files, hostSessions, directory, onCha
 
 /**
  * AUTO-7, AUTO-15: one automation in the workspace: its Page, the Chat of one of its sessions
- * (the chats themselves are SessionFrames, as a task's), and its Settings.
+ * (the chat itself is the workspace's SessionChat, as a task's), and its Settings.
  */
 export function AutomationWorkspace({ project, automationId, tab, chatSessionId, hostSessions, onChanged }: {
   project: Project;

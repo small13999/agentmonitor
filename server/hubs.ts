@@ -6,8 +6,10 @@ import { basename, join } from "node:path";
 import type { Readable } from "node:stream";
 import { json } from "node:stream/consumers";
 import { pipeline } from "node:stream/promises";
+import { WebSocket } from "ws";
 import { z } from "zod";
 import type { Project, StoreListing } from "../shared/api.ts";
+import { CHAT_MESSAGE_BYTES } from "./chat.ts";
 
 /** STORE-3: a hub this client lists the projects of, from `<configDir>/hubs.json`. */
 export interface HubConfig {
@@ -61,8 +63,11 @@ const LIST_TIMEOUT_MS = 5_000;
 
 /** Request headers the hub needs to answer a proxied store request; cookies and origin stay local. */
 const FORWARD_REQUEST = ["accept", "content-type", "content-length", "range"];
-/** Response headers of a store answer, also for a folder file's bytes (FOLDER-2). */
-const FORWARD_RESPONSE = ["content-type", "content-length", "content-range", "content-disposition", "accept-ranges", "cache-control", "etag", "last-modified"];
+/** Response headers of a store answer, also for a folder file's bytes (FOLDER-2) and a workspace file's (CHAT-5), which never run as the UI's pages. */
+const FORWARD_RESPONSE = [
+  "content-type", "content-length", "content-range", "content-disposition", "accept-ranges", "cache-control", "etag", "last-modified",
+  "x-content-type-options", "content-security-policy",
+];
 
 class Hub {
   readonly config: HubConfig;
@@ -178,6 +183,32 @@ class Hub {
     response.writeHead(answer.statusCode ?? 502, out);
     await pipeline(answer, response).catch(() => response.destroy());
   }
+
+  /** CHAT-1: the hub's chat socket at the store API `path`, with the client's Access token. */
+  async socket(path: string): Promise<WebSocket> {
+    const token = await this.accessToken();
+    const url = new URL(`/api/store${path}`, this.config.url);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    const socket = new WebSocket(url, { headers: { "cf-access-token": token }, maxPayload: CHAT_MESSAGE_BYTES });
+    const { promise, resolve, reject } = Promise.withResolvers<WebSocket>();
+    // Paused until the caller listens: the hub's first messages can arrive with its upgrade answer.
+    socket.once("open", () => {
+      socket.pause();
+      resolve(socket);
+    });
+    // Answered without an upgrade: the token is refused, or the hub is not there.
+    socket.once("unexpected-response", (request, answer) => {
+      answer.resume();
+      request.destroy();
+      const status = answer.statusCode ?? 0;
+      if (status === 401 || status === 403) this.token = null;
+      const answered = `the hub answered ${status}${answer.statusMessage ? ` ${answer.statusMessage}` : ""}`;
+      reject(new HubUnavailable(status === 401 || status === 403 || status < 400 ? this.loginHint(answered) : answered));
+    });
+    // Kept for the socket's life: an error after open is followed by its close, which the page gets.
+    socket.on("error", (cause) => reject(new HubUnavailable(`unreachable: ${cause.message}`)));
+    return promise;
+  }
 }
 
 /** A project as a hub sends it (shared/api.ts); a hub of another version may send more. */
@@ -215,5 +246,20 @@ export class Hubs {
     }
     await hub.proxy(request, response, `${match[2]}${search}`);
     return true;
+  }
+
+  /**
+   * CHAT-1 through a hub: the hub's chat socket at its store API `path`, or the close the page
+   * gets: 4404 for a hub this client does not have, 4502 for one that is unavailable (STORE-4).
+   */
+  async chatSocket(name: string, path: string): Promise<{ ok: true; socket: WebSocket } | { ok: false; code: number; reason: string }> {
+    const hub = this.hubs.get(name);
+    if (hub === undefined) return { ok: false, code: 4404, reason: `no hub is named ${name}` };
+    try {
+      return { ok: true, socket: await hub.socket(path) };
+    } catch (cause) {
+      if (!(cause instanceof HubUnavailable)) throw cause;
+      return { ok: false, code: 4502, reason: `hub ${name} is unavailable: ${cause.message}` };
+    }
   }
 }

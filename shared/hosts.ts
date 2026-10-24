@@ -1,16 +1,16 @@
 /**
- * PREVIEW-2: the UI, each session's chat, and each task's preview are each their own origin,
- * as flat hosts under one zone, since Cloudflare's universal certificate covers one level only:
- * `am.<zone>` is the UI, `am-t-<session id>.<zone>` a session's chat, `am-p-<task id>.<zone>` a
- * task's preview. A hub's zone is the rest of its public origin after `am.`; a local monitor's
- * is `localhost`, whose names resolve on the browser's own machine, on whatever port it uses.
+ * PREVIEW-2: the UI and each task's preview are each their own origin, as flat hosts under one
+ * zone, since Cloudflare's universal certificate covers one level only: `am.<zone>` is the UI,
+ * `am-p-<task id>.<zone>` a task's preview. A hub's zone is the rest of its public origin after
+ * `am.`; a local monitor's is `localhost`, whose names resolve on the browser's own machine, on
+ * whatever port it uses.
  */
 
 const ID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
-const LABEL = new RegExp(`^(?:am|am-t-(${ID})|am-p-(${ID}))$`);
+const LABEL = new RegExp(`^(?:am|am-p-(${ID}))$`);
 const LOCAL_HOST = /^([^.:]+)\.localhost(?::\d+)?$/;
 
-export type HostRole = { kind: "ui" } | { kind: "chat"; sessionId: string } | { kind: "preview"; taskId: string };
+export type HostRole = { kind: "ui" } | { kind: "preview"; taskId: string };
 
 /** Where the hosts live: `protocol` as URL gives it (`https:`), and `port` empty for the protocol's own. */
 export interface Zone {
@@ -34,22 +34,21 @@ export function gatewayZone(publicOrigin: string | null): Zone {
 
 /** The origin of a host in the zone, without a trailing slash. */
 export function hostOrigin(zone: Zone, role: HostRole): string {
-  const label = role.kind === "ui" ? "am" : role.kind === "chat" ? `am-t-${role.sessionId}` : `am-p-${role.taskId}`;
+  const label = role.kind === "ui" ? "am" : `am-p-${role.taskId}`;
   return `${zone.protocol}//${label}.${zone.zone}${zone.port === "" ? "" : `:${zone.port}`}`;
 }
 
 function labelRole(label: string): HostRole | null {
   const match = LABEL.exec(label);
   if (match === null) return null;
-  if (match[1] !== undefined) return { kind: "chat", sessionId: match[1] };
-  if (match[2] !== undefined) return { kind: "preview", taskId: match[2] };
+  if (match[1] !== undefined) return { kind: "preview", taskId: match[1] };
   return { kind: "ui" };
 }
 
 /**
  * What a request's Host header names. A hub knows its hosts exactly, and any other is none of
- * them (null). A local monitor takes `am-t-…` and `am-p-…` under `localhost` on any port, and
- * every other host as its UI.
+ * them (null). A local monitor takes `am-p-…` under `localhost` on any port, and every other
+ * host as its UI.
  */
 export function hostRole(host: string | undefined, publicOrigin: string | null): HostRole | null {
   const name = (host ?? "").toLowerCase();

@@ -3,7 +3,7 @@
 //   {op:"state"}          turn, model, session file, context usage
 //   {op:"system_prompt"}
 // Every client is also pushed {type:"turn", turn} whenever the main agent's turn changes.
-// The conversation itself reaches the web UI through Tern's chat (omp over ACP), not this channel.
+// The conversation itself reaches the web UI through the chat host (chat-host.ts, omp's RPC mode), not this channel.
 import { rmSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 
@@ -29,7 +29,7 @@ type Turn = "done" | "working" | "blocked";
 
 // The session's chats get the channel's path from their launch (container/launch.ts), and every
 // omp the agent starts itself (a test suite, `omp -p`) inherits it with this extension. Only the
-// chat's omp, whose parent is acp-filter.ts, takes the channel; a newer chat takes it over.
+// chat's omp, whose parent is the chat host, takes the channel; a newer chat takes it over.
 const socketPath = process.env.AGENTMONITOR_CHAT === String(process.ppid) ? process.env.AGENTMONITOR_OMP_SOCKET : undefined;
 
 const clients = new Set<Socket>();

@@ -4,11 +4,11 @@ import { defineConfig } from "vite";
 import type { Plugin, PreviewServer, ViteDevServer } from "vite";
 import { handleApi, sendJson } from "./server/api.ts";
 import { Auth, sendRefusal, validHost } from "./server/auth.ts";
+import { ChatSockets } from "./server/chat.ts";
 import { loadConfig } from "./server/config.ts";
 import { Hubs, loadHubs } from "./server/hubs.ts";
 import { handlePreview } from "./server/previews.ts";
 import { StoreService } from "./server/store/service.ts";
-import { TernProxy } from "./server/tern-proxy.ts";
 
 // Local development gateway. Production uses server/index.ts; both share the server/*
 // modules so behavior cannot drift.
@@ -30,12 +30,11 @@ function gateway(): Plugin {
     const hubs = new Hubs(loadHubs(config.configDir));
     const store = new StoreService(config.stateDir, config);
     const auth = new Auth(config, store.store);
-    const tern = new TernProxy({ config, auth, store });
+    const chats = new ChatSockets({ config, auth, store, hubs });
     globalThis.agentmonitorStore = store;
     await store.start();
     server.middlewares.use(async (request, response, next) => {
-      // Chat and preview hosts first: Vite would answer them with the monitor's own pages.
-      if (await tern.handleRequest(request, response)) return;
+      // Preview hosts first: Vite would answer them with the monitor's own pages.
       if (await handlePreview(request, response, { config, auth })) return;
       if (await handleApi(request, response, { config, auth, store, hubs })) return;
       // AUTH-1: the app's pages and modules too, on the UI's host only.
@@ -44,10 +43,10 @@ function gateway(): Plugin {
       else if (!validHost(request, config.publicOrigin)) sendJson(response, 404, { ok: false, error: "unknown endpoint" });
       else next();
     });
-    // Upgrades Tern does not take are Vite's own (HMR), so they are left alone; in access mode
-    // Vite has no socket, so nothing would answer them.
+    // Upgrades that are no chat socket are Vite's own (HMR), so they are left alone; in access
+    // mode Vite has no socket, so nothing would answer them.
     server.httpServer?.on("upgrade", (request, socket, head) => {
-      tern.handleUpgrade(request, socket, head).then(
+      chats.handleUpgrade(request, socket, head).then(
         (handled) => { if (!handled && config.authMode === "access") socket.destroy(); },
         (cause: unknown) => {
           console.error("upgrade handling failed", cause);

@@ -1,53 +1,59 @@
-// Starts a session's agent: omp's agent directory, Tern's settings, one Tern daemon whose
-// `workspace` session is Tern's chat on omp (`tern acp`) in the worktree, then Tern's web
-// client, which the gateway proxies into the session page. The container entrypoint and the
-// host entry (HOST-2) share it; each says where things live.
-import { execFileSync, spawn } from "node:child_process";
+// Starts a session's agent: omp's agent directory, then the chat host (chat-host.ts), which runs
+// omp in RPC mode in the worktree and serves the chat to the gateway on run/chat.sock. The
+// container entrypoint and the host entry (HOST-2) share it; each says where things live.
+import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, connect } from "node:net";
 import { join } from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
+import { startChatHost } from "./chat-host.ts";
 
 /** Written by the gateway before every start (server/runtime/runtime.ts). */
-export interface Launch {
+interface Launch {
   /** The repository worktree; omp's cwd, so the repository's own AGENTS.md loads (SESSION-4). */
   cwd: string;
-  /** omp model for the session (`tern acp --model`); null: omp's default. */
+  /** omp model for a new chat; null: omp's default. */
   model: string | null;
-  /** omp session id to resume (`tern acp --resume`); null: a new session. */
+  /** omp chat (session id) to resume; null: a new chat. */
   resume: string | null;
-  /** The new chat's first prompt (`tern acp --prompt`), for an automation's run (AUTO-9); null: none. */
+  /** The new chat's first prompt, for an automation's run (AUTO-9); null: none. */
   prompt: string | null;
-  /** Origin allowed to open Tern's web socket; the gateway's Tern proxy presents it. */
-  ternOrigin: string;
-  /** Where Tern's web client listens. */
-  ternListen: string;
+  /** The task's or automation's folder as the agent sees it (FOLDER-3); null: none. */
+  agentFolder: string | null;
   /** The project has Cloudflare tokens: Wrangler goes through the gateway's broker. */
   cloudflare: boolean;
 }
 
 export interface SessionPaths {
-  /** The run directory: launch.json, task.md, tern-token, and the session's sockets. */
+  /** The run directory: launch.json, task.md, and the session's sockets. */
   run: string;
-  /** This file's directory: AGENTS.md, RULES.md, omp-extension.ts, acp-filter.ts, am.ts. */
+  /** This file's directory: AGENTS.md, RULES.md, omp-extension.ts, chat-host.ts, am.ts. */
   source: string;
   /** omp's agent directory for this session (PI_CODING_AGENT_DIR). */
   agentDir: string;
   /** The configured omp agent directory, whose credentials and providers the session uses. */
   ompCredentials: string;
-  /** Tern's settings directory for this session (TERN_CONFIG_DIR). */
-  ternConfig: string;
-  /** Tern's web client, as tern-web-assets.ts stores it. */
-  ternAssets: string;
-  /** More environment for the chat's command line: omp and every tool it runs. */
-  chatEnv: string[];
+  /** More environment for omp and every tool it runs. */
+  env: Record<string, string>;
 }
 
-/** Tern's chat runs omp through this agent entry (Tern ships no omp entry of its own yet). */
-const AGENT_ID = "am-omp";
+function nullableString(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
 
-export function readLaunch(run: string): Launch {
-  return JSON.parse(readFileSync(join(run, "launch.json"), "utf8")) as Launch;
+function readLaunch(run: string): Launch {
+  const file = join(run, "launch.json");
+  const launch: unknown = JSON.parse(readFileSync(file, "utf8"));
+  if (typeof launch !== "object" || launch === null
+    || !("cwd" in launch) || typeof launch.cwd !== "string"
+    || !("model" in launch) || !nullableString(launch.model)
+    || !("resume" in launch) || !nullableString(launch.resume)
+    || !("prompt" in launch) || !nullableString(launch.prompt)
+    || !("agentFolder" in launch) || !nullableString(launch.agentFolder)
+    || !("cloudflare" in launch) || typeof launch.cloudflare !== "boolean") {
+    throw new Error(`${file} is no launch file of this version`);
+  }
+  const { cwd, model, resume, prompt, agentFolder, cloudflare } = launch;
+  return { cwd, model, resume, prompt, agentFolder, cloudflare };
 }
 
 export async function startSession(paths: SessionPaths): Promise<void> {
@@ -73,34 +79,19 @@ export async function startSession(paths: SessionPaths): Promise<void> {
   const ompVersion = execFileSync("omp", ["--version"], { encoding: "utf8" }).trim().split(/[\s/]/).at(-1) ?? "";
   writeFileSync(join(agentDir, "last-changelog-version"), `${ompVersion}\n`);
 
-  // Under ACP omp asks before every tool call; --auto-approve keeps the TUI's default of not asking.
-  // Tern runs omp through acp-filter.ts, which leaves out file lists Tern cannot draw.
-  // Dark matches the monitor around the chat.
-  mkdirSync(paths.ternConfig, { recursive: true });
-  writeFileSync(join(paths.ternConfig, "settings.json"), JSON.stringify({
-    theme: "Dark",
-    agents: { custom: [{ id: AGENT_ID, name: "omp", command: "node", args: [join(paths.source, "acp-filter.ts")] }] },
-  }));
-  process.env.TERN_CONFIG_DIR = paths.ternConfig;
-  const daemonSocket = process.env.TERN_DAEMON_SOCKET;
-  if (daemonSocket === undefined) throw new Error("TERN_DAEMON_SOCKET is not set");
-
-  // Tern starts a pane's program with an environment of its own, so the chat's command line
-  // carries what omp, its extension, `am` and `tern` need to find this session's sockets and
-  // settings.
+  // What omp, its extension and `am` need to find this session's agent directory and sockets;
+  // every tool omp runs inherits it.
   // SESSION-17: the user's omp settings (compaction, model roles, ...) apply as a read-only
   // overlay, and the session's own config.yml is overlaid after them, so its extension wins.
   const userConfig = join(paths.ompCredentials, "config.yml");
   const configFiles = [...(existsSync(userConfig) ? [userConfig] : []), join(agentDir, "config.yml")];
-  const chatEnv = [
-    ...paths.chatEnv,
-    `PI_CODING_AGENT_DIR=${agentDir}`,
-    `PI_CONFIG_FILES=${configFiles.join(":")}`,
-    `TERN_CONFIG_DIR=${paths.ternConfig}`,
-    `TERN_DAEMON_SOCKET=${daemonSocket}`,
-    `AM_SOCKET=${join(paths.run, "am.sock")}`,
-    `AGENTMONITOR_OMP_SOCKET=${join(paths.run, "omp.sock")}`,
-  ];
+  const env: Record<string, string> = {
+    ...paths.env,
+    PI_CODING_AGENT_DIR: agentDir,
+    PI_CONFIG_FILES: configFiles.join(":"),
+    AM_SOCKET: join(paths.run, "am.sock"),
+    AGENTMONITOR_OMP_SOCKET: join(paths.run, "omp.sock"),
+  };
   // Wrangler wants Cloudflare's API over TCP; the gateway serves it on the session socket, which
   // identifies the session, and holds the project's tokens. The token given here only keeps
   // Wrangler from asking to log in; the gateway ignores it.
@@ -116,45 +107,17 @@ export async function startSession(paths: SessionPaths): Promise<void> {
     await listening.promise;
     const address = relay.address();
     if (address === null || typeof address === "string") throw new Error("the Cloudflare relay has no TCP address");
-    chatEnv.push(`CLOUDFLARE_API_BASE_URL=http://127.0.0.1:${address.port}/client/v4`, "CLOUDFLARE_API_TOKEN=agent-monitor");
+    env.CLOUDFLARE_API_BASE_URL = `http://127.0.0.1:${address.port}/client/v4`;
+    env.CLOUDFLARE_API_TOKEN = "agent-monitor";
   }
 
-  // The daemon keeps its sessions next to its socket, in the run directory, which outlives the
-  // session's processes. Each start runs the chat the launch file names instead of restoring
-  // the last one.
-  rmSync(`${daemonSocket}.state`, { force: true });
-  const daemon = spawn("tern", ["daemon"], { stdio: "inherit" });
-  daemon.on("exit", (code) => {
-    console.error(`tern daemon exited with ${code}`);
-    process.exit(1);
+  await startChatHost({
+    run: paths.run,
+    cwd: launch.cwd,
+    folder: launch.agentFolder,
+    model: launch.model,
+    resume: launch.resume,
+    prompt: launch.prompt,
+    env: { ...process.env, ...env },
   });
-  for (let attempt = 0; ; attempt++) {
-    try {
-      execFileSync("tern", ["ls"], { stdio: "ignore" });
-      break;
-    } catch (error) {
-      if (attempt === 100) throw error;
-      await sleep(100);
-    }
-  }
-  const chat = ["env", ...chatEnv, "tern", "acp", AGENT_ID];
-  if (launch.model !== null) chat.push("--model", launch.model);
-  if (launch.resume !== null) chat.push("--resume", launch.resume);
-  else if (launch.prompt !== null) chat.push("--prompt", launch.prompt);
-  execFileSync("tern", ["new", "session", "workspace", "--cwd", launch.cwd, "--keep-open", "--", ...chat], { stdio: "inherit" });
-
-  const web = spawn("tern", [
-    "web", "serve",
-    "--listen", launch.ternListen,
-    "--token", join(paths.run, "tern-token"),
-    "--assets", paths.ternAssets,
-    "--allow-origin", launch.ternOrigin,
-  ], { stdio: "inherit" });
-  for (const signal of ["SIGTERM", "SIGINT"] as const) {
-    process.on(signal, () => {
-      web.kill(signal);
-      daemon.kill(signal);
-    });
-  }
-  web.on("exit", (code) => process.exit(code ?? 1));
 }

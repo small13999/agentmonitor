@@ -6,6 +6,7 @@ import type { Automation, Card, EndedSession, HistoryEntry, TaskDetail, TaskSumm
 import { email } from "../config.ts";
 import { schedule } from "../scheduler/cron.ts";
 import { folderPath } from "./bundle.ts";
+import type { Drafts } from "./drafts.ts";
 import type { Folders } from "./folders.ts";
 import type { ProjectMoves } from "./move.ts";
 import { StoreError, type FolderOwner, type Principal, type Session, type Store, type Task } from "./store.ts";
@@ -17,6 +18,12 @@ export interface StoreContext {
   folders: Folders;
   /** STORE-6: moving a project to another store, from either end. */
   moves: ProjectMoves;
+  /** CHAT-6: each person's unsent prompt of each session. */
+  drafts: Drafts;
+  /** CHAT-5: a file of the session's workspace, by its path as the agent sees it; 409 once the session has ended. */
+  sessionFile(principal: Principal, sessionId: string, path: string): Promise<FileResponse>;
+  /** CHAT-4: an image of a prompt as omp keeps it, `blob:sha256:<hash>`; ended sessions keep their chats, so theirs too. */
+  sessionBlob(principal: Principal, sessionId: string, hash: string): Promise<FileResponse>;
   /** Records a session of the task and launches its worktree and container; undone if the launch fails. */
   startSession(principal: Principal, taskId: string, input: SessionInput): Promise<Session>;
   /** AUTO-9: "run now": records a run of the automation and launches it on its own branch; undone if the launch fails. */
@@ -143,6 +150,16 @@ const exportBody = z.strictObject({ confirm: z.boolean().optional() });
 const importBody = z.strictObject({ repoPath: z.string().startsWith("/").optional() });
 const movedBody = z.strictObject({ digest: z.string().regex(/^[0-9a-f]{64}$/) });
 const offsetQuery = z.string().regex(/^\d+$/, "offset must be a byte count").transform(Number);
+// CHAT-6: a prompt box's text and attachments (base64), shared/chat.ts ChatDraft.
+const draftBody = z.strictObject({
+  text: z.string(),
+  attachments: z.array(z.strictObject({ name: z.string().min(1).max(255), mimeType: z.string().min(1).max(255), data: z.base64() })),
+  updatedAt: z.int().min(0),
+});
+// CHAT-5: a path as the agent sees it, absolute or relative to its working directory.
+const workspacePathQuery = z.string().min(1).max(4096);
+/** The most a JSON body may hold; a route may allow more. */
+const JSON_BODY_BYTES = 128 * 1024;
 
 /** A route's answer that is a file's bytes instead of JSON. */
 export class FileResponse {
@@ -174,6 +191,8 @@ interface Route {
   method: string;
   pattern: RegExp;
   handler: Handler;
+  /** A larger JSON body than JSON_BODY_BYTES this route takes. */
+  bodyBytes?: number;
 }
 
 const id = "([0-9a-f-]{36})";
@@ -415,6 +434,27 @@ const routes: Route[] = [
     pattern: new RegExp(`^/sessions/${id}/cloudflare-writes$`),
     handler: (c, p, [sessionId]) => c.revokeCloudflareWrites(p, sessionId),
   },
+  // CHAT-6: the person's draft of the session's prompt box; an empty one deletes it.
+  { method: "GET", pattern: new RegExp(`^/sessions/${id}/draft$`), handler: (c, p, [sessionId]) => c.drafts.get(p, sessionId) },
+  {
+    method: "PUT",
+    pattern: new RegExp(`^/sessions/${id}/draft$`),
+    handler: async (c, p, [sessionId], body) => c.drafts.put(p, sessionId, draftBody.parse(await body())),
+    // Attachments travel inside the JSON, as base64.
+    bodyBytes: 32 * 1024 * 1024,
+  },
+  // CHAT-5: `?path=` names the file as the agent sees it.
+  {
+    method: "GET",
+    pattern: new RegExp(`^/sessions/${id}/file$`),
+    handler: (c, p, [sessionId], _, __, query) => c.sessionFile(p, sessionId, workspacePathQuery.parse(query.get("path"))),
+  },
+  // CHAT-4: a prompt's image, which omp's session file names `blob:sha256:<hash>`.
+  {
+    method: "GET",
+    pattern: new RegExp(`^/sessions/${id}/blob/([0-9a-f]{64})$`),
+    handler: (c, p, [sessionId, hash]) => c.sessionBlob(p, sessionId, hash),
+  },
 ];
 
 function send(response: ServerResponse, status: number, body: unknown): void {
@@ -422,13 +462,13 @@ function send(response: ServerResponse, status: number, body: unknown): void {
   response.end(`${JSON.stringify(body)}\n`);
 }
 
-async function readBody(request: IncomingMessage): Promise<unknown> {
+async function readBody(request: IncomingMessage, limit: number): Promise<unknown> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     size += buffer.length;
-    if (size > 128 * 1024) throw new StoreError(413, "request body is too large");
+    if (size > limit) throw new StoreError(413, "request body is too large");
     chunks.push(buffer);
   }
   const raw = Buffer.concat(chunks).toString("utf8");
@@ -461,7 +501,7 @@ export async function handleStoreApi(
   }
   try {
     const params = route.pattern.exec(path)?.slice(1) ?? [];
-    const data = await route.handler(context, principal, params, () => readBody(request), request, url.searchParams);
+    const data = await route.handler(context, principal, params, () => readBody(request, route.bodyBytes ?? JSON_BODY_BYTES), request, url.searchParams);
     if (data instanceof FileResponse) {
       response.writeHead(data.status, data.headers);
       // Once the head is out, a failed read can only cut the response short.

@@ -7,8 +7,11 @@ import { writeLaunchFiles, type LaunchInput, type Runtime } from "./runtime.ts";
 
 const run = promisify(execFile);
 
-/** Built by scripts/build-image.ts. */
-export const WORKSPACE_IMAGE = "localhost/agentmonitor-workspace:dev";
+/**
+ * Built by scripts/build-image.ts. AGENTMONITOR_WORKSPACE_IMAGE names another tag, so tests
+ * build and run their own image and never replace the one the live gateway runs.
+ */
+export const WORKSPACE_IMAGE = process.env.AGENTMONITOR_WORKSPACE_IMAGE ?? "localhost/agentmonitor-workspace:dev";
 
 /** FOLDER-3: where a session container has its task's folder: beside the worktree, outside git. */
 export const CONTAINER_FOLDER = "/task-folder";
@@ -43,7 +46,7 @@ export class PodmanRuntime implements Runtime {
     if (input.checkout) throw new Error("a container works in a worktree, never the main checkout");
     const repoName = basename(resolve(input.repoPath));
     const commonDir = resolve(input.repoPath, await git(input.repoPath, ["rev-parse", "--git-common-dir"]));
-    writeLaunchFiles(input, { cwd: `/workspace/${repoName}`, ternListen: "0.0.0.0:8377" });
+    writeLaunchFiles(input, { cwd: `/workspace/${repoName}`, agentFolder: CONTAINER_FOLDER });
     await run("podman", ["rm", "-f", "--ignore", this.containerName(input.sessionId)]);
     await run("podman", [
       "run", "-d", "--init",
@@ -52,10 +55,9 @@ export class PodmanRuntime implements Runtime {
       // Names the gateway that owns the container, so a gateway's containers can be found without its store.
       "--label", `agentmonitor.state=${this.options.stateDir}`,
       "--userns=keep-id",
-      // Tern panes take HOME from passwd, not from the environment.
+      // ssh takes the home from passwd, not from the environment.
       "--passwd-entry", "$USERNAME:*:$UID:$GID::/home/agent:/bin/bash",
       "--memory", `${this.options.memoryMib}m`, "--memory-swap", `${this.options.memoryMib}m`,
-      "-p", "127.0.0.1::8377",
       "-v", `${input.dirs.worktree}:/workspace/${repoName}`,
       "-v", `${commonDir}:${commonDir}`,
       "-v", `${input.dirs.run}:/run/agentmonitor`,
@@ -77,19 +79,6 @@ export class PodmanRuntime implements Runtime {
     } catch {
       return false;
     }
-  }
-
-  /** The loopback address podman published the container's Tern web client on, e.g. 127.0.0.1:41234. */
-  async ternAddress(sessionId: string): Promise<string> {
-    const { stdout } = await run("podman", ["port", this.containerName(sessionId), "8377/tcp"], { encoding: "utf8" });
-    const address = stdout.trim().split("\n")[0] ?? "";
-    if (!/^127\.0\.0\.1:\d+$/.test(address)) throw new Error(`unexpected Tern address "${address}" for ${this.containerName(sessionId)}`);
-    return address;
-  }
-
-  async prompt(sessionId: string, text: string): Promise<void> {
-    await run("podman", ["exec", this.containerName(sessionId), "tern", "send", "workspace/@focused", "text", text]);
-    await run("podman", ["exec", this.containerName(sessionId), "tern", "send", "workspace/@focused", "keys", "Enter"]);
   }
 
   async remove(sessionId: string): Promise<void> {

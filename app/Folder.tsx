@@ -18,7 +18,7 @@ export function folderRoute(owner: FolderOwner): string {
 }
 
 /** A folder file's store route: its path's segments, each URL-encoded. */
-function fileRoute(owner: FolderOwner, path: string): string {
+export function fileRoute(owner: FolderOwner, path: string): string {
   return `${folderRoute(owner)}/${path.split("/").map(encodeURIComponent).join("/")}`;
 }
 

@@ -98,7 +98,7 @@ function publicOrigin(raw: string): string {
   } catch {
     throw new Error("AGENTMONITOR_PUBLIC_ORIGIN must be an absolute URL");
   }
-  // The UI is `am.<zone>`; chats and previews are `am-t-…` and `am-p-…` beside it.
+  // The UI is `am.<zone>`; previews are `am-p-…` beside it.
   if (!url.hostname.startsWith("am.")) throw new Error("AGENTMONITOR_PUBLIC_ORIGIN must name the host am.<zone>");
   if (url.protocol !== "https:" && !(url.protocol === "http:" && url.hostname.endsWith(".localhost"))) {
     throw new Error("AGENTMONITOR_PUBLIC_ORIGIN must be https:");

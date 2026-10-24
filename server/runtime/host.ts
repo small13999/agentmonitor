@@ -1,32 +1,17 @@
-import { execFile, spawn } from "node:child_process";
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { createServer } from "node:net";
+import { spawn } from "node:child_process";
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 import { z } from "zod";
 import { writeLaunchFiles, type LaunchInput, type Runtime, type WorkspaceDirs } from "./runtime.ts";
-
-const run = promisify(execFile);
 
 /** host-entry.ts and what it shares with the container image. */
 const SOURCE = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "container");
 /** How long a session's processes get to exit on SIGTERM before SIGKILL. */
 const STOP_MS = 5_000;
-/** What launch writes next to launch.json: the entry's pid and Tern's port. */
-const hostState = z.object({ pid: z.int(), port: z.int() });
-
-async function freePort(): Promise<number> {
-  const server = createServer();
-  const listening = Promise.withResolvers<void>();
-  server.listen(0, "127.0.0.1", listening.resolve);
-  await listening.promise;
-  const address = server.address();
-  server.close();
-  if (address === null || typeof address === "string") throw new Error("no free loopback port");
-  return address.port;
-}
+/** What launch writes next to launch.json: the entry's pid. */
+const hostState = z.object({ pid: z.int() });
 
 /** Processes started for the session: they all carry its AGENTMONITOR_SESSION. */
 function sessionPids(sessionId: string): number[] {
@@ -58,7 +43,7 @@ function signal(pids: number[], name: NodeJS.Signals): void {
  * running Agent Monitor in its worktree would otherwise share the live store) and what
  * `npm run` added.
  */
-function sessionEnv(sessionId: string, runDir: string): NodeJS.ProcessEnv {
+function sessionEnv(sessionId: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (key.startsWith("AGENTMONITOR_") || key.startsWith("npm_") || key === "INIT_CWD") continue;
@@ -66,7 +51,6 @@ function sessionEnv(sessionId: string, runDir: string): NodeJS.ProcessEnv {
   }
   env.PATH = (process.env.PATH ?? "").split(":").filter((dir) => !dir.includes("node_modules")).join(":");
   env.AGENTMONITOR_SESSION = sessionId;
-  env.TERN_DAEMON_SOCKET = join(runDir, "tern-daemon.sock");
   env.NODE_NO_WARNINGS = "1";
   return env;
 }
@@ -78,19 +62,16 @@ function sessionEnv(sessionId: string, runDir: string): NodeJS.ProcessEnv {
  * included. Like containers, they outlive a gateway restart.
  */
 export class HostRuntime implements Runtime {
-  private readonly options: { stateDir: string; ompAgentDir: string; dirs: (sessionId: string) => WorkspaceDirs };
-  private assets: Promise<string> | null = null;
+  private readonly options: { ompAgentDir: string; dirs: (sessionId: string) => WorkspaceDirs };
 
-  constructor(options: { stateDir: string; ompAgentDir: string; dirs: (sessionId: string) => WorkspaceDirs }) {
+  constructor(options: { ompAgentDir: string; dirs: (sessionId: string) => WorkspaceDirs }) {
     this.options = options;
   }
 
   async launch(input: LaunchInput): Promise<void> {
     await this.remove(input.sessionId);
-    const ternAssets = await this.ternAssets();
-    const port = await freePort();
     const cwd = input.checkout ? input.repoPath : input.dirs.worktree;
-    writeLaunchFiles(input, { cwd, ternListen: `127.0.0.1:${port}` });
+    writeLaunchFiles(input, { cwd, agentFolder: realpathSync(input.folder) });
     if (input.checkout) {
       // HOST-7: the checkout's chats are the user's, as for omp in a terminal there: /resume
       // lists them, and the session's own chats join them.
@@ -104,37 +85,21 @@ export class HostRuntime implements Runtime {
     const log = openSync(join(input.dirs.run, "host.log"), "a");
     try {
       const entry = spawn(process.execPath, [
-        join(SOURCE, "host-entry.ts"), input.dirs.run, join(input.dirs.ompHome, "agent"), this.options.ompAgentDir, ternAssets,
-      ], { cwd, detached: true, stdio: ["ignore", log, log], env: sessionEnv(input.sessionId, input.dirs.run) });
+        join(SOURCE, "host-entry.ts"), input.dirs.run, join(input.dirs.ompHome, "agent"), this.options.ompAgentDir,
+      ], { cwd, detached: true, stdio: ["ignore", log, log], env: sessionEnv(input.sessionId) });
       if (entry.pid === undefined) throw new Error("could not start the host session's entry");
       entry.unref();
-      writeFileSync(join(input.dirs.run, "host.json"), JSON.stringify({ pid: entry.pid, port }));
+      writeFileSync(join(input.dirs.run, "host.json"), JSON.stringify({ pid: entry.pid }));
     } finally {
       closeSync(log);
     }
   }
 
-  private state(sessionId: string): { pid: number; port: number } | null {
-    const file = join(this.options.dirs(sessionId).run, "host.json");
-    return existsSync(file) ? hostState.parse(JSON.parse(readFileSync(file, "utf8"))) : null;
-  }
-
   async running(sessionId: string): Promise<boolean> {
-    const state = this.state(sessionId);
-    return state !== null && sessionPids(sessionId).includes(state.pid);
-  }
-
-  async ternAddress(sessionId: string): Promise<string> {
-    const state = this.state(sessionId);
-    if (state === null || !sessionPids(sessionId).includes(state.pid)) throw new Error("the host session is not running");
-    return `127.0.0.1:${state.port}`;
-  }
-
-  async prompt(sessionId: string, text: string): Promise<void> {
-    const { run: runDir } = this.options.dirs(sessionId);
-    const env = { ...process.env, TERN_DAEMON_SOCKET: join(runDir, "tern-daemon.sock"), TERN_CONFIG_DIR: join(runDir, "tern-config") };
-    await run("tern", ["send", "workspace/@focused", "text", text], { env });
-    await run("tern", ["send", "workspace/@focused", "keys", "Enter"], { env });
+    const file = join(this.options.dirs(sessionId).run, "host.json");
+    if (!existsSync(file)) return false;
+    const { pid } = hostState.parse(JSON.parse(readFileSync(file, "utf8")));
+    return sessionPids(sessionId).includes(pid);
   }
 
   async remove(sessionId: string): Promise<void> {
@@ -142,23 +107,5 @@ export class HostRuntime implements Runtime {
     for (const deadline = Date.now() + STOP_MS; sessionPids(sessionId).length > 0 && Date.now() < deadline;) await sleep(100);
     signal(sessionPids(sessionId), "SIGKILL");
     rmSync(join(this.options.dirs(sessionId).run, "host.json"), { force: true });
-  }
-
-  /** Tern's web client for this tern version, stored once per state directory. */
-  private ternAssets(): Promise<string> {
-    this.assets ??= (async () => {
-      const { stdout } = await run("tern", ["--version"], { encoding: "utf8" });
-      const dir = join(this.options.stateDir, "tern-web", stdout.trim().replace(/[^\w.-]+/g, "_"));
-      if (existsSync(join(dir, "index.html"))) return dir;
-      const staging = `${dir}.staging-${process.pid}`;
-      rmSync(staging, { recursive: true, force: true });
-      await run(process.execPath, [join(SOURCE, "tern-web-assets.ts"), staging], { timeout: 300_000 });
-      renameSync(staging, dir);
-      return dir;
-    })().catch((cause: unknown) => {
-      this.assets = null;
-      throw cause;
-    });
-    return this.assets;
   }
 }

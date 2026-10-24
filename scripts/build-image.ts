@@ -1,6 +1,6 @@
-// Build the workspace image from container/ plus this machine's tern and omp binaries.
+// Build the workspace image from container/ plus this machine's omp binary.
 // Usage: node scripts/build-image.ts [--base IMAGE]
-// Env: AGENTMONITOR_TERN_BIN, AGENTMONITOR_OMP_BIN override the binaries.
+// Env: AGENTMONITOR_OMP_BIN overrides the binary; AGENTMONITOR_WORKSPACE_IMAGE the image's tag.
 import { execFileSync } from "node:child_process";
 import { copyFileSync, linkSync, mkdirSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
@@ -14,7 +14,7 @@ function which(command: string): string {
   return execFileSync("sh", ["-c", `command -v ${command}`], { encoding: "utf8" }).trim();
 }
 
-/** Hard links keep the 400 MB of binaries out of the copy when the cache shares a filesystem. */
+/** Hard links keep the binary out of the copy when the cache shares a filesystem. */
 function stage(source: string, target: string): void {
   rmSync(target, { force: true });
   try {
@@ -29,7 +29,6 @@ export function buildImage(options: { base?: string; quiet?: boolean } = {}): vo
   rmSync(context, { recursive: true, force: true });
   mkdirSync(context, { recursive: true });
   for (const file of readdirSync(join(root, "container"))) stage(join(root, "container", file), join(context, file));
-  stage(realpathSync(process.env.AGENTMONITOR_TERN_BIN ?? join(homedir(), ".local", "opt", "tern", "tern")), join(context, "tern"));
   stage(realpathSync(process.env.AGENTMONITOR_OMP_BIN ?? which("omp")), join(context, "omp"));
   const args = ["build", "-t", WORKSPACE_IMAGE, "-f", join(context, "Containerfile")];
   if (options.base !== undefined) args.push("--build-arg", `BASE=${options.base}`);

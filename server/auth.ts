@@ -24,7 +24,7 @@ function accessToken(request: IncomingMessage): string | null {
 }
 
 /**
- * Decides who every request to the gateway is: the store API, the app, Tern hosts.
+ * Decides who every request to the gateway is: the store API, the chat sockets, the app, previews.
  * Local mode is the user's PC, where every request is the owner. Access mode (AUTH-1,
  * AUTH-2) takes the person whose email a valid Cloudflare Access token names.
  */
@@ -65,12 +65,12 @@ export function validOrigin(request: IncomingMessage, publicOrigin: string | nul
   return role !== null && origin === hostOrigin(gatewayZone(publicOrigin), role);
 }
 
-/** Whether the request is for the UI's host: chat, preview, and unknown hosts never reach the monitor's API or app. */
+/** Whether the request is for the UI's host: preview and unknown hosts never reach the monitor's API, chats, or app. */
 export function validHost(request: IncomingMessage, publicOrigin: string | null): boolean {
   return hostRole(request.headers.host, publicOrigin)?.kind === "ui";
 }
 
-/** A page that says why the request was refused, for what a browser opens (the app, a Tern host). */
+/** A page that says why the request was refused, for what a browser opens (the app, a preview). */
 export function sendRefusal(response: ServerResponse, visitor: Extract<Visitor, { kind: "refused" }>): void {
   const reason = visitor.reason.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`);
   response.writeHead(visitor.status, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });

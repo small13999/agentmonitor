@@ -49,22 +49,21 @@ after(async () => {
 const ownerToken = () => access.token("armin@example.com");
 
 /**
- * A request to a session's chat host (`am-t-<session id>`) or a task's preview host
- * (`am-p-<task id>`), as the browser sends it; with `upgrade`, the chat's socket.
+ * A request on `host` (a label under `localhost`), as the browser sends it: a page, or with
+ * `origin` the WebSocket upgrade a page on that origin makes. The status: 101 for an opened socket.
  */
-function onHost(label: string, headers: Record<string, string>, upgrade = false): Promise<number> {
+function onHost(label: string, path: string, headers: Record<string, string>, origin?: string): Promise<number> {
   const { port } = new URL(gateway.url);
-  const host = `${label}.localhost:${port}`;
   const { promise, resolve, reject } = Promise.withResolvers<number>();
   const sent = request({
     host: "127.0.0.1",
     port,
-    path: upgrade ? "/wire" : "/",
+    path,
     headers: {
-      host,
-      ...(upgrade
-        ? { connection: "Upgrade", upgrade: "websocket", origin: `http://${host}`, "sec-websocket-version": "13", "sec-websocket-key": randomBytes(16).toString("base64") }
-        : {}),
+      host: `${label}.localhost:${port}`,
+      ...(origin === undefined
+        ? {}
+        : { connection: "Upgrade", upgrade: "websocket", origin, "sec-websocket-version": "13", "sec-websocket-key": randomBytes(16).toString("base64") }),
       ...headers,
     },
   });
@@ -81,19 +80,23 @@ function onHost(label: string, headers: Record<string, string>, upgrade = false)
   return promise;
 }
 
-spec("AUTH-1", "the hub's API, app, session hosts, and previews refuse requests without a valid Cloudflare Access token for the hub", async () => {
+/** CHAT-1: opens the session's chat socket on the hub's UI host as the app's page does (from the UI's origin unless `origin` says another). */
+function chatSocket(session: Session, headers: Record<string, string>, origin = gateway.url): Promise<number> {
+  return onHost("am", `/api/store/sessions/${session.id}/chat`, headers, origin);
+}
+
+spec("AUTH-1", "the hub's API, app, chat sockets, and previews refuse requests without a valid Cloudflare Access token for the hub", async () => {
   const owner = edge(ownerToken());
   const target = await gateway.data<Task>("POST", `/projects/${project.id}/tasks`, { title: "Patch notes 26.21" }, owner);
   const session = await gateway.data<Session>("POST", `/tasks/${target.id}/sessions`, {}, owner);
 
   // A valid token, in Cloudflare's header or its cookie, reaches the API, the app, the
-  // session's host (whose Tern does not run without containers), and the task's preview host.
+  // session's chat socket, and the task's preview host.
   assert.equal((await gateway.api("GET", "/projects", undefined, owner)).status, 200);
   assert.equal((await gateway.api("GET", "/projects", undefined, { cookie: `theme=dark; CF_Authorization=${ownerToken()}` })).status, 200);
   assert.equal((await fetch(gateway.url, { headers: owner })).status, 200);
-  assert.equal(await onHost(`am-t-${session.id}`, owner), 409);
-  assert.equal(await onHost(`am-t-${session.id}`, owner, true), 409);
-  assert.equal(await onHost(`am-p-${target.id}`, owner), 404);
+  assert.equal(await chatSocket(session, owner), 101);
+  assert.equal(await onHost(`am-p-${target.id}`, "/", owner), 404);
 
   // Keys Cloudflare rotates in are fetched when a token names one.
   const rotated = signingKey();
@@ -117,10 +120,21 @@ spec("AUTH-1", "the hub's API, app, session hosts, and previews refuse requests 
     const app = await fetch(gateway.url, { headers });
     assert.equal(app.status, 401, `the app refuses ${what}`);
     assert.match(await app.text(), /Refused: /);
-    assert.equal(await onHost(`am-t-${session.id}`, headers), 401, `the session's host refuses ${what}`);
-    assert.equal(await onHost(`am-t-${session.id}`, headers, true), 401, `the session's socket refuses ${what}`);
-    assert.equal(await onHost(`am-p-${target.id}`, headers), 401, `the task's preview host refuses ${what}`);
+    assert.equal(await chatSocket(session, headers), 401, `the session's chat socket refuses ${what}`);
+    assert.equal(await onHost(`am-p-${target.id}`, "/", headers), 401, `the task's preview host refuses ${what}`);
   }
+});
+
+spec("CHAT-1", "only people who may see the session's project open its chat, and only from the UI's own pages", async () => {
+  const owner = edge(ownerToken());
+  const target = await gateway.data<Task>("POST", `/projects/${project.id}/tasks`, { title: "Chat access" }, owner);
+  const session = await gateway.data<Session>("POST", `/tasks/${target.id}/sessions`, {}, owner);
+  // Every person of the hub sees its projects (AUTH-3).
+  assert.equal(await chatSocket(session, edge(access.token("mia@example.com"))), 101);
+  // Someone Access lets in who is no person of the store does not.
+  assert.equal(await chatSocket(session, edge(access.token("eve@example.com"))), 403);
+  // Another site open in the owner's browser cannot drive the session.
+  assert.equal(await chatSocket(session, owner, "https://elsewhere.example"), 403);
 });
 
 spec("AUTH-2", "a person logs in with their email and acts as themselves; an email that is no person of the store is refused", async () => {

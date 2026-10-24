@@ -14,10 +14,7 @@ import { runShortId, StoreError } from "./store.ts";
 /** AUTO-1: the automation's memory, a file of its folder that every run starts with. */
 export const MEMORY_FILE = "memory.md";
 
-/**
- * The most of memory.md a run's first prompt holds: the prompt travels as one command-line
- * argument (container/launch.ts), which Linux caps at 128 KiB.
- */
+/** The most of memory.md a run's first prompt holds; the agent reads the rest in the folder. */
 const MEMORY_PROMPT_BYTES = 32 * 1024;
 
 /** AUTO-1: where a run's outputs go in its automation's folder. */

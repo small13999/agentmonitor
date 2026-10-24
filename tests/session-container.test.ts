@@ -1,15 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createServer, get, type Server } from "node:http";
+import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, afterEach, before } from "node:test";
-import { chromium, type Browser, type FrameLocator, type Locator, type Page } from "playwright";
-import { WebSocket } from "ws";
-import { buildImage } from "../scripts/build-image.ts";
+import { chromium, type Browser, type Locator, type Page } from "playwright";
 import { FakeModel } from "./fake-model.ts";
-import { buildApp, Gateway, rgb, type OmpChannel } from "./harness.ts";
+import { buildApp, buildTestImage, Gateway, rgb, type OmpChannel } from "./harness.ts";
 import type { HistoryEntry, Work } from "../shared/api.ts";
 import { spec } from "./spec.ts";
 
@@ -49,17 +47,12 @@ let a: Session;
 let channelA: OmpChannel;
 
 before(async () => {
-  buildImage({ quiet: true });
+  await buildTestImage();
   await buildApp();
   scratch = mkdtempSync(join(tmpdir(), "am-fixture-"));
   repo = join(scratch, "fixture");
   mkdirSync(repo);
   writeFileSync(join(repo, "AGENTS.md"), `# Fixture\n\n${REPO_RULE}\n`);
-  // Same file names in nested folders, as a glob over real data folders returns them (AGENT-6).
-  for (const file of ["data/brackets/worlds/index.ts", "data/brackets/worlds/2025/index.ts", "data/brackets/worlds/2025/knockout.ts", "data/participants/worlds/2025.ts"]) {
-    mkdirSync(join(repo, file, ".."), { recursive: true });
-    writeFileSync(join(repo, file), "export {};\n");
-  }
   for (const args of [["init", "-q", "-b", "main"], ["add", "."], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"]]) {
     execFileSync("git", args, { cwd: repo });
   }
@@ -154,11 +147,15 @@ async function cardShowing(target: Session, test: (shown: Card) => boolean, what
   }
 }
 
-/** Type a prompt into the session's chat in Tern and wait until its turn reaches `turn`. */
+/** Sends a prompt into the session's chat as a page does, and waits until its turn reaches `turn`. */
 async function prompt(target: Session, channel: OmpChannel, text: string, turn: string): Promise<void> {
   const reached = channel.event((event) => event.type === "turn" && event.turn === turn);
-  exec(target, ["tern", "send", "workspace/@focused", "text", text]);
-  exec(target, ["tern", "send", "workspace/@focused", "keys", "Enter"]);
+  const chat = await gateway.chat(target.id);
+  try {
+    await chat.rpc({ type: "prompt", message: text });
+  } finally {
+    chat.close();
+  }
   await reached;
 }
 
@@ -172,23 +169,10 @@ async function closePages(): Promise<void> {
 
 afterEach(closePages);
 
-interface Chat {
-  page: Page;
-  /** Tern's web client in the session page's chat view. */
-  frame: FrameLocator;
-}
-
-/**
- * A fresh page on `hash`. Earlier pages close first: a second web client on a session takes
- * several times as long to sync. All chat claims share one browser, since starting Tern's web
- * client in a new one costs seconds. The client draws with WebGPU; without a GPU, Chromium runs
- * it on Mesa's llvmpipe Vulkan driver.
- */
+/** A fresh page on `hash`; earlier pages close first. All claims share one browser. */
 async function freshPage(hash: string): Promise<Page> {
   await closePages();
-  chrome ??= await chromium.launch({
-    args: ["--enable-unsafe-webgpu", "--ignore-gpu-blocklist", "--enable-features=Vulkan,VulkanFromANGLE", "--use-vulkan=native", "--use-angle=vulkan"],
-  });
+  chrome ??= await chromium.launch();
   const page = await chrome.newPage();
   openPages.add(page);
   page.setDefaultTimeout(15_000);
@@ -208,40 +192,20 @@ async function boardPage(): Promise<Page> {
   return page;
 }
 
-/** A fresh session page, once its chat view shows Tern's chat synced with omp. */
-async function openChat(target: Session): Promise<Chat> {
+/** A fresh session page, once its chat shows the session's chat from omp's state (its model). */
+async function openChat(target: Session, timeout = 15_000): Promise<Locator> {
   const page = await sessionPage(target);
-  const frame = page.frameLocator("iframe.session-frame.current");
-  await frame.getByRole("group", { name: /^Model: Scripted/ }).waitFor();
-  return { page, frame };
+  const chat = page.getByRole("region", { name: "Chat" });
+  await chat.getByRole("combobox", { name: "Model" }).locator("option:checked").filter({ hasText: "Scripted" }).waitFor({ state: "attached", timeout });
+  return chat;
 }
 
-/**
- * Open the chat until it shows `shown` (a text, or an element). Tern's web client draws on a
- * canvas and mirrors what it draws into an accessibility tree. The tree is complete when the
- * page loads, but later changes reach it late, and not at all while the composer has focus,
- * so each look is a fresh page.
- */
-async function chatShowing(target: Session, shown: string | ((frame: FrameLocator) => Locator)): Promise<Chat> {
-  const find = typeof shown === "string" ? (frame: FrameLocator) => frame.getByText(shown, { exact: true }) : shown;
-  for (const deadline = Date.now() + 20_000; ;) {
-    const chat = await openChat(target);
-    if (await find(chat.frame).count() > 0) return chat;
-    assert.ok(Date.now() < deadline, `the chat never showed ${String(shown)}`);
-  }
+/** A user message and a reply in the chat's conversation, by their text. */
+function said(chat: Locator, text: string): Locator {
+  return chat.getByRole("log", { name: "Conversation" }).getByRole("article", { name: "Your message" }).filter({ hasText: text });
 }
-
-/** Click where the client drew an element; the canvas, not the mirrored element, takes pointer input. */
-async function clickDrawn(chat: Chat, element: Locator): Promise<void> {
-  const box = await element.boundingBox();
-  assert.ok(box, "the element is not drawn");
-  await chat.page.mouse.click(box.x + Math.min(20, box.width / 2), box.y + box.height / 2);
-}
-
-async function send(chat: Chat, text: string): Promise<void> {
-  await clickDrawn(chat, chat.frame.getByRole("textbox", { name: "Message" }));
-  await chat.page.keyboard.type(text);
-  await chat.page.keyboard.press("Enter");
+function replied(chat: Locator, text: string): Locator {
+  return chat.getByRole("log", { name: "Conversation" }).getByRole("article", { name: "Reply" }).filter({ hasText: text });
 }
 
 spec("SESSION-5", "a session belongs to one task or one automation and works in a worktree of its branch on one machine", async () => {
@@ -459,138 +423,14 @@ spec("BOARD-1", "the board shows open, in-progress, and in-review tasks, each wi
   await page.waitForURL(new RegExp(`#/t/${a.taskId}$`));
 });
 
-const turnDone = () => channelA.event((event) => event.type === "turn" && event.turn === "done");
-
-/** Opens Tern's /wire socket through the gateway as a page on `origin` would: "open", or the refusal's status. */
-async function openWire(host: string, origin: string): Promise<string> {
-  const socket = new WebSocket(`ws://127.0.0.1:${new URL(gateway.url).port}/wire`, { headers: { host }, origin });
-  const { promise, resolve } = Promise.withResolvers<string>();
-  socket.on("open", () => {
-    socket.close();
-    resolve("open");
-  });
-  socket.on("unexpected-response", (request, response) => {
-    request.destroy();
-    resolve(String(response.statusCode));
-  });
-  socket.on("error", (error) => resolve(error.message));
-  return promise;
-}
-
-spec("AGENT-1", "the session page opens the session's chat in Tern; only the gateway holds Tern's token", async () => {
+spec("CHAT-1", "a container session's page draws its chat from omp's own events: omp runs in RPC mode in the container, with no other chat program", async () => {
+  // BOARD-2 sent say:hello.
   const chat = await openChat(a);
-  await chat.frame.getByRole("textbox", { name: "Message" }).waitFor();
-  const token = readFileSync(join(gateway.stateDir, "sessions", a.id, "run", "tern-token"), "utf8").trim();
-  for (const frame of chat.page.frames()) assert.ok(!frame.url().includes(token), `${frame.url()} carries Tern's token`);
-  // The gateway adds the token to Tern's socket for pages on the session's Tern host only:
-  // another site open in the same browser cannot drive the session.
-  const host = `am-t-${a.id}.localhost:${new URL(gateway.url).port}`;
-  assert.equal(await openWire(host, `http://${host}`), "open");
-  assert.equal(await openWire(host, "http://elsewhere.example"), "403");
-});
-
-spec("AGENT-3", "web and Tern prompts land in the same conversation", async () => {
-  // BOARD-2 typed say:hello in Tern; the web shows it and its reply.
-  const chat = await chatShowing(a, "say:hello");
-  await chat.frame.getByText("hello", { exact: true }).first().waitFor({ state: "attached" });
-  const done = turnDone();
-  await send(chat, "say:fromweb");
-  await done;
-  const shown = await card(a);
-  assert.equal(shown.lastUserMessage, "say:fromweb");
-  assert.equal(shown.lastReply, "fromweb");
-  await chatShowing(a, "fromweb");
-});
-
-spec("AGENT-4", "the web UI streams replies and thinking, and shows running commands", async () => {
-  // Mid-reply, the chat shows the reply so far and its (collapsed) thinking.
-  await prompt(a, channelA, "stream:alpha-omega", "working");
-  await fake.holding();
-  let chat = await chatShowing(a, "alpha");
-  assert.equal(await chat.frame.getByText("alpha omega", { exact: true }).count(), 0);
-  await chat.frame.getByRole("button", { name: "Thought" }).last().waitFor({ state: "attached" });
-  let done = turnDone();
-  fake.release();
-  await done;
-
-  // A command shows as running until it ends; it blocks on a FIFO until the test writes to it.
-  const command = "mkfifo /tmp/gate; cat /tmp/gate; echo finished-run";
-  await prompt(a, channelA, `bash:${command}`, "working");
-  chat = await chatShowing(a, (frame) => frame.getByRole("button", { name: "Bash, running" }));
-  await chat.frame.getByText(command, { exact: true }).last().waitFor({ state: "attached" });
-  done = turnDone();
-  exec(a, ["sh", "-c", "echo go > /tmp/gate"]);
-  await done;
-
-  // A fresh page shows the whole conversation again, the command finished.
-  chat = await chatShowing(a, (frame) => frame.getByRole("button", { name: "Bash, done" }));
-  assert.equal(await chat.frame.getByRole("button", { name: "Bash, running" }).count(), 0);
-  for (const text of ["say:hello", "say:fromweb", "stream:alpha-omega", `bash:${command}`, "hello", "fromweb", "alpha omega"]) {
-    await chat.frame.getByText(text, { exact: true }).first().waitFor({ state: "attached" });
-  }
-}, { timeout: 90_000 });
-
-spec("AGENT-5", "a question the agent asks shows in the web UI with its options", async () => {
-  await prompt(a, channelA, "ask:Ship?", "blocked");
-  assert.equal((await card(a)).turn, "blocked");
-  const question = (await chatShowing(a, (frame) => frame.getByRole("dialog"))).frame.getByRole("dialog");
-  await question.getByText("Ship?", { exact: true }).first().waitFor({ state: "attached" });
-  await question.getByRole("option", { name: "Yes" }).waitFor({ state: "attached" });
-  await question.getByRole("option", { name: "No" }).waitFor({ state: "attached" });
-  // Withdraw the question, so the session is free for the next claims.
-  const done = turnDone();
-  exec(a, ["tern", "send", "workspace/@focused", "keys", "Escape"]);
-  await done;
-});
-
-spec("AGENT-6", "a file list with repeated names shows, and so does the conversation after it", async () => {
-  // data/ holds index.ts in a folder and in its subfolder.
-  await prompt(a, channelA, "glob:data/**", "done");
-  await prompt(a, channelA, "say:afterglob", "done");
-  const chat = await chatShowing(a, "afterglob");
-  // Tern labels omp's glob "Grep" and draws its files as a tree.
-  await chat.frame.getByRole("button", { name: /^Grep, .*, done$/ }).last().waitFor({ state: "attached" });
-  await chat.frame.getByText(/knockout\.ts/).last().waitFor({ state: "attached" });
-});
-
-/** Asks the gateway for Tern's fallback fonts as a page on `origin` would: the response's status. */
-async function fontsStatus(host: string, origin: string): Promise<number> {
-  const { promise, resolve, reject } = Promise.withResolvers<number>();
-  get({ host: "127.0.0.1", port: new URL(gateway.url).port, path: "/fonts?chars=2713", headers: { host, origin } }, (response) => {
-    response.resume();
-    resolve(response.statusCode ?? 0);
-  }).on("error", reject);
-  return promise;
-}
-
-spec("AGENT-7", "text in any script, symbols and emoji show in a font that has them", async () => {
-  const text = "한국어✓😀العربية";
-  await prompt(a, channelA, `say:${text}`, "done");
-  const chat = await chatShowing(a, text);
-  const frame = chat.page.frames().find((candidate) => candidate.url().startsWith(`http://am-t-${a.id}.localhost`));
-  assert.ok(frame, "the chat view holds no Tern page");
-  // Tern's web client asks the workspace's Tern for fonts covering what its own faces lack
-  // (here Korean and Arabic), and loads them.
-  await frame.waitForFunction(() => performance.getEntriesByType("resource").some((entry) => /^\/fonts\/[0-9a-f]+$/.test(new URL(entry.name).pathname)));
-  const loads = await frame.evaluate(() => performance.getEntriesByType("resource").flatMap((entry) =>
-    entry instanceof PerformanceResourceTiming && new URL(entry.name).pathname.startsWith("/fonts") ? [{ url: entry.name, status: entry.responseStatus }] : []));
-  for (const load of loads) assert.equal(load.status, 200, `${load.url} failed`);
-  // Each character it asked about has a font.
-  const asked = loads.flatMap((load) => new URL(load.url).searchParams.get("chars")?.split(",") ?? []);
-  assert.ok(asked.length > 0, "the client never asked which fonts cover its characters");
-  const uncovered = await frame.evaluate(async (codePoints) => {
-    const missing: string[] = [];
-    for (const codePoint of codePoints) {
-      const body: unknown = await (await fetch(`/fonts?chars=${codePoint}`)).json();
-      if (!(typeof body === "object" && body !== null && "fonts" in body && Array.isArray(body.fonts) && body.fonts.length > 0)) missing.push(codePoint);
-    }
-    return missing;
-  }, asked);
-  assert.deepEqual(uncovered, []);
-  // Only the session's Tern pages get fonts through the gateway.
-  const host = `am-t-${a.id}.localhost:${new URL(gateway.url).port}`;
-  assert.equal(await fontsStatus(host, `http://${host}`), 200);
-  assert.equal(await fontsStatus(host, "http://elsewhere.example"), 403);
+  await said(chat, "say:hello").waitFor();
+  await replied(chat, "hello").waitFor();
+  const commands = exec(a, ["sh", "-c", "for process in /proc/[0-9]*; do tr '\\0' ' ' < $process/cmdline; echo; done 2>/dev/null"]);
+  assert.match(commands, /\bomp\b.* --mode rpc-ui\b/);
+  assert.doesNotMatch(commands, /\btern\b/);
 });
 
 spec("CARD-1", "a task's card and page show its running session as waiting on you, working, idle, or stopped; working pulses", async () => {
@@ -631,7 +471,8 @@ spec("CARD-1", "a task's card and page show its running session as waiting on yo
 
 spec("SESSION-10", "opening a session whose container stopped starts it again on its last chat", async () => {
   // CARD-1 stopped a's container after its last turn, "hold:later".
-  await chatShowing(a, "later");
+  const chat = await openChat(a, 60_000);
+  await replied(chat, "later").waitFor();
   const shown = await card(a);
   assert.equal(shown.turn, "done");
   assert.equal(shown.lastUserMessage, "hold:later");
@@ -650,11 +491,14 @@ spec("SESSION-7", "a new chat stays in its session, with the session's worktree 
   assert.equal(gateway.am(a.id, ["topic", "link", "Patch notes"]).code, 0);
   const before = chats(a).length;
 
-  // Tern's chat command for a new chat with the same agent, in the same pane.
-  exec(a, ["tern", "send", "workspace/@focused", "text", "/new"]);
-  exec(a, ["tern", "send", "workspace/@focused", "keys", "Enter"]);
-  exec(a, ["tern", "send", "workspace/@focused", "text", "say:newchat"]);
-  exec(a, ["tern", "send", "workspace/@focused", "keys", "Enter"]);
+  // A new chat with the same agent, as the chat's New chat starts it.
+  const chat = await gateway.chat(a.id);
+  try {
+    await chat.rpc({ type: "new_session" });
+    await chat.rpc({ type: "prompt", message: "say:newchat" });
+  } finally {
+    chat.close();
+  }
 
   const shown = await cardShowing(a, (candidate) => candidate.lastReply === "newchat", "the new chat's reply");
   assert.equal(shown.lastUserMessage, "say:newchat");
@@ -664,7 +508,7 @@ spec("SESSION-7", "a new chat stays in its session, with the session's worktree 
   // CARD-3's commit and uncommitted files are still in the worktree.
   assert.equal(exec(a, ["git", "-C", "/workspace/fixture", "log", "-1", "--format=%s"]), "Translate patch notes");
   assert.deepEqual(shown.git?.uncommitted.sort(), ["draft.md", "notes.txt"]);
-  await chatShowing(a, "newchat");
+  await replied(await openChat(a), "newchat").waitFor();
 });
 
 /** Git in a session's worktree on the host, as a user with an identity. */
@@ -858,8 +702,8 @@ spec("SESSION-13", "until a session's chat loads, its page says what it waits on
   execFileSync("podman", ["stop", "-t", "0", `am-${a.id}`]);
   assert.equal((await card(a)).turn, "stopped");
   const page = await sessionPage(a);
-  const waiting = page.getByRole("status").filter({ hasText: /^(Starting the session's container…|Loading the chat…)$/ });
+  const waiting = page.getByRole("status").filter({ hasText: /^(Starting the session's container…|Connecting to the agent…)$/ });
   await waiting.filter({ hasText: "Starting the session's container…" }).waitFor();
-  await page.frameLocator("iframe.session-frame.current").getByRole("group", { name: /^Model: Scripted/ }).waitFor({ timeout: 60_000 });
+  await page.getByRole("region", { name: "Chat" }).getByRole("combobox", { name: "Model" }).locator("option:checked").filter({ hasText: "Scripted" }).waitFor({ state: "attached", timeout: 60_000 });
   await waiting.waitFor({ state: "detached" });
 });

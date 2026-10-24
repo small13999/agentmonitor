@@ -1,7 +1,6 @@
 /**
  * DEPLOY-1: what Deploy on a task's or a run's page sends its agent, and what its agent does when
- * a person tells it to deploy (its context quotes this). One line: Tern's prompt box sends on
- * Enter.
+ * a person tells it to deploy (its context quotes this).
  */
 export const DEPLOY_INSTRUCTION =
   "Deploy: commit what belongs to this work, push its branch, open a pull request to the default branch (`gh pr create`) " +

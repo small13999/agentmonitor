@@ -3,10 +3,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before } from "node:test";
-import { buildImage } from "../scripts/build-image.ts";
 import type { Automation, AutomationDetail, Firing, Session, Task, Trigger } from "../shared/api.ts";
 import { FakeModel } from "./fake-model.ts";
-import { Gateway } from "./harness.ts";
+import { buildTestImage, Gateway } from "./harness.ts";
 import { spec } from "./spec.ts";
 
 // Each claim runs its own gateway, whose scheduler goes by the time the test sets (the harness's
@@ -20,7 +19,7 @@ let fake: FakeModel;
 
 before(async () => {
   // Guards and checks run in the session image.
-  buildImage({ quiet: true });
+  await buildTestImage();
   scratch = mkdtempSync(join(tmpdir(), "am-scheduling-test-"));
   fake = await FakeModel.start();
   agentDir = join(scratch, "omp-agent");

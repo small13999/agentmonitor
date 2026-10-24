@@ -3,11 +3,10 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync } fro
 import { createServer, type Server } from "node:http";
 import { userInfo } from "node:os";
 import { basename, join } from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
 import type { Automation, Card, EndedSession, HistoryEntry, TaskDetail, TaskSummary, UnpushedWork, Work } from "../../shared/api.ts";
-import { gatewayZone, hostOrigin } from "../../shared/hosts.ts";
 import { projectCards } from "../cards.ts";
+import { CHAT_SOCKET, chatAnswers, sendPrompt } from "../chat.ts";
 import { DEPLOY_INSTRUCTION } from "../deploy.ts";
 import { fileClock, systemClock, type Clock } from "../scheduler/clock.ts";
 import { runWork, taskWork, withBadges } from "../work.ts";
@@ -28,17 +27,18 @@ import {
   type RestoredSnapshot,
 } from "../git.ts";
 import { branchPullRequests } from "../github.ts";
-import { ompRequest } from "../omp-channel.ts";
 import { HostRuntime } from "../runtime/host.ts";
 import { CONTAINER_FOLDER, PodmanRuntime } from "../runtime/podman.ts";
 import type { LaunchInput, Runtime, WorkspaceDirs } from "../runtime/runtime.ts";
 import { Scheduler } from "../scheduler/scheduler.ts";
 import { newestTranscript } from "../transcript.ts";
+import { Drafts } from "./drafts.ts";
 import { Folders } from "./folders.ts";
 import { ProjectMoves } from "./move.ts";
 import {
   handleStoreApi,
   type AutomationSessionInput,
+  type FileResponse,
   type RunEndInput,
   type RunInput,
   type RunTaskInput,
@@ -47,24 +47,16 @@ import {
 } from "./http.ts";
 import { checkOutcome, deleteRemoteBranch, endModeSection, MEMORY_FILE, overTimeLimit, runOutputs, runPrompt, turnEnded, type AgentOutcome } from "./runs.ts";
 import { folderOwnerOf, runShortId, Store, StoreError, type Principal, type Project, type RunOutcome, type Session, type SessionRuntime, type Task } from "./store.ts";
+import { blobFile, workspaceFile, type WorkspaceRoot } from "./workspace-files.ts";
 
 type ServiceConfig = Pick<
   GatewayConfig,
-  | "workspaceRuntime" | "workspaceMemoryMib" | "machineName" | "ompAgentDir" | "credentialsHome" | "cloudflareApi" | "ownerEmail" | "publicOrigin"
+  | "workspaceRuntime" | "workspaceMemoryMib" | "machineName" | "ompAgentDir" | "credentialsHome" | "cloudflareApi" | "ownerEmail"
   | "clockFile"
 >;
 
-export interface TernUpstream {
-  address: string;
-  token: string;
-  origin: string;
-}
-
-/** The part of run/launch.json the gateway reads back. */
-const launchFile = z.object({ ternOrigin: z.string() });
-
-/** How long a started session gets until its Tern web client answers. */
-const TERN_START_MS = 60_000;
+/** The part of run/launch.json the gateway reads back: the agent's working directory and folder as it sees them. */
+const launchFile = z.object({ cwd: z.string(), agentFolder: z.string().nullable() });
 
 function failure(cause: unknown): string {
   return cause instanceof Error && "stderr" in cause ? String(cause.stderr).trim() : String(cause);
@@ -84,9 +76,8 @@ export class StoreService implements StoreContext {
   readonly store: Store;
   readonly folders: Folders;
   readonly moves: ProjectMoves;
+  readonly drafts: Drafts;
   private readonly servers = new Map<string, Server>();
-  /** Asking podman for a container's port takes a quarter second, so each page load would wait on it. */
-  private readonly ternUpstreams = new Map<string, TernUpstream>();
   /** Sessions being started, first or again; every request for the session waits on the one start. */
   private readonly starts = new Map<string, Promise<void>>();
   private readonly root: string;
@@ -109,11 +100,12 @@ export class StoreService implements StoreContext {
     this.store = new Store(join(stateDir, "store.sqlite"), userInfo().username);
     if (config.ownerEmail !== null) this.store.setOwnerEmail(config.ownerEmail);
     this.folders = new Folders(this.store, join(stateDir, "folders"));
+    this.drafts = new Drafts(this.store, join(stateDir, "drafts"));
     this.root = join(stateDir, "sessions");
     this.runtimes = config.workspaceRuntime === "podman"
       ? {
           container: new PodmanRuntime({ memoryMib: config.workspaceMemoryMib, stateDir, ompAgentDir: config.ompAgentDir, credentialsHome: config.credentialsHome }),
-          host: new HostRuntime({ stateDir, ompAgentDir: config.ompAgentDir, dirs: (sessionId) => this.dirs(sessionId) }),
+          host: new HostRuntime({ ompAgentDir: config.ompAgentDir, dirs: (sessionId) => this.dirs(sessionId) }),
         }
       : null;
     this.config = config;
@@ -173,9 +165,10 @@ export class StoreService implements StoreContext {
 
   /**
    * DEPLOY-1, AUTO-16: has the agent of a task, or of a run waiting for review, deploy: sends it
-   * DEPLOY_INSTRUCTION as a person's prompt in its chat (AGENT-3). A task without a running
-   * session gets one, as its last session ran, starting on the instruction; a stopped session
-   * starts again on its last chat first (SESSION-10). Returns the session told.
+   * DEPLOY_INSTRUCTION as a person's prompt through its chat, so every page open on it shows it
+   * (CHAT-9). A task without a running session gets one, as its last session ran, starting on
+   * the instruction; a stopped session starts again on its last chat first (SESSION-10).
+   * Returns the session told.
    */
   async deploy(principal: Principal, target: { kind: "task" | "run"; id: string }): Promise<Session> {
     let session: Session;
@@ -199,32 +192,79 @@ export class StoreService implements StoreContext {
     if (runtime === undefined) throw new StoreError(409, "sessions run without containers here");
     await this.startIfStopped(runtime, session);
     try {
-      await this.agentAnswers(runtime, session.id);
-      await runtime.prompt(session.id, DEPLOY_INSTRUCTION);
+      await sendPrompt(this.dirs(session.id).run, DEPLOY_INSTRUCTION);
     } catch (cause) {
       throw new StoreError(500, `could not tell the agent of ${session.name} to deploy: ${failure(cause)}`);
     }
     return session;
   }
 
-  /** Waits until the session's omp answers on its channel, so a prompt typed into its chat reaches a live agent. */
-  private async agentAnswers(runtime: Runtime, sessionId: string): Promise<void> {
-    for (const deadline = Date.now() + TERN_START_MS; ;) {
-      if ((await ompRequest(this.dirs(sessionId).run, "state"))?.ok === true) return;
-      if (!(await runtime.running(sessionId))) throw new Error("the session stopped while starting");
-      if (Date.now() > deadline) throw new Error(`the agent did not answer within ${TERN_START_MS / 1000} s`);
-      await sleep(200);
+  /**
+   * SESSION-10: the session's processes, started again on its newest chat when they have
+   * stopped, or when they run without a chat host (started before sessions had one);
+   * everyone asking waits on the one start. `starting` is called when there is a start to wait on.
+   */
+  private async startIfStopped(runtime: Runtime, session: Session, starting: () => void = () => undefined): Promise<void> {
+    let start = this.starts.get(session.id);
+    if (start === undefined && !(existsSync(join(this.dirs(session.id).run, CHAT_SOCKET)) && await runtime.running(session.id))) {
+      // Another request may have begun the start while this one asked the runtime.
+      start = this.starts.get(session.id);
+      if (start === undefined) {
+        start = this.restart(runtime, session).finally(() => this.starts.delete(session.id));
+        this.starts.set(session.id, start);
+      }
     }
+    if (start === undefined) return;
+    starting();
+    await start;
   }
 
-  /** SESSION-10: the session's processes, started again on its newest chat when they have stopped; everyone asking waits on the one start. */
-  private async startIfStopped(runtime: Runtime, session: Session): Promise<void> {
-    let start = this.starts.get(session.id);
-    if (start === undefined && !(await runtime.running(session.id))) {
-      start = this.restart(runtime, session).finally(() => this.starts.delete(session.id));
-      this.starts.set(session.id, start);
+  /**
+   * CHAT-1: the session's chat socket, for whoever may see the session; 404 for unknown
+   * sessions, 409 for ended ones. A stopped session starts again first (SESSION-10), and
+   * `status` says so meanwhile (SESSION-13).
+   */
+  async chatSocket(principal: Principal, sessionId: string, status: (text: string) => void): Promise<string> {
+    const { session } = this.store.getSession(principal, sessionId);
+    if (session.endedAt !== null) throw new StoreError(409, `session ${session.name} has ended`);
+    const runtime = this.runtimes?.[session.runtime];
+    if (runtime === undefined) throw new StoreError(409, "sessions run without containers here");
+    await this.startIfStopped(runtime, session, () => status(session.runtime === "container" ? "Starting the session's container…" : "Starting the session…"));
+    return join(this.dirs(session.id).run, CHAT_SOCKET);
+  }
+
+  /**
+   * CHAT-5: a file of the session's workspace by its path as the agent sees it: under its
+   * working directory, or its task's or automation's folder (FOLDER-3), as launch.json maps
+   * them. 409 once the session has ended: its workspace is gone.
+   */
+  async sessionFile(principal: Principal, sessionId: string, path: string): Promise<FileResponse> {
+    const { session } = this.store.getSession(principal, sessionId);
+    if (session.endedAt !== null) throw new StoreError(409, `session ${session.name} has ended`);
+    const { repoPath } = this.store.getProject(principal, session.projectId);
+    const dirs = this.dirs(session.id);
+    let launch: z.infer<typeof launchFile>;
+    try {
+      launch = launchFile.parse(JSON.parse(readFileSync(join(dirs.run, "launch.json"), "utf8")));
+    } catch {
+      throw new StoreError(409, `session ${session.name} has no workspace yet`);
     }
-    await start;
+    if (repoPath === null) throw new StoreError(409, `session ${session.name} has no workspace`);
+    const roots: WorkspaceRoot[] = [{ agent: launch.cwd, host: session.checkout ? repoPath : dirs.worktree }];
+    if (launch.agentFolder !== null) roots.push({ agent: launch.agentFolder, host: this.folders.dir(folderOwnerOf(session)) });
+    return workspaceFile(roots, launch.cwd, path);
+  }
+
+  /**
+   * CHAT-4: an image of a prompt in the session's chats, from omp's blob store in the session's
+   * omp home, which outlives the session. A checkout session's chats are the user's (HOST-7):
+   * their images may be in the user's own blob store.
+   */
+  sessionBlob(principal: Principal, sessionId: string, hash: string): Promise<FileResponse> {
+    const { session } = this.store.getSession(principal, sessionId);
+    const dirs = [join(this.dirs(session.id).ompHome, "agent", "blobs")];
+    if (session.checkout) dirs.push(join(this.config.ompAgentDir, "blobs"));
+    return blobFile(dirs, hash);
   }
 
   /** The running session whose Cloudflare writes the owner allows or revokes (AUTH-3); its project must have a write token. */
@@ -248,38 +288,7 @@ export class StoreService implements StoreContext {
     return { writesUntil: null };
   }
 
-  /**
-   * Where the session's Tern web client listens, the token it wants on /wire and the origin
-   * it accepts; 404 for unknown sessions, 409 for ended ones. A stopped container starts
-   * again first (SESSION-10). Remembered until forgetTernUpstream, which the proxy calls
-   * when the address stops answering.
-   */
-  async ternUpstream(sessionId: string): Promise<TernUpstream> {
-    const { session } = this.store.getSession(this.store.ownerPrincipal(), sessionId);
-    if (session.endedAt !== null) throw new StoreError(409, `session ${session.name} has ended`);
-    const known = this.ternUpstreams.get(sessionId);
-    if (known !== undefined) return known;
-    const runtime = this.runtimes?.[session.runtime];
-    if (runtime === undefined) throw new StoreError(409, "sessions run without containers here");
-    await this.startIfStopped(runtime, session);
-    let address: string;
-    try {
-      address = await runtime.ternAddress(sessionId);
-    } catch (cause) {
-      throw new StoreError(409, `the session is not running: ${failure(cause)}`);
-    }
-    const { run } = this.dirs(sessionId);
-    const launch = launchFile.parse(JSON.parse(readFileSync(join(run, "launch.json"), "utf8")));
-    const upstream = { address, token: readFileSync(join(run, "tern-token"), "utf8").trim(), origin: launch.ternOrigin };
-    this.ternUpstreams.set(sessionId, upstream);
-    return upstream;
-  }
-
-  forgetTernUpstream(sessionId: string): void {
-    this.ternUpstreams.delete(sessionId);
-  }
-
-  /** The session's processes started again, resuming its newest chat, once Tern answers. */
+  /** The session's processes started again, resuming its newest chat, once its chat answers. */
   private async restart(runtime: Runtime, session: Session): Promise<void> {
     const project = this.store.getProject(this.store.ownerPrincipal(), session.projectId);
     const dirs = this.dirs(session.id);
@@ -290,7 +299,6 @@ export class StoreService implements StoreContext {
     // among the user's (HOST-7): its newest is the newest of the checkout's.
     const newest = newestTranscript(dirs.ompHome, session.checkout ? project.repoPath : null);
     const resume = newest === null ? null : /_([0-9a-f-]{36})\.jsonl$/.exec(basename(newest))?.[1] ?? null;
-    this.forgetTernUpstream(session.id);
     try {
       await this.launch(runtime, project.repoPath, project, session, {
         // A resumed chat keeps the model it last ran.
@@ -307,7 +315,7 @@ export class StoreService implements StoreContext {
     }
   }
 
-  /** Launches the session's agent with the folder of its task or automation (FOLDER-3, AUTO-1) and waits until Tern answers. */
+  /** Launches the session's agent with the folder of its task or automation (FOLDER-3, AUTO-1) and waits until its chat answers. */
   private async launch(
     runtime: Runtime,
     repoPath: string,
@@ -321,23 +329,10 @@ export class StoreService implements StoreContext {
       repoPath,
       dirs: this.dirs(session.id),
       folder: this.folders.dir(folderOwnerOf(session)),
-      ternOrigin: hostOrigin(gatewayZone(this.config.publicOrigin), { kind: "chat", sessionId: session.id }),
       cloudflare: project.cloudflare.read,
       ...chat,
     });
-    await this.ternAnswers(runtime, session.id);
-  }
-
-  /** Waits until the session's Tern web client answers; fails once the session stops or the time is up. */
-  private async ternAnswers(runtime: Runtime, sessionId: string): Promise<void> {
-    const address = await runtime.ternAddress(sessionId);
-    for (const deadline = Date.now() + TERN_START_MS; ;) {
-      const answered = await fetch(`http://${address}/`).then(() => true, () => false);
-      if (answered) return;
-      if (!(await runtime.running(sessionId))) throw new Error("the session stopped while starting");
-      if (Date.now() > deadline) throw new Error(`Tern did not answer within ${TERN_START_MS / 1000} s`);
-      await sleep(200);
-    }
+    await chatAnswers(this.dirs(session.id).run, () => runtime.running(session.id));
   }
 
   private async listen(sessionId: string): Promise<void> {
@@ -373,7 +368,6 @@ export class StoreService implements StoreContext {
   private unlisten(sessionId: string): void {
     this.servers.get(sessionId)?.close();
     this.servers.delete(sessionId);
-    this.ternUpstreams.delete(sessionId);
     this.cloudflare.revokeWrites(sessionId);
   }
 
@@ -616,7 +610,10 @@ export class StoreService implements StoreContext {
   /** AUTO-1: deletes an automation with its runs' records and chats, and its folder; its runs' branches stay in the repository. */
   deleteAutomation(principal: Principal, automationId: string): Automation {
     const { automation, runIds } = this.store.deleteAutomation(principal, automationId);
-    for (const id of runIds) rmSync(this.dirs(id).root, { recursive: true, force: true });
+    for (const id of runIds) {
+      rmSync(this.dirs(id).root, { recursive: true, force: true });
+      this.drafts.delete(id);
+    }
     this.folders.delete({ kind: "automation", id: automationId });
     return automation;
   }

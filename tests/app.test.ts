@@ -88,17 +88,14 @@ spec("UI-2", "a task has Page, Chat, and Settings tabs, Settings at the right wi
 
   // Without a session, the Chat tab starts one.
   await page.getByRole("region", { name: "Start session" }).getByRole("button", { name: "Start session" }).click();
-  const chat = page.locator("iframe.session-frame.current");
+  const chat = page.getByRole("region", { name: "Chat" });
   await chat.waitFor();
   await page.getByRole("region", { name: "Start session" }).waitFor({ state: "detached" });
   const { sessions } = await gateway.data<{ sessions: Session[] }>("GET", `/tasks/${target.id}`);
   assert.equal(sessions.length, 1);
 
-  // Mark the chat's frame and count its loads: the other tabs must neither replace nor reload it.
-  await chat.evaluate((frame) => frame.setAttribute("data-mark", "kept"));
-  const ternHost = `am-t-${sessions[0].id}.localhost`;
-  let loads = 0;
-  page.on("framenavigated", (frame) => { if (frame.url().includes(ternHost)) loads++; });
+  // Mark the chat's element: the other tabs must neither replace nor remount it.
+  await chat.evaluate((element) => element.setAttribute("data-mark", "kept"));
   await tabs.getByRole("tab", { name: "Page" }).click();
   await page.waitForURL(new RegExp(`#/t/${target.id}$`));
   await page.getByRole("article", { name: "Task page" }).waitFor();
@@ -116,7 +113,6 @@ spec("UI-2", "a task has Page, Chat, and Settings tabs, Settings at the right wi
   await chat.waitFor({ state: "visible" });
   await settings.waitFor({ state: "detached" });
   assert.equal(await chat.getAttribute("data-mark"), "kept");
-  assert.equal(loads, 0);
 });
 
 spec("BOARD-3", "done and cancelled tasks leave the board; search and the All tasks list find every task by title, description, and comments", async () => {

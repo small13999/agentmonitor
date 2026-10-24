@@ -8,7 +8,7 @@ import { api, chooseStore, LOCAL_STORE, storeOf, usePolled, type AutomationSumma
 import { AutomationList, AutomationWorkspace, NewAutomation } from "./Automations.tsx";
 import { Board, waitsOnYou } from "./Board.tsx";
 import { ProjectSettings } from "./ProjectSettings.tsx";
-import { SessionFrames } from "./SessionFrames.tsx";
+import { SessionChat } from "./chat/Chat.tsx";
 import { TaskList } from "./TaskList.tsx";
 import { TaskPage } from "./TaskPage.tsx";
 import { TaskSettings } from "./TaskSettings.tsx";
@@ -297,7 +297,7 @@ function App() {
           <ProjectSettings project={project} me={me.data?.person ?? null} onSaved={stores.refresh} />
         </main>
       )}
-      {/* Kept while the board shows, so the chats stay loaded; the Automations page shows its runs' chats in them too. */}
+      {/* The tasks' list and workspace; the Automations page shows its runs' chats in the same workspace. */}
       <div className="tasks-page" hidden={page !== "tasks" && page !== "automations"}>
         {page === "automations" ? (
           <AutomationList
@@ -352,12 +352,14 @@ function App() {
               {tab === "settings" && <TaskSettings key={current.task.id} summary={current} card={currentCard} onChanged={refresh} />}
             </>
           )}
-          <SessionFrames
+          <SessionChat
             current={currentSession}
             covered={page === "tasks" && tab !== "chat"}
             running={running}
             stopped={new Set(cards.data?.filter((card) => card.turn === "stopped").map((card) => card.session.id))}
-            hub={chosen?.store.url ?? null}
+            folderOwner={page === "tasks" && current !== null
+              ? { kind: "task", id: current.task.id }
+              : page === "automations" && route.automationId !== null && route.automationId !== "new" ? { kind: "automation", id: route.automationId } : null}
           />
         </main>
       </div>

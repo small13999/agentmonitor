@@ -62,26 +62,11 @@ async function created(path: string, body: unknown): Promise<string> {
   return data.id;
 }
 
-spec("PREVIEW-2", "the UI, a session's chat, and a task's preview each answer on their own origin under the hub's zone, and none acts for another", async () => {
+spec("PREVIEW-2", "the UI and a task's preview each answer on their own origin under the hub's zone, and neither acts for the other", async () => {
   // The UI answers on the hub's own host.
   await page.goto(`${UI}/`);
   const projectId = await created("/projects", { name: "draftcoach" });
   const taskId = await created(`/projects/${projectId}/tasks`, { title: "Hosts" });
-
-  // The chat of the session the task's Chat tab starts loads from the session's own host. The
-  // app loaded before the project existed, so it loads again.
-  await page.goto(`${UI}/#/t/${taskId}/chat`);
-  await page.reload();
-  await page.getByRole("region", { name: "Start session" }).getByRole("button", { name: "Start session" }).click();
-  const detail = await store("GET", `/tasks/${taskId}`);
-  assert.ok(typeof detail === "object" && detail !== null && "sessions" in detail && Array.isArray(detail.sessions));
-  const [session] = detail.sessions;
-  assert.ok(typeof session === "object" && session !== null && "id" in session && typeof session.id === "string");
-  const chatOrigin = `https://am-t-${session.id}.${ZONE}`;
-  const frame = await (await page.locator("iframe.session-frame.current").elementHandle())?.contentFrame();
-  assert.ok(frame);
-  await frame.waitForURL(`${chatOrigin}/`);
-  assert.equal(await frame.evaluate(() => location.origin), chatOrigin);
 
   // The task's preview host answers on its own origin; there is no preview yet.
   const previewOrigin = `https://am-p-${taskId}.${ZONE}`;

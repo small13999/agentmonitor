@@ -5,7 +5,7 @@ import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
 import { startSession } from "./launch.ts";
 
-// Tern panes take HOME from passwd, so omp only finds this home if passwd agrees.
+// ssh takes the home from passwd, not HOME, so it only finds the keys copied below if passwd agrees.
 if (userInfo().homedir !== homedir()) {
   throw new Error(`passwd home ${userInfo().homedir} differs from HOME ${homedir()}; the base image has a user with this uid`);
 }
@@ -30,13 +30,10 @@ if (existsSync(join(credentials, "gh"))) {
   chmodSync(gh, 0o700);
 }
 
-const image = "/opt/agentmonitor";
 await startSession({
   run: "/run/agentmonitor",
-  source: image,
+  source: "/opt/agentmonitor",
   agentDir: join(homedir(), ".omp", "agent"),
   ompCredentials: "/host-omp-agent",
-  ternConfig: join(homedir(), ".config", "tern"),
-  ternAssets: join(image, "tern-web"),
-  chatEnv: [],
+  env: {},
 });

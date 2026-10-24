@@ -6,10 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, before } from "node:test";
-import { crc32, deflateSync } from "node:zlib";
 import { chromium, type Browser, type Locator, type Page } from "playwright";
 import type { Automation, AutomationSummary, Person, Project, Session, Trigger } from "../shared/api.ts";
-import { buildApp, Gateway } from "./harness.ts";
+import { buildApp, Gateway, png } from "./harness.ts";
 import { spec } from "./spec.ts";
 
 let gateway: Gateway;
@@ -34,29 +33,6 @@ after(async () => {
   await gateway?.stop();
   if (scratch !== undefined) rmSync(scratch, { recursive: true, force: true });
 });
-
-/** A 2×1 PNG: a red pixel and a blue one. */
-function png(): Buffer {
-  const chunk = (type: string, data: Buffer) => {
-    const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
-    const length = Buffer.alloc(4);
-    length.writeUInt32BE(data.length);
-    const crc = Buffer.alloc(4);
-    crc.writeUInt32BE(crc32(body));
-    return Buffer.concat([length, body, crc]);
-  };
-  const header = Buffer.alloc(13);
-  header.writeUInt32BE(2, 0);
-  header.writeUInt32BE(1, 4);
-  header[8] = 8;
-  header[9] = 2;
-  return Buffer.concat([
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    chunk("IHDR", header),
-    chunk("IDAT", deflateSync(Buffer.from([0, 255, 0, 0, 0, 0, 255]))),
-    chunk("IEND", Buffer.alloc(0)),
-  ]);
-}
 
 /** The run's agent writes an output into `runs/<run>/` of the automation's folder, as runs do. */
 function output(run: Session, name: string, bytes: Buffer | string): void {
@@ -154,7 +130,7 @@ spec("AUTO-7", "an automation's page shows first what its runs produced and what
   await review.getByRole("link", { name: `Open session of run ${short2}` }).click();
   await page.getByRole("tab", { name: "Chat", selected: true }).waitFor();
   assert.match(page.url(), new RegExp(`#/a/${automation.id}/chat/${second.id}$`));
-  assert.match(await page.getByTitle("Session", { exact: true }).getAttribute("src") ?? "", new RegExp(`am-t-${second.id}`));
+  await page.getByRole("region", { name: "Chat" }).waitFor();
 });
 
 spec("AUTO-15", "a person creates an automation with a trigger on the site, then changes it and its triggers", async () => {

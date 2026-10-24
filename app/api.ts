@@ -44,6 +44,11 @@ export function storeUrl(path: string): string {
   return `${currentStore}${path}`;
 }
 
+/** A path of the chosen project's store API as a WebSocket URL on the page's own host, e.g. a session's chat (CHAT-1). */
+export function storeSocketUrl(path: string): string {
+  return `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}${storeUrl(path)}`;
+}
+
 /**
  * One store API call; the gateway answers `{ ok, data }` or `{ ok: false, error, ...details }`.
  * A Blob body (a file for a task's folder, FOLDER-1) goes as it is; any other as JSON. `store`

@@ -1,26 +1,21 @@
-# Workspace image: a project base plus Tern and its web client, omp, the Agent Monitor omp
-# extension, `am`, and the user-level workflow context. Built by scripts/build-image.ts, which
-# stages the tern and omp binaries next to this file. Containers never get podman.
+# Workspace image: a project base plus omp, the Agent Monitor chat host and omp extension,
+# `am`, and the user-level workflow context. Built by scripts/build-image.ts, which stages the
+# omp binary next to this file. Containers never get podman.
 ARG BASE=docker.io/library/node:25-bookworm-slim
 FROM ${BASE}
 # Base images ship users (node: uid 1000) that can collide with the host uid under
-# --userns=keep-id; podman then reuses their passwd home, which Tern panes use as HOME.
+# --userns=keep-id; podman then reuses their passwd home, which ssh uses as its home.
 # Removing them lets podman write our entry (--passwd-entry, home /home/agent).
-# The fonts are what `tern web serve` offers the web client for characters its built-in
-# faces lack: symbols, CJK, Arabic and other scripts. The client draws emoji itself.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates git procps locales openssh-client gh \
-    fonts-dejavu-core fonts-noto-cjk fonts-noto-core \
  && rm -rf /var/lib/apt/lists/* \
  && awk -F: '$3 >= 1000 && $3 < 65534 { print $1 }' /etc/passwd | xargs -r -n1 userdel -r \
  && mkdir -p /home/agent /workspace \
  && chmod 1777 /home/agent /workspace
-COPY --chmod=755 tern omp /usr/local/bin/
-COPY entrypoint.ts launch.ts omp-extension.ts am.ts acp-filter.ts tern-web-assets.ts check.ts AGENTS.md RULES.md /opt/agentmonitor/
-RUN printf '#!/bin/sh\nexec node /opt/agentmonitor/am.ts "$@"\n' > /usr/local/bin/am && chmod 755 /usr/local/bin/am \
- && node /opt/agentmonitor/tern-web-assets.ts
+COPY --chmod=755 omp /usr/local/bin/
+COPY entrypoint.ts launch.ts chat-host.ts omp-extension.ts am.ts check.ts AGENTS.md RULES.md /opt/agentmonitor/
+RUN printf '#!/bin/sh\nexec node /opt/agentmonitor/am.ts "$@"\n' > /usr/local/bin/am && chmod 755 /usr/local/bin/am
 # The container runs as the host user (--userns=keep-id), which has no passwd home of its own.
-# Tern's daemon listens in the run directory, where the host user can reach it too.
-ENV HOME=/home/agent SHELL=/bin/bash LANG=C.UTF-8 NODE_NO_WARNINGS=1 TERN_DAEMON_SOCKET=/run/agentmonitor/tern-daemon.sock
+ENV HOME=/home/agent SHELL=/bin/bash LANG=C.UTF-8 NODE_NO_WARNINGS=1
 WORKDIR /workspace
 ENTRYPOINT ["node", "/opt/agentmonitor/entrypoint.ts"]

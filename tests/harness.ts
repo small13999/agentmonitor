@@ -6,7 +6,10 @@ import { connect, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { crc32, deflateSync } from "node:zlib";
 import httpProxy from "http-proxy";
+import { WebSocket } from "ws";
+import type { ClientMessage, OmpFrame, ServerMessage } from "../shared/chat.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -69,6 +72,39 @@ function untilChanged(done: () => boolean): Promise<void> {
 export function rgb(hex: string): string {
   const [r, g, b] = [1, 3, 5].map((start) => Number.parseInt(hex.slice(start, start + 2), 16));
   return `rgb(${r}, ${g}, ${b})`;
+}
+
+/** The session image's tag in tests (AGENTMONITOR_WORKSPACE_IMAGE), so no test replaces the live one. */
+export const TEST_IMAGE = "localhost/agentmonitor-workspace:test";
+
+/** Builds the session image under the test tag; imported only now, as the tag is read when the runtime module loads. */
+export async function buildTestImage(): Promise<void> {
+  process.env.AGENTMONITOR_WORKSPACE_IMAGE = TEST_IMAGE;
+  const { buildImage } = await import("../scripts/build-image.ts");
+  buildImage({ quiet: true });
+}
+
+/** A 2×1 PNG: a red pixel and a blue one. */
+export function png(): Buffer {
+  const chunk = (type: string, data: Buffer) => {
+    const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(data.length);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(body));
+    return Buffer.concat([length, body, crc]);
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(2, 0);
+  header.writeUInt32BE(1, 4);
+  header[8] = 8;
+  header[9] = 2;
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", header),
+    chunk("IDAT", deflateSync(Buffer.from([0, 255, 0, 0, 0, 0, 255]))),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
 }
 
 export interface ApiResult {
@@ -135,6 +171,7 @@ export class Gateway {
       AGENTMONITOR_STATE_DIR: stateDir,
       AGENTMONITOR_AUTH_MODE: "local",
       AGENTMONITOR_WORKSPACE_RUNTIME: options.runtime,
+      AGENTMONITOR_WORKSPACE_IMAGE: TEST_IMAGE,
       // Never the user's settings, e.g. the hubs of their hubs.json (STORE-3).
       AGENTMONITOR_CONFIG_DIR: join(stateDir, "config"),
       AGENTMONITOR_CLOCK_FILE: clock,
@@ -218,10 +255,12 @@ export class Gateway {
     const listed = spawnSync("podman", ["ps", "-aq", "--filter", `label=agentmonitor.state=${this.stateDir}`], { encoding: "utf8" });
     const containers = (listed.stdout ?? "").split("\n").filter(Boolean);
     if (containers.length > 0) spawnSync("podman", ["rm", "-f", "-t", "0", ...containers]);
-    // Host sessions outlive the gateway; theirs find Tern's daemon in this state directory.
+    // Host sessions outlive the gateway; each of their processes carries its session's id.
+    const sessionsDir = join(this.stateDir, "sessions");
+    const markers = new Set(existsSync(sessionsDir) ? readdirSync(sessionsDir).map((id) => `AGENTMONITOR_SESSION=${id}`) : []);
     for (const entry of readdirSync("/proc").filter((name) => /^\d+$/.test(name))) {
       try {
-        if (readFileSync(`/proc/${entry}/environ`, "latin1").split("\0").some((line) => line.startsWith(`TERN_DAEMON_SOCKET=${this.stateDir}/`))) {
+        if (readFileSync(`/proc/${entry}/environ`, "latin1").split("\0").some((line) => markers.has(line))) {
           process.kill(Number(entry), "SIGKILL");
         }
       } catch {
@@ -261,6 +300,22 @@ export class Gateway {
   /** The gateway's channel into a session's live omp chat, once omp has started it. */
   async omp(sessionId: string): Promise<OmpChannel> {
     return OmpChannel.open(join(this.stateDir, "sessions", sessionId, "run"));
+  }
+
+  /**
+   * CHAT-1: a page's socket on the session's chat, through the gateway, from the UI's origin
+   * unless `origin` says another; resolves once the chat's snapshot arrived.
+   */
+  async chat(sessionId: string, options: { origin?: string; headers?: Record<string, string> } = {}): Promise<ChatClient> {
+    const url = `${this.url.replace(/^http/, "ws")}/api/store/sessions/${sessionId}/chat`;
+    const chat = await ChatClient.open(url, options.origin ?? this.url, options.headers ?? {});
+    try {
+      await chat.seen((message) => message.type === "snapshot");
+    } catch (error) {
+      chat.close();
+      throw error;
+    }
+    return chat;
   }
 }
 
@@ -382,5 +437,86 @@ export class OmpChannel {
 
   close(): void {
     this.socket.destroy();
+  }
+}
+
+type ChatResponse = Extract<ServerMessage, { type: "response" }>;
+
+function isServerMessage(value: unknown): value is ServerMessage {
+  return typeof value === "object" && value !== null && "type" in value && typeof value.type === "string";
+}
+
+/** A page's WebSocket on a session's chat (shared/chat.ts): what it sent, what it received, and waits on both. */
+export class ChatClient {
+  /** Every message received so far, in order. */
+  readonly received: ServerMessage[] = [];
+  private readonly socket: WebSocket;
+  private nextId = 1;
+  private readonly waiters = new Set<{ match: (message: ServerMessage) => boolean; resolve: (message: ServerMessage) => void; reject: (error: Error) => void }>();
+  private closedWith: Error | null = null;
+
+  private constructor(socket: WebSocket) {
+    this.socket = socket;
+    socket.on("message", (data) => {
+      const message: unknown = JSON.parse(data.toString());
+      if (!isServerMessage(message)) throw new Error(`not a chat message: ${data.toString()}`);
+      this.received.push(message);
+      for (const waiter of this.waiters) {
+        if (!waiter.match(message)) continue;
+        this.waiters.delete(waiter);
+        waiter.resolve(message);
+      }
+    });
+    socket.on("close", (code, reason) => {
+      this.closedWith = new Error(`the chat closed with ${code} ${reason.toString()}`);
+      for (const waiter of this.waiters) waiter.reject(this.closedWith);
+      this.waiters.clear();
+    });
+  }
+
+  /** Resolves once the socket is open; a refused upgrade fails with its status, e.g. "chat refused: 403". */
+  static async open(url: string, origin: string, headers: Record<string, string>): Promise<ChatClient> {
+    const socket = new WebSocket(url, { origin, headers });
+    const { promise, resolve, reject } = Promise.withResolvers<void>();
+    socket.once("open", () => resolve());
+    socket.once("unexpected-response", (request, response) => {
+      request.destroy();
+      reject(new Error(`chat refused: ${response.statusCode}`));
+    });
+    socket.once("error", reject);
+    await promise;
+    return new ChatClient(socket);
+  }
+
+  /** The next message from now on that matches; register before causing it. Fails if the chat closes first. */
+  next(match: (message: ServerMessage) => boolean): Promise<ServerMessage> {
+    if (this.closedWith !== null) return Promise.reject(this.closedWith);
+    const { promise, resolve, reject } = Promise.withResolvers<ServerMessage>();
+    this.waiters.add({ match, resolve, reject });
+    return promise;
+  }
+
+  /** The first message, received so far or from now on, that matches. */
+  seen(match: (message: ServerMessage) => boolean): Promise<ServerMessage> {
+    const found = this.received.find(match);
+    return found === undefined ? this.next(match) : Promise.resolve(found);
+  }
+
+  send(message: ClientMessage): void {
+    this.socket.send(JSON.stringify(message));
+  }
+
+  /** Sends an omp RPC command as the page would; resolves with its response, failing if omp refused it. */
+  async rpc(command: OmpFrame): Promise<ChatResponse> {
+    const id = `test-${this.nextId++}`;
+    const answered = this.next((message) => message.type === "response" && message.id === id);
+    this.send({ type: "rpc", id, command });
+    const response = await answered;
+    if (response.type !== "response" || !response.success) throw new Error(`omp refused ${command.type}: ${JSON.stringify(response)}`);
+    return response;
+  }
+
+  close(): void {
+    this.socket.close();
   }
 }
