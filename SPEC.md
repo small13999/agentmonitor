@@ -48,8 +48,8 @@ Unnumbered intent; not testable, so not claims.
   remembering to report it.
 - The orchestrator is an ordinary session invoked on demand, never a gate that
   all work must pass through.
-- Our web app owns navigation and every cross-session view. Tern owns the full
-  agent harness inside one session.
+- Our web app owns navigation, every cross-session view, and the chat itself.
+  omp is the agent harness inside one session; the app draws its conversation.
 
 ## Concepts
 
@@ -103,9 +103,9 @@ Unnumbered intent; not testable, so not claims.
 
 ## Access
 
-- **AUTH-1** Every request to the hub, its session hosts, and its previews needs a
-  valid Cloudflare Access token for the hub; the hub checks the token itself, so a
-  request that bypasses the tunnel is refused.
+- **AUTH-1** Every request to the hub and its previews needs a valid Cloudflare
+  Access token for the hub; the hub checks the token itself, so a request that
+  bypasses the tunnel is refused.
 - **AUTH-2** A person logs in through Cloudflare Access with their email and acts
   as the person with that email; an email that is not a person of the store is
   refused.
@@ -153,8 +153,8 @@ Unnumbered intent; not testable, so not claims.
   and its task's settings.
 - **HOST-4** A host session's chat, task context, `am`, card, and restart on
   its last chat work as a container session's do.
-- **HOST-5** A host session never changes the user's omp, Tern, ssh, git, or
-  GitHub CLI configuration.
+- **HOST-5** A host session never changes the user's omp, ssh, git, or GitHub
+  CLI configuration.
 - **HOST-6** A host session can work in its project's main checkout instead of a
   worktree, at most one per project, and is marked as such. Ending it stops its
   processes and leaves the checkout, its branch, and its uncommitted work as they
@@ -295,9 +295,8 @@ Unnumbered intent; not testable, so not claims.
 
 - **PREVIEW-1** Each running session's service ports are reachable at
   authenticated URLs from outside the machine running it.
-- **PREVIEW-2** The UI, each session's chat, and each preview are each their own
-  origin: `am.draftcoach.gg`, `am-t-<session>.draftcoach.gg`,
-  `am-p-<task>.draftcoach.gg`.
+- **PREVIEW-2** The UI and each preview are each their own origin:
+  `am.draftcoach.gg` and `am-p-<task>.draftcoach.gg`.
 - **PREVIEW-3** A preview whose container is stopped shows as stopped with an
   action to start the session's container again.
 
@@ -393,23 +392,41 @@ Unnumbered intent; not testable, so not claims.
 
 ## Agent interface
 
-- **AGENT-1** Every running session opens on its session page as Tern's chat on
-  omp. Only the gateway holds the session's Tern token, and only pages on that
-  session's Tern host can open its socket.
 - **AGENT-2** A session can be driven from the web UI without a terminal: its
   transcript with streaming replies, a prompt box, context usage, and its
   subagents.
-- **AGENT-3** Prompts sent from the web UI and typed in Tern land in the same
-  conversation, and each surface shows the other's.
 - **AGENT-4** The web UI shows a reply and the model's thinking as they stream,
   and each command as running until it ends, before the turn ends; after a
   reload it shows the same conversation.
 - **AGENT-5** A question the agent asks the user shows in the web UI with its
   options, while the session waits on the user.
-- **AGENT-6** A tool result that lists files with the same name in different
-  folders shows in the web UI, and so does the rest of the conversation after it.
-- **AGENT-7** Text the agent writes in any script, and symbols and emoji, show in
-  the chat in a font that has them.
+
+## Chat
+
+- **CHAT-1** A running session's page shows its chat, drawn by the web app from
+  omp's own event stream (omp in RPC mode), with no other chat program between
+  them. Only people who may see the session's project can open its chat.
+- **CHAT-2** A tool call shows as one collapsed line with the tool, what it works
+  on, and a timer that runs while the call runs and then shows how long it took;
+  clicking the line shows its input and its output.
+- **CHAT-3** The chat shows the session's model, thinking effort, context usage,
+  and working folder; a person changes the model and the effort there, and the
+  next turn uses them.
+- **CHAT-4** Images and files pasted or dropped into the prompt box reach the
+  agent with the prompt: images as images the model sees, other files as files in
+  the task's folder that the prompt names.
+- **CHAT-5** Replies render as Markdown; images the agent sends, in a tool result
+  or as a Markdown image of a file in its workspace, SVG included, show inline.
+- **CHAT-6** What a person types into the prompt box, with its attachments, is
+  saved to a file on the gateway as they type, and shows again after a reload, a
+  lost connection, or in another browser, until omp has accepted the prompt.
+- **CHAT-7** The chat lists the session's chats (a checkout session's: the
+  user's chats of the checkout), goes on with any of them, and starts a new one.
+- **CHAT-8** A person stops a running turn from the chat; prompts sent while a
+  turn runs show as queued until the agent takes them.
+- **CHAT-9** Every page open on a session shows the same conversation live,
+  including prompts Agent Monitor sends itself (Deploy, an automation's first
+  prompt).
 
 ## Deferred
 
