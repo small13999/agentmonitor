@@ -179,19 +179,29 @@ Still open:
 - The user's PC is not a persistent runner (it is off too often); it runs hub
   sessions only when the user asks for a local run.
 
-### Chat: our own UI on `omp acp`, replacing Tern (decided, not scheduled)
-- omp is what matters (the harness); Tern is only used as the chat, and its
-  terminal, file blocks, and built-in features are not wanted.
-- Tern costs us: an extra layer of nesting, waiting on upstream fixes, harder
-  integration with our own pages, a font we cannot change (the web client draws on
-  a canvas with fonts built into its wasm).
-- Plan: the app draws the chat itself from `omp acp` (transcript, streaming,
-  tools, questions, subagents, `/sessions`), the way the user's chat wrapper for
-  kiro cli at work does. AGENT-1..7 move from Tern to it.
-- Until then: never open a Markdown file in Tern's web client. It panics the wasm
-  and freezes the whole chat, again on every reload, until the file block is
-  closed (`tern close <block>` with the session's `TERN_DAEMON_SOCKET` and
-  `TERN_CONFIG_DIR`). Upstream: stencil-hq/tern-sdk#78, open in 0.9.4 and 0.9.5.
+### Chat: our own UI on omp's RPC mode, replacing Tern (step 6b, building on `am/web-chat`)
+- Why now: the user lost a night's chat because Tern's `/sessions` did nothing; Tern
+  also cost an extra layer, upstream waits, a canvas font we could not change, and
+  bugs we had to filter around (acp-filter.ts, the Markdown-file panic).
+- Decided: omp runs as `omp --mode rpc-ui` (not ACP): its RPC mode has models, effort
+  levels, context usage, images in prompts, session switching, queue control, subagent
+  frames, and the ask dialog. omp://rpc.md is the reference.
+- Shape: a chat host in the session (`container/chat-host.ts`) owns omp's stdio, keeps
+  a mirror (finished messages from the session file's current branch, the running
+  run's frames, open dialogs, queue) and serves `shared/chat.ts`'s protocol on
+  `run/chat.sock`; the gateway authenticates the browser and pipes a WebSocket
+  (`<store>/sessions/<id>/chat`) to it unchanged; hubs forward the upgrade. No chat
+  hosts (`am-t-…`), no Tern token, no published port.
+- Drafts (CHAT-6) are files on the gateway per session and person
+  (`<state>/drafts/<session>/<person>.json`), mirrored in the browser's localStorage;
+  cleared only once omp accepted the prompt.
+- Pasted files go to the task's folder `chat/` through the folder route as the
+  person; images go to omp as prompt images.
+- Live sessions started by the Tern-era launcher cut over by themselves: a chat
+  socket opened on a running session without `chat.sock` restarts it on its newest
+  chat. The hub needs a deploy with an image rebuild.
+- Retired: AGENT-1, AGENT-3, AGENT-6, AGENT-7 (Tern's chat, Tern prompts, Tern's tree
+  bug, Tern's canvas fonts). New: CHAT-1..9.
 
 ## Backlog
 - Per-turn snapshots (TURN-1); TRANSCRIPT claims.
