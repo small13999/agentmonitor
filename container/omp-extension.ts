@@ -11,7 +11,7 @@ import { createServer, type Server, type Socket } from "node:net";
 interface Ctx {
   agent?: { kind: string };
   model?: { id: string };
-  sessionManager?: { getSessionFile?(): string | undefined };
+  sessionManager?: { getSessionFile?(): string | undefined; ensureOnDisk?(): unknown };
   getContextUsage?(): unknown;
   getSystemPrompt(): string | string[];
 }
@@ -122,6 +122,11 @@ export default function agentmonitor(api: ExtensionApi): void {
   main("session_start", (_event, ctx) => {
     live = ctx;
     if (server === null && socketPath !== undefined) listen(socketPath);
+  });
+  // omp keeps a new chat in memory until its first reply. The chat's file is where the card
+  // reads the prompt from, and what a restart resumes, so it is written from the first prompt.
+  main("agent_start", (_event, ctx) => {
+    if (socketPath !== undefined) ctx.sessionManager?.ensureOnDisk?.();
   });
   track("agent_start", () => { running = true; });
   track("agent_end", () => {

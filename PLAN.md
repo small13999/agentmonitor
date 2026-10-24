@@ -179,7 +179,7 @@ Still open:
 - The user's PC is not a persistent runner (it is off too often); it runs hub
   sessions only when the user asks for a local run.
 
-### Chat: our own UI on omp's RPC mode, replacing Tern (step 6b, building on `am/web-chat`)
+### Chat: our own UI on omp's RPC mode, replacing Tern (step 6b, built on `am/web-chat`)
 - Why now: the user lost a night's chat because Tern's `/sessions` did nothing; Tern
   also cost an extra layer, upstream waits, a canvas font we could not change, and
   bugs we had to filter around (acp-filter.ts, the Markdown-file panic).
@@ -202,6 +202,12 @@ Still open:
   chat. The hub needs a deploy with an image rebuild.
 - Retired: AGENT-1, AGENT-3, AGENT-6, AGENT-7 (Tern's chat, Tern prompts, Tern's tree
   bug, Tern's canvas fonts). New: CHAT-1..9.
+- omp keeps a new chat in memory until its first reply; the omp extension writes it to
+  disk at the first prompt (`ensureOnDisk`), so the card shows the prompt and a restart
+  resumes it.
+- Next: hub deploy (image rebuild); a tool line's timer starts at `tool_execution_start`,
+  so an `ask` shows 0.0s until omp starts it; ended sessions' chats are not shown yet
+  (SESSION-2 view).
 
 ## Backlog
 - Per-turn snapshots (TURN-1); TRANSCRIPT claims.
